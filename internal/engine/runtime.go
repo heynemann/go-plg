@@ -15,7 +15,6 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 // PageSize is the size of a wasm memory page.
@@ -56,7 +55,7 @@ func (e *Engine) NewRuntime(ctx context.Context, opts RuntimeOptions) *Runtime {
 		WithMemoryLimitPages(limitPages(opts.MemoryLimit))
 
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg)
-	wasi_snapshot_preview1.MustInstantiate(ctx, rt) // cannot fail on a fresh runtime
+	instantiateWASI(ctx, rt)
 
 	created := &Runtime{rt: rt, logger: e.logger, hosts: xsync.NewMap[string, *hostState]()}
 	created.instantiateHostModule(ctx, rt)
@@ -123,8 +122,9 @@ type InstanceOptions struct {
 }
 
 // Instantiate creates an instance of the module and runs the guest's reactor initialization. Instances have
-// clocks, sleep, a cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP only
-// through opts.HTTP; no environment and no sockets.
+// clocks, sleeps that end with the context of the call in progress (see [pollOneoff]), a cryptographic random
+// source, the given mounts, the argument list ["plugin"] and HTTP only through opts.HTTP; no environment and no
+// sockets.
 func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instance, error) {
 	fsCfg := wazero.NewFSConfig()
 	for _, mnt := range opts.Mounts {
@@ -142,7 +142,6 @@ func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instan
 		WithArgs("plugin").
 		WithSysWalltime().
 		WithSysNanotime().
-		WithSysNanosleep().
 		WithRandSource(rand.Reader).
 		WithFSConfig(fsCfg).
 		WithStdout(orDiscard(opts.Stdout)).

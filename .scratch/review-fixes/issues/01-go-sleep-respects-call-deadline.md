@@ -8,13 +8,13 @@ Approach suggested by the review (pick and document): a per-instance ctx-aware s
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] An integration test with a real Go plugin calling `time.Sleep(20*time.Second)` under a short deadline reproduces the bug (fails on the current code) and passes with the fix
-- [ ] The call returns within a small bound after its deadline with an error matching `context.DeadlineExceeded`, and the instance is discarded
-- [ ] A sleeping `Create` fails `Register` at Register's ctx deadline instead of blocking
-- [ ] `Container.Close(ctx)` returns by its ctx even while a refill `Create` is sleeping
-- [ ] Plain `time.Sleep` shorter than the deadline still works (sleep is not broken, just bounded)
-- [ ] Same behaviour verified for Lua/TS guests if they can reach the same WASI sleep path (or documented why not)
-- [ ] PLAN.md decision log updated
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] An integration test with a real Go plugin calling `time.Sleep(20*time.Second)` under a short deadline reproduces the bug (fails on the current code) and passes with the fix
+- [x] The call returns within a small bound after its deadline with an error matching `context.DeadlineExceeded`, and the instance is discarded
+- [x] A sleeping `Create` fails `Register` at Register's ctx deadline instead of blocking
+- [x] `Container.Close(ctx)` returns by its ctx even while a refill `Create` is sleeping
+- [x] Plain `time.Sleep` shorter than the deadline still works (sleep is not broken, just bounded)
+- [x] Same behaviour verified for Lua/TS guests if they can reach the same WASI sleep path (or documented why not)
+- [x] PLAN.md decision log updated
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

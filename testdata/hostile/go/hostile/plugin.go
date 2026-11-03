@@ -1,12 +1,14 @@
 // Package hostile is the hostile-corpus Go plugin for failures at call time: Fail(msg) misbehaves as msg says
-// ("panic", "oom", "recurse", "abort", "loop"; "print" writes to stdout first and then panics). Its other
-// methods behave like the reference fooer's, so each instance is healthy until provoked.
+// ("panic", "oom", "recurse", "abort", "loop", "sleep" for 20 s; "print" writes to stdout first and then
+// panics), except "nap", which sleeps for 10 ms and succeeds. Its other methods behave like the reference
+// fooer's, so each instance is healthy until provoked.
 package hostile
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
@@ -46,6 +48,12 @@ func (h *hostile) Fail(_ context.Context, msg string) error {
 	case "loop":
 		for {
 		}
+	case "sleep":
+		time.Sleep(20 * time.Second) // far past the deadline of the call
+	case "nap":
+		time.Sleep(10 * time.Millisecond)
+
+		return nil
 	case "print":
 		fmt.Println("hostile says hello on stdout")
 		println("and through the println builtin")

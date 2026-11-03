@@ -8,11 +8,11 @@ import (
 
 // fakeGuest assembles a tiny wasm module that exports one page of memory and the plg ABI functions with the
 // given bodies, so engine behavior can be tested against exact guest misbehavior without the real guest. It
-// may import plg host functions: import i is function index i, called with call(i).
+// may import plg host functions and WASI's poll_oneoff: import i is function index i, called with call(i).
 type fakeGuest struct {
 	bodies  map[string][]byte // export name -> function body (instructions, without the final end)
 	data    []byte            // placed at address 0
-	imports []string          // plg host functions, in function index order
+	imports []string          // imported functions, in function index order
 }
 
 const (
@@ -37,6 +37,8 @@ func signatureOf(export string) [2][]byte {
 		return [2][]byte{{i32, i32}, nil}
 	case "host_call", "http_start":
 		return [2][]byte{{i32, i32, i32}, {i32}}
+	case "poll_oneoff":
+		return [2][]byte{{i32, i32, i32, i32}, {i32}}
 	case "plg_start":
 		return [2][]byte{{i32, i32, i32}, {i64}}
 	default: // _initialize
@@ -58,6 +60,18 @@ func call(fn int) []byte { return append([]byte{0x10}, uleb(fn)...) }
 
 // drop drops the top of the stack.
 func drop() []byte { return []byte{0x1a} }
+
+// store32 is i32.store (alignment 1, offset 0): it stores the top of the stack at the address below it.
+func store32() []byte { return []byte{0x36, 0x00, 0x00} }
+
+// importModule is the module a fake guest imports function n from.
+func importModule(n string) string {
+	if n == "poll_oneoff" {
+		return "wasi_snapshot_preview1"
+	}
+
+	return "plg"
+}
 
 // spin is `loop br 0 end unreachable`.
 func spin() []byte { return []byte{0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00} }
@@ -97,7 +111,7 @@ func (g fakeGuest) wasm() []byte {
 		types.Write(results)
 
 		if i < len(g.imports) {
-			imports.Write(name("plg"))
+			imports.Write(name(importModule(n)))
 			imports.Write(name(n))
 			imports.WriteByte(0x00) // a function
 			imports.Write(uleb(i))

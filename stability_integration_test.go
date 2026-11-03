@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -26,6 +27,15 @@ import (
 // hostileLimit is the memory limit of the hostile corpus' instances: small, so that running out of memory is
 // quick and cheap.
 const hostileLimit = 48 * mib
+
+// stopBound bounds how long a plugin stopped by its context takes to return: far longer than the deadlines the
+// tests set, far shorter than the 20 s the hostile plugins sleep.
+const stopBound = 10 * time.Second
+
+// intoTheSleep is how long after a hostile plugin says it starts its 20 s sleep a test ends its context: by then
+// the plugin sleeps, however loaded the machine, so a sleep that ignored the context would show. With sleeps that
+// end with their context, the timing does not matter.
+const intoTheSleep = time.Second
 
 // corpus is a filesystem storage over the Go hostile corpus (testdata/hostile/go), listing only the given
 // plugin directories.
@@ -92,14 +102,15 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 		deadline bool
 	}{
 		{msg: "panic", guest: []string{
-			"/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)\n" +
-				"/gopath/src/plg.local/plugin/plugin.go:60:2: panic: plg.local/plugin.explode(...)\n" +
-				"/gopath/src/plg.local/plugin/plugin.go:35:9: panic: plg.local/plugin.Fail(...)\n",
+			"/gopath/src/plg.local/plugin/plugin.go:72:2: panic: plg.local/plugin.deeper(...)\n" +
+				"/gopath/src/plg.local/plugin/plugin.go:68:2: panic: plg.local/plugin.explode(...)\n" +
+				"/gopath/src/plg.local/plugin/plugin.go:37:9: panic: plg.local/plugin.Fail(...)\n",
 		}},
 		{msg: "oom", guest: []string{"fatal error: out of memory", "runtime.throw", "runtime.mallocgc"}},
 		{msg: "recurse", guest: []string{"fatal error: out of memory", "runtime.newstack", "runtime.morestack"}},
 		{msg: "abort", guest: []string{"fatal error: all goroutines are asleep - deadlock!", "reflect.Select"}},
 		{msg: "loop", deadline: true},
+		{msg: "sleep", deadline: true},
 	}
 
 	for _, tc := range tests {
@@ -112,7 +123,9 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 		require.NoError(t, err)
 		require.Equal(t, 1, n, "%s: a fresh instance before each failure", tc.msg)
 
+		start := time.Now()
 		err = hostile.Fail(ctx, tc.msg)
+		elapsed := time.Since(start)
 
 		cancel()
 
@@ -128,6 +141,7 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 
 		if tc.deadline {
 			require.ErrorIs(t, err, context.DeadlineExceeded, "the stop is told apart by its cause")
+			assert.Less(t, elapsed, stopBound, "%s: stopped at its deadline", tc.msg)
 			assert.Empty(t, failure.Guest, "no traceback exists for a stop: the runtime reports no stack")
 		} else {
 			require.NotErrorIs(t, err, context.DeadlineExceeded, tc.msg)
@@ -165,7 +179,7 @@ func TestGuestOutputIsLoggedWithThePluginKey(t *testing.T) {
 	assert.Contains(t, logged, `"msg":"plg: guest output","key":"chatty/hostile","stream":"stdout",`+
 		`"line":"and through the println builtin"`)
 	assert.Contains(t, logged, `"level":"WARN","msg":"plg: guest output","key":"chatty/hostile","stream":"stderr",`+
-		`"line":"/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)"`)
+		`"line":"/gopath/src/plg.local/plugin/plugin.go:72:2: panic: plg.local/plugin.deeper(...)"`)
 }
 
 func TestGoStatementsFailRegisterWithTheirPosition(t *testing.T) {
@@ -190,6 +204,113 @@ func TestCreateRunningOutOfMemoryFailsRegister(t *testing.T) {
 	failure := requirePanic(t, err, "fooer/createoom", plg.PhaseCreate)
 	assert.Contains(t, failure.Guest, "out of memory")
 	assert.Equal(t, []*plg.PanicError{failure}, ctr.RecentPanics())
+}
+
+func TestGoPluginSleepShorterThanItsDeadlineCompletes(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer", plg.WithStorage(corpus("hostile")),
+		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
+
+	served := instanceID(t, ctr, "fooer/hostile")
+
+	ctx, cancel := context.WithTimeout(t.Context(), stopBound)
+	defer cancel()
+
+	start := time.Now()
+	err := getFooer(t, ctr, "fooer/hostile").Fail(ctx, "nap")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "a 10 ms sleep within the deadline")
+	assert.GreaterOrEqual(t, elapsed, 10*time.Millisecond, "the plugin slept")
+	assert.Equal(t, served, instanceID(t, ctr, "fooer/hostile"), "a sleep is no failure: the instance serves on")
+	assert.Empty(t, ctr.RecentPanics())
+}
+
+// sleepyHost is the Host of the sleepycreate plugin: its Value has Create sleep from the from-th Create on
+// (counting from 1), calling asleep each time.
+type sleepyHost struct {
+	*testHost
+
+	asleep  func()
+	creates atomic.Int32
+	from    int32
+}
+
+func (h *sleepyHost) Value(context.Context) (string, error) {
+	if h.creates.Add(1) < h.from {
+		return "", nil
+	}
+
+	h.asleep()
+
+	return "sleep", nil
+}
+
+func TestSleepingCreateFailsRegisterAtItsDeadline(t *testing.T) {
+	t.Parallel()
+
+	ctx := make(expiring)
+
+	var expired atomic.Int64 // when Register's deadline passed, in Unix nanoseconds
+
+	host := &sleepyHost{testHost: newTestHost(), from: 1, asleep: func() {
+		time.AfterFunc(intoTheSleep, func() {
+			expired.Store(time.Now().UnixNano())
+			close(ctx)
+		})
+	}}
+
+	ctr := newContainer(t)
+	err := plg.Register[testcontract.Hosted](ctx, ctr, "sleepy", plg.WithStorage(corpus("sleepycreate")),
+		plg.WithHost[testcontract.Host](host), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit))
+	returned := time.Now()
+
+	require.ErrorIs(t, err, plg.ErrLoad)
+
+	failure := requirePanic(t, err, "sleepy/sleepycreate", plg.PhaseCreate)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Create was stopped at Register's deadline")
+	assert.Less(t, returned.Sub(time.Unix(0, expired.Load())), stopBound, "Register returned at its deadline")
+	assert.Equal(t, []*plg.PanicError{failure}, ctr.RecentPanics(), "reported once")
+}
+
+func TestContainerCloseStopsARefillSleepingInCreate(t *testing.T) {
+	t.Parallel()
+
+	type closing struct {
+		err  error
+		took time.Duration
+	}
+
+	ctr := newContainer(t)
+	closed := make(chan closing, 1)
+	host := &sleepyHost{testHost: newTestHost(), from: 2, asleep: sync.OnceFunc(func() {
+		time.AfterFunc(intoTheSleep, func() {
+			ctx, cancel := context.WithTimeout(t.Context(), stopBound)
+			defer cancel()
+
+			start := time.Now()
+			err := ctr.Close(ctx)
+
+			closed <- closing{err: err, took: time.Since(start)}
+		})
+	})}
+
+	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "sleepy",
+		plg.WithStorage(corpus("sleepycreate")), plg.WithHost[testcontract.Host](host), plg.WithPool(1, 1),
+		plg.WithMemoryLimit(hostileLimit)), "the first Create does not sleep")
+
+	sleepy, err := plg.Get[testcontract.Hosted](t.Context(), ctr, "sleepy/sleepycreate")
+	require.NoError(t, err)
+
+	_, err = sleepy.Relay(t.Context(), "panic")
+	failure := requirePanic(t, err, "sleepy/sleepycreate", plg.PhaseCall)
+	assert.Equal(t, "sleepycreate panicked on purpose", failure.Value, "the instance is discarded and replaced")
+
+	got := <-closed
+	assert.Less(t, got.took, stopBound, "Close returned by its context")
+	require.NoError(t, got.err, "the refill stopped with the pool: nothing was left to drain")
 }
 
 func TestCreatePanicIsAPanicError(t *testing.T) {

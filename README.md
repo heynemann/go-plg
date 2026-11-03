@@ -426,8 +426,9 @@ plg.Register[pricing.Rule](ctx, c, "pricing",
 - **Memory:** each instance's linear memory is capped (`WithMemoryLimit`, rounded down to 64 KiB pages; a
   plugin's `memoryLimit` may lower it). A call that needs more fails with a `PanicError` and its instance is
   replaced; others are unaffected.
-- **CPU:** every call stops when its `ctx` ends (deadline or cancellation), even in an infinite loop, and that
-  instance is replaced. Always call plugins with a deadline.
+- **CPU and time:** every call stops when its `ctx` ends (deadline or cancellation), even in an infinite loop or
+  a Go plugin's `time.Sleep` (or any wait for a timer), and that instance is replaced. `Create` stops the same way
+  at Register's `ctx`, and at `Container.Close` when the pool was starting it. Always call plugins with a deadline.
 - **Pool:** `WithPool(min, max)` (default `1, GOMAXPROCS`; `1 ≤ min ≤ max ≤ 4096`). Register starts `min`
   instances of each plugin (so a broken `Create` fails Register), a background goroutine keeps `min` warm and
   replaces discarded ones (retrying a failing `Create` with backoff from 100 ms to 30 s), and a call takes an idle
