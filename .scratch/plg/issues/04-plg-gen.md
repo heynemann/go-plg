@@ -9,10 +9,10 @@ It refuses contract packages that import anything outside the guest allowlist. T
 
 **Blocked by:** 02 (Tracer bullet)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Running go generate in a sample contract package produces code that compiles and passes the tracer tests unchanged
-- [ ] Changing the interface without regenerating fails `go build`
-- [ ] A contract package importing a disallowed package makes `plg gen` fail with a clear message
-- [ ] Generated output is deterministic (running twice gives no diff)
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] Running go generate in a sample contract package produces code that compiles and passes the tracer tests unchanged
+- [x] Changing the interface without regenerating fails `go build`
+- [x] A contract package importing a disallowed package makes `plg gen` fail with a clear message
+- [x] Generated output is deterministic (running twice gives no diff)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

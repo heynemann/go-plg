@@ -10,9 +10,12 @@
 # Excluded from the gate:
 #   - guestsrc/golang: the wasip1-only `package main` with the //go:wasmexport shims. It is not built for the
 #     host, so it never appears in the profile; its logic lives in internal/goguest, which is gated.
+#   - cmd/plg/main.go: the one-statement main of the plg command, `os.Exit(cli.Main(...))`. It cannot run
+#     inside a test process (os.Exit) and the go:generate integration test runs it as a subprocess, whose
+#     coverage go test does not collect; everything it calls lives in internal/cli, which is gated.
 #   - generated files (the Go convention's generated-code header line), found by scanning the tree: the
-#     yaegi symbol tables in guestsrc/golang/symbols. Their interface wrapper methods only run when a plugin
-#     calls through them.
+#     yaegi symbol tables in guestsrc/golang/symbols and the `plg gen` output in internal/testcontract. The
+#     symbol tables' interface wrapper methods only run when a plugin calls through them.
 #   - packages without statements (pure declarations) contribute nothing.
 set -euo pipefail
 
@@ -20,12 +23,13 @@ profile=${1:?usage: coverage-gate.sh <coverprofile> <min-percent>}
 min=${2:?usage: coverage-gate.sh <coverprofile> <min-percent>}
 
 module=$(go list -m)
-generated=$(grep -rlE --include='*.go' --exclude-dir=testdata '^// Code [g]enerated .* DO NOT E[D]IT\.$' . |
+excluded=$(grep -rlE --include='*.go' --exclude-dir=testdata '^// Code [g]enerated .* DO NOT E[D]IT\.$' . |
 	sed -e "s|^\./|$module/|" | tr '\n' ' ')
+excluded="$excluded $module/cmd/plg/main.go"
 
-awk -v min="$min" -v generated="$generated" '
+awk -v min="$min" -v excluded="$excluded" '
 	BEGIN {
-		n = split(generated, g, " ")
+		n = split(excluded, g, " ")
 		for (i = 1; i <= n; i++) skip[g[i]] = 1
 	}
 	NR == 1 { next } # mode line

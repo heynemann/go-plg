@@ -29,10 +29,8 @@ jobs:
           path: ~/.cache/plg
           key: plg-cache-${{ hashFiles('guest/**/*.wasm', 'go.sum') }}
       # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate, goleak,
-      # allocation budgets (uninstrumented).
+      # allocation budgets (uninstrumented), unit tests repeated with -count=10.
       - run: make check
-      - name: unit tests, repeated to flush out flakiness
-        run: go test -race -shuffle=on -count=10 ./...
 
   guests:
     name: guest artifacts are reproducible

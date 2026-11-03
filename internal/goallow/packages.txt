@@ -1,0 +1,34 @@
+# The Go guest's standard library allowlist: the only packages Go plugins and contract packages may import.
+# Single source of truth: the Makefile extracts the guest's yaegi symbol tables from this list, `plg gen` checks
+# contract packages against it. After editing it, run `make symbols guests`.
+#
+# cmp has no symbol table: yaegi compiles it from source, for its generic maps and slices.
+bufio
+bytes
+cmp
+context
+encoding/base64
+encoding/hex
+encoding/json
+errors
+fmt
+io
+maps
+math
+math/big
+math/bits
+math/cmplx
+math/rand
+math/rand/v2
+net/url
+regexp
+slices
+sort
+strconv
+strings
+sync
+sync/atomic
+time
+unicode
+unicode/utf16
+unicode/utf8

@@ -2,8 +2,6 @@ package goguest_test
 
 import (
 	"bytes"
-	"fmt"
-	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,7 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
+	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/goabi"
+	"github.com/heynemann/go-plg/internal/goallow"
 	"github.com/heynemann/go-plg/internal/goguest"
 	"github.com/heynemann/go-plg/internal/testcontract"
 	"github.com/heynemann/go-plg/internal/wire"
@@ -61,20 +61,10 @@ func gopathWith(t *testing.T, plugin map[string]string, dispatcher string) strin
 	t.Helper()
 
 	root := t.TempDir()
-	contractDir := filepath.Join(root, "src", fooerType().PkgPath())
-	require.NoError(t, os.MkdirAll(contractDir, 0o750))
-	require.NoError(t, fs.WalkDir(testcontract.Source, ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
 
-		data, err := fs.ReadFile(testcontract.Source, name)
-		if err != nil {
-			return fmt.Errorf("reading contract source: %w", err)
-		}
-
-		return os.WriteFile(filepath.Join(contractDir, name), data, 0o600)
-	}))
+	contract, err := contractsrc.Snapshot(os.DirFS(filepath.Join("..", "testcontract")))
+	require.NoError(t, err)
+	require.NoError(t, os.CopyFS(filepath.Join(root, "src", fooerType().PkgPath()), contract))
 
 	writeFiles(t, filepath.Join(root, "src", goabi.PluginImportPath), plugin)
 	writeFiles(t, filepath.Join(root, "src", goabi.DispatchImportPath), map[string]string{"dispatch.go": dispatcher})
@@ -368,16 +358,6 @@ func TestLoadFailures(t *testing.T) {
 	}
 }
 
-// allowlist is the agreed Go guest stdlib allowlist (PLAN.md), plus cmp, which yaegi's slices source needs.
-func allowlist() []string {
-	return []string{
-		"bufio", "bytes", "cmp", "context", "encoding/base64", "encoding/hex", "encoding/json", "errors", "fmt", "io",
-		"maps", "math", "math/big", "math/bits", "math/cmplx", "math/rand", "math/rand/v2", "net/url", "regexp",
-		"slices", "sort", "strconv", "strings", "sync", "sync/atomic", "time", "unicode", "unicode/utf16",
-		"unicode/utf8",
-	}
-}
-
 func importingPlugin(body string, imports ...string) map[string]string {
 	var src strings.Builder
 
@@ -401,7 +381,8 @@ func TestStdlibAllowlist(t *testing.T) {
 
 		var stdout bytes.Buffer
 
-		plugin := importingPlugin(`fmt.Println("ready")`, allowlist()...)
+		// Every package of the shared allowlist (internal/goallow) is importable.
+		plugin := importingPlugin(`fmt.Println("ready")`, goallow.Packages()...)
 		plugin["p.go"] = strings.Replace(plugin["p.go"], "\t_ \"fmt\"\n", "\t\"fmt\"\n", 1)
 
 		guest := goguest.New(&stdout, &stdout)

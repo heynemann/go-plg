@@ -1,6 +1,7 @@
 package guestreg_test
 
 import (
+	"crypto/rand"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,22 +15,30 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+// language returns a language name no other test run has registered: the registry is process-global and
+// cannot be reset, and CI runs every test several times in one process (-count=10).
+func language() string {
+	return "guestreg-test-" + rand.Text()
+}
+
 func TestRegisterAndLookup(t *testing.T) {
 	t.Parallel()
 
-	_, ok := guestreg.Lookup("guestreg-test-unregistered")
+	lang := language()
+
+	_, ok := guestreg.Lookup(lang)
 	assert.False(t, ok)
 
 	artifact := []byte("\x00asm")
 
 	guestreg.Register(guestreg.Guest{
-		Language: "guestreg-test-lang",
+		Language: lang,
 		Wasm:     func() ([]byte, error) { return artifact, nil },
 	})
 
-	g, ok := guestreg.Lookup("guestreg-test-lang")
+	g, ok := guestreg.Lookup(lang)
 	require.True(t, ok)
-	assert.Equal(t, "guestreg-test-lang", g.Language)
+	assert.Equal(t, lang, g.Language)
 
 	wasm, err := g.Wasm()
 	require.NoError(t, err)
@@ -40,15 +49,16 @@ func TestRegisterRejectsProgrammingErrors(t *testing.T) {
 	t.Parallel()
 
 	wasm := func() ([]byte, error) { return nil, nil }
+	dup, unregistered := language(), language()
 
-	guestreg.Register(guestreg.Guest{Language: "guestreg-test-dup", Wasm: wasm})
-	assert.PanicsWithValue(t, `guestreg: guest for language "guestreg-test-dup" registered twice`, func() {
-		guestreg.Register(guestreg.Guest{Language: "guestreg-test-dup", Wasm: wasm})
+	guestreg.Register(guestreg.Guest{Language: dup, Wasm: wasm})
+	assert.PanicsWithValue(t, `guestreg: guest for language "`+dup+`" registered twice`, func() {
+		guestreg.Register(guestreg.Guest{Language: dup, Wasm: wasm})
 	})
 
 	assert.Panics(t, func() { guestreg.Register(guestreg.Guest{Wasm: wasm}) }, "no language")
-	assert.Panics(t, func() { guestreg.Register(guestreg.Guest{Language: "guestreg-test-nil"}) }, "no artifact")
+	assert.Panics(t, func() { guestreg.Register(guestreg.Guest{Language: unregistered}) }, "no artifact")
 
-	_, ok := guestreg.Lookup("guestreg-test-nil")
+	_, ok := guestreg.Lookup(unregistered)
 	assert.False(t, ok, "a rejected guest is not registered")
 }

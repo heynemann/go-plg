@@ -11,17 +11,18 @@ COVERAGE := coverage.out
 COVERAGE_MIN := 95
 BENCH_OUT := bench.txt
 
-# The Go guest's standard library allowlist (PLAN.md). encoding/json is extracted separately: its Options
-# interface has a method on an internal type, so its wrapper cannot be generated and is excluded.
-GUEST_STDLIB := bufio bytes context encoding/base64 encoding/hex errors fmt io maps math math/big math/bits \
-	math/cmplx math/rand math/rand/v2 net/url regexp slices sort strconv strings sync sync/atomic time unicode \
-	unicode/utf16 unicode/utf8
+# The Go guest's standard library allowlist (PLAN.md) has one source, internal/goallow/packages.txt, which
+# `plg gen` and the tests read too. Symbol tables are extracted for every package except cmp (yaegi compiles it
+# from source) and encoding/json, extracted separately: its Options interface has a method on an internal type,
+# so its wrapper cannot be generated and is excluded.
+GUEST_ALLOWLIST := $(shell sed -e 's/#.*//' internal/goallow/packages.txt)
+GUEST_STDLIB := $(filter-out cmp encoding/json,$(GUEST_ALLOWLIST))
 GUEST_SYMBOLS := guestsrc/golang/symbols
 GO_GUEST := guest/golang/golang.wasm
 
-.PHONY: check fmt-check lint test coverage allocs bench symbols guests verify-guests clean
+.PHONY: check fmt-check lint test coverage allocs repeat bench symbols guests verify-guests clean
 
-check: fmt-check lint test coverage allocs
+check: fmt-check lint test coverage allocs repeat
 
 # Formatting must leave no diff.
 fmt-check:
@@ -42,6 +43,10 @@ coverage:
 # Allocation budgets (RULES.md §3). Coverage instrumentation changes inlining, so they run uninstrumented.
 allocs:
 	go test -race -shuffle=on -tags integration -count=1 -run 'DoNotAllocate' ./...
+
+# Unit tests repeated to flush out flakiness and state leaking between runs (RULES.md §2).
+repeat:
+	go test -race -shuffle=on -count=10 ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)

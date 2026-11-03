@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/heynemann/go-plg/guest/golang"
+	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/guestreg"
@@ -48,7 +49,9 @@ func overlay(t *testing.T, plugin string) *memfs.FS {
 
 	var tree memfs.Builder
 
-	require.NoError(t, tree.AddTree(path.Join("src", fooerType().PkgPath()), testcontract.Source, "."))
+	contract, err := contractsrc.Snapshot(os.DirFS(filepath.Join("..", "testcontract")))
+	require.NoError(t, err)
+	require.NoError(t, tree.AddTree(path.Join("src", fooerType().PkgPath()), contract, "."))
 	require.NoError(t, tree.AddTree(path.Join("src", goabi.PluginImportPath),
 		os.DirFS(filepath.Join("..", "..", "testdata", "plugins", "go", plugin)), "."))
 
