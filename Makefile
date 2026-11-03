@@ -69,7 +69,21 @@ LUA_GUEST := guest/lua/lua.wasm
 # it traps instead of overwriting data.
 LUA_STACK := 2097152
 
-.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests go-guest lua-guest verify-guests clean
+# QuickJS-ng's amalgamated release (the engine without its std and os modules, which plugins do not get).
+QUICKJS_VERSION := 0.18.0
+QUICKJS_URL := https://github.com/quickjs-ng/quickjs/releases/download/v$(QUICKJS_VERSION)/quickjs-amalgam.zip
+QUICKJS_SHA256 := 6c05066a6b62b483e2ba0f83d7a16688c6958182b214bfd693529434cef84a9e
+QUICKJS := $(PLG_BUILD_CACHE)/quickjs-ng-$(QUICKJS_VERSION)
+QUICKJS_FLAGS := -D_GNU_SOURCE -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_SIGNAL -I$(QUICKJS)
+# The TypeScript guest's wasm stack (wasm-ld's default is 64 KiB): QuickJS allows JS frames 1 MiB of it
+# (JS_STACK_LIMIT in glue.c), so deep recursion throws a RangeError with room to spare. Every instance's linear
+# memory holds it (a Go heap allocation on the host), so it is no larger: 4 MiB passed the same tests.
+TS_STACK := 2097152
+TS_GUEST := guest/typescript/typescript.wasm
+TS_SRC := guestsrc/typescript
+
+.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests go-guest lua-guest ts-guest \
+	verify-guests clean
 
 check: fmt-check lint test coverage allocs budgets repeat
 
@@ -119,7 +133,7 @@ symbols: $(BIN)/yaegi
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
-guests: go-guest lua-guest
+guests: go-guest lua-guest ts-guest
 
 # Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
 go-guest:
@@ -141,10 +155,22 @@ lua-guest: $(WASI_CC) $(LUA)/src/lua.h
 		-o $(LUA_GUEST) $(LUA_CORE:%=$(LUA)/src/%.c) guestsrc/lua/*.c -lsetjmp
 	chmod 644 $(LUA_GUEST)
 
+$(QUICKJS)/quickjs-amalgam.c:
+	scripts/fetch-pinned.sh $(QUICKJS_URL) $(QUICKJS_SHA256) $(QUICKJS)
+
+# Build the TypeScript guest: QuickJS-ng and the plg glue (with the prelude embedded) as a wasip1 reactor.
+ts-guest: $(WASI_CC) $(QUICKJS)/quickjs-amalgam.c
+	mkdir -p $(BIN)
+	$(WASI_CC) $(WASI_CFLAGS) $(QUICKJS_FLAGS) -w -c -o $(BIN)/quickjs.o $(QUICKJS)/quickjs-amalgam.c
+	$(WASI_CC) $(WASI_CFLAGS) $(QUICKJS_FLAGS) -Wall -Wextra -Werror -c -o $(BIN)/ts-glue.o $(TS_SRC)/glue.c
+	$(WASI_CC) $(WASI_CFLAGS) -mexec-model=reactor -Wl,-z,stack-size=$(TS_STACK) -Wl,--strip-debug \
+		-o $(TS_GUEST) $(BIN)/quickjs.o $(BIN)/ts-glue.o -lwasi-emulated-process-clocks -lwasi-emulated-signal
+	chmod 644 $(TS_GUEST)
+
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests
-	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST)
-	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST))"
+	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST)
+	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST))"
 
 clean:
 	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT)

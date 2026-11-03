@@ -10,11 +10,11 @@
 
 **Blocked by:** 03 (Full data-type encoding), 05 (Filesystem and fs.FS storages), 08 (Typed Host interface), 09 (Host-mediated HTTP)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The same contract tests that pass for Go plugins pass for an equivalent TS plugin, including all data types
-- [ ] Multi-file TS plugins with relative imports bundle and run
-- [ ] Async methods and `await host.X()` / `await fetch()` work; fetch obeys the HTTP policy
-- [ ] TS plugins that throw, run out of memory, recurse or loop return errors and the host survives
-- [ ] The guest artifact is rebuilt and checked for reproducibility in CI
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] The same contract tests that pass for Go plugins pass for an equivalent TS plugin, including all data types
+- [x] Multi-file TS plugins with relative imports bundle and run
+- [x] Async methods and `await host.X()` / `await fetch()` work; fetch obeys the HTTP policy
+- [x] TS plugins that throw, run out of memory, recurse or loop return errors and the host survives
+- [x] The guest artifact is rebuilt and checked for reproducibility in CI
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

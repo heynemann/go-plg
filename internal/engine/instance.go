@@ -38,6 +38,12 @@ const (
 // ptrShift is where the ABI packs a result buffer's pointer: ptr<<32 | len.
 const ptrShift = 32
 
+// FlagDeepStack is a flag a guest may set on any result's status byte: the step ran deep on the guest's stack.
+// wazero then grew the native stack it ran the export on, which it keeps with the export's function, so the
+// instance replaces the function to let that memory go. The flag never changes what the status means. Only the
+// TypeScript guest sets it (see guestsrc/typescript/glue.c), so it is not part of internal/wire.
+const FlagDeepStack = 0x80
+
 // Instance is one guest instance speaking the plg ABI. It is NOT safe for concurrent use: one goroutine owns
 // it at a time. Once [Instance.Broken] reports true it must be closed, never called again: wazero leaves a
 // trapped instance callable, and it then answers with garbage.
@@ -107,7 +113,7 @@ func (in *Instance) Init(ctx context.Context, payload []byte) (Result, error) {
 
 	in.stack[0] = uint64(len(payload))
 
-	return in.invoke(ctx, in.init, in.stack[:1])
+	return in.invoke(ctx, &in.init, in.stack[:1])
 }
 
 // Call sends the encoded arguments to plg_call for the method with the given index.
@@ -119,7 +125,7 @@ func (in *Instance) Call(ctx context.Context, method uint32, args []byte) (Resul
 
 	in.stack[0], in.stack[1] = uint64(method), uint64(len(args))
 
-	return in.invoke(ctx, in.call, in.stack[:2])
+	return in.invoke(ctx, &in.call, in.stack[:2])
 }
 
 // Close frees the instance. First, on a healthy instance and while ctx lives, it runs plg_close, which calls the
@@ -131,7 +137,7 @@ func (in *Instance) Close(ctx context.Context) error {
 	if !in.broken && ctx.Err() == nil {
 		var res Result
 
-		res, err = in.invoke(ctx, in.close, in.stack[:1])
+		res, err = in.invoke(ctx, &in.close, in.stack[:1])
 		if err == nil && res.Status != wire.StatusOK {
 			err = &CloseError{Status: res.Status, Message: res.Message}
 		}
@@ -166,13 +172,17 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 	return nil
 }
 
-// invoke calls fn, whose packed result names a status-prefixed buffer, and validates that buffer.
-func (in *Instance) invoke(ctx context.Context, fn api.Function, stack []uint64) (Result, error) {
+// invoke calls *fn, whose packed result names a status-prefixed buffer, and validates that buffer. After a step
+// flagged [FlagDeepStack], *fn becomes a fresh function of the same export: the old one holds the native
+// stack wazero grew for the step (tens of MiB for a deep JS recursion) and never shrinks it.
+//
+//nolint:gocritic // ptrToRefParam: the pointer is the point, invoke replaces the caller's function
+func (in *Instance) invoke(ctx context.Context, fn *api.Function, stack []uint64) (Result, error) {
 	in.host.begin()
 
-	err := fn.CallWithStack(ctx, stack)
+	err := (*fn).CallWithStack(ctx, stack)
 	if err != nil {
-		return Result{}, in.fail(fmt.Errorf("%s: %w", fn.Definition().ExportNames()[0], err))
+		return Result{}, in.fail(fmt.Errorf("%s: %w", exportName(*fn), err))
 	}
 
 	ptr, size := uint32(stack[0]>>ptrShift), uint32(stack[0]) //nolint:gosec // G115: two packed uint32 halves
@@ -180,6 +190,10 @@ func (in *Instance) invoke(ctx context.Context, fn api.Function, stack []uint64)
 	view, ok := in.mem.Read(ptr, size)
 	if !ok || size == 0 {
 		return Result{}, in.fail(fmt.Errorf("%w: invalid result buffer (%d bytes at %#x)", ErrABI, size, ptr))
+	}
+
+	if view[0]&FlagDeepStack != 0 {
+		*fn = in.mod.ExportedFunction(exportName(*fn))
 	}
 
 	res, err := parseResult(view)
@@ -194,9 +208,15 @@ func (in *Instance) invoke(ctx context.Context, fn api.Function, stack []uint64)
 	return res, nil
 }
 
-// parseResult splits a result buffer into its status and body, decoding the message of non-OK statuses.
+// exportName returns the name fn is exported under.
+func exportName(fn api.Function) string {
+	return fn.Definition().ExportNames()[0]
+}
+
+// parseResult splits a result buffer into its status, without the deep-stack flag, and its body, decoding the
+// message of non-OK statuses.
 func parseResult(view []byte) (Result, error) {
-	status := wire.Status(view[0])
+	status := wire.Status(view[0] &^ FlagDeepStack)
 
 	switch status {
 	case wire.StatusOK:

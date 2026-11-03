@@ -487,9 +487,10 @@ func TestLanguageAllowlist(t *testing.T) {
 			},
 		},
 		{
+			// Likewise the TypeScript plugin: its guest is not linked, or it is but the plugin has no files.
 			name: "typescript only", storages: []plg.Storage{goOnly, scripts},
 			opts:    []plg.RegisterOption{plg.WithTypescriptPlugins()},
-			want:    plg.ErrUnsupportedLanguage,
+			failsOn: "t (storage scripts)",
 			skipped: []skipRecord{skipped("g", "go", "go"), skipped("l", "scripts", "lua")},
 		},
 		{

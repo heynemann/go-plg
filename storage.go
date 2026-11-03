@@ -23,8 +23,14 @@ const LanguageGo Language = "go"
 // [ErrUnsupportedLanguage].
 const LanguageLua Language = "lua"
 
-// LanguageTypeScript is a TypeScript plugin. No TypeScript guest exists yet: Register fails every TypeScript
-// plugin it does not skip with [ErrUnsupportedLanguage].
+// LanguageTypeScript is a TypeScript (or JavaScript) plugin: its entrypoint file exports
+// function Create() returning an object whose methods implement the interface (methods may be async; Create too).
+// esbuild bundles the entrypoint and the files it imports, by relative paths inside the plugin only, and
+// QuickJS-ng runs the bundle with the ECMAScript built-ins plus console (to the log), host (the [WithHost]
+// interface's methods, returning Promises) and fetch (through [WithHTTP]'s policy). Values cross by the interface's
+// types: struct fields by json name, nil slices, maps and pointers as null, []byte as Uint8Array, time.Time as
+// {seconds, nanos} (a Date too, on the way back), several results as an array; a thrown error is the call's
+// error. Running TypeScript plugins needs the guest: import _ "github.com/heynemann/go-plg/guest/typescript".
 const LanguageTypeScript Language = "typescript"
 
 // Storage lists plugins and opens their sources. A storage belongs to one Register call: every plugin it lists

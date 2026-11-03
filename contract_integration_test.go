@@ -12,6 +12,7 @@ import (
 
 	"github.com/heynemann/go-plg"
 	_ "github.com/heynemann/go-plg/guest/lua"
+	_ "github.com/heynemann/go-plg/guest/typescript"
 )
 
 // contractLanguage is a guest language the contract suite holds to the same behaviour (RULES.md §2): the suite's
@@ -42,9 +43,16 @@ func luaLanguage() contractLanguage {
 	return contractLanguage{lang: plg.LanguageLua, dir: "lua", entry: "plugin.lua", field: jsonName, exactInts: true}
 }
 
+// typescript is the contract language of TypeScript plugins: its numbers are float64, exact to 2^53 only.
+func typescript() contractLanguage {
+	return contractLanguage{
+		lang: plg.LanguageTypeScript, dir: "typescript", entry: "plugin.ts", field: jsonName, exactInts: false,
+	}
+}
+
 // contractLanguages returns every language the contract suite runs against.
 func contractLanguages() []contractLanguage {
-	return []contractLanguage{golang(), luaLanguage()}
+	return []contractLanguage{golang(), luaLanguage(), typescript()}
 }
 
 // eachLanguage runs test as a parallel subtest per contract language.

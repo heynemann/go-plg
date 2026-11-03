@@ -6,6 +6,7 @@ toolchain go1.27.3
 
 require (
 	github.com/bytedance/sonic v1.15.5
+	github.com/evanw/esbuild v0.28.2
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tetratelabs/wazero v1.12.0

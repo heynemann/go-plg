@@ -202,6 +202,17 @@ func (c *Client) request(ctx context.Context, xch *exchange, raw []byte) (*http.
 		return nil, nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 
+	// The transport writes Host, Content-Length and Transfer-Encoding itself and skips the header's entries of
+	// those names, but only under their canonical names: canonicalized, a plugin's own (in any case, as a
+	// script's fetch sends them) can neither reach another virtual host nor frame the request differently.
+	for name, values := range decoded.Header {
+		if canonical := http.CanonicalHeaderKey(name); canonical != name {
+			delete(decoded.Header, name)
+
+			decoded.Header[canonical] = append(decoded.Header[canonical], values...)
+		}
+	}
+
 	hreq.Header = decoded.Header
 
 	return hreq, cancel, nil

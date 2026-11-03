@@ -285,6 +285,56 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 		"the encoded response holds the body")
 }
 
+// TestMetricsCoverEveryLanguage: the layer every guest shares measures a plugin's load, calls, HTTP requests and
+// memory alike, whatever its language.
+func TestMetricsCoverEveryLanguage(t *testing.T) {
+	t.Parallel()
+
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		ctx := t.Context()
+		reader := newMetricsReader(t)
+		api := newAPIServer(t)
+		ctr := newContainer(t, plg.WithMeterProvider(reader.provider))
+
+		store := lang.storage(t, "m", map[string]string{"ref": "fooer"})
+		require.NoError(t, plg.Register[testcontract.Fooer](ctx, ctr, "m", plg.WithStorage(store)))
+
+		ref := getFooer(t, ctr, "m/ref")
+		_, err := ref.Foo(ctx, "metrics")
+		require.NoError(t, err)
+		require.Error(t, ref.Fail(ctx, "plugin error"))
+
+		fetch := fetcherIn(t, lang, ctr, "web", plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
+		_, err = fetch.Foo(ctx, "GET "+api.URL+"/v1/items")
+		require.NoError(t, err)
+
+		got := reader.collect(t)
+		mref, language := attribute.String("key", "m/ref"), attribute.String("language", string(lang.lang))
+
+		assert.Equal(
+			t,
+			int64(1),
+			got.int64Value(t, "plg.plugin.loads", mref, language, attribute.String("outcome", "ok")),
+		)
+		assert.Equal(
+			t,
+			int64(1),
+			got.int64Value(t, "plg.plugin.calls", mref, language, attribute.String("method", "Foo"),
+				attribute.String("outcome", "ok")),
+		)
+		assert.Equal(t, int64(1), got.int64Value(t, "plg.plugin.call.errors", mref, language,
+			attribute.String("method", "Fail"), attribute.String("outcome", "error")))
+		assert.Equal(t, int64(1), got.int64Value(t, "plg.http.requests", attribute.String("key", "web/fetch"),
+			attribute.String("outcome", "ok"), attribute.Int("status", 200)))
+
+		memory := got.int64Value(t, "plg.plugin.memory", mref)
+		assert.Positive(t, memory)
+		assert.Zero(t, memory%(64<<10), "whole wasm pages")
+	})
+}
+
 // BenchmarkCallGoMetered is BenchmarkCallGo with an OpenTelemetry SDK meter provider collecting every
 // measurement, against BenchmarkCallGo's default global (no-op) provider: the cost of metrics on a call.
 func BenchmarkCallGoMetered(b *testing.B) {

@@ -41,6 +41,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.3"
+      # The pinned wasi-sdk and C sources (checksum-verified by scripts/fetch-pinned.sh), keyed by the pins.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/plg-build
+          key: plg-build-${{ hashFiles('Makefile') }}
       - run: make verify-guests
 
   bench:

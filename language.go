@@ -40,10 +40,10 @@ func loaderFor(lang Language) (loader, error) {
 	switch lang {
 	case LanguageGo:
 		return goLoader{}, nil
+	case LanguageTypeScript:
+		return tsLoader{}, nil
 	case LanguageLua:
 		return luaLoader{}, nil
-	case LanguageTypeScript:
-		return nil, fmt.Errorf("%w %q: this build has no loader for it", ErrUnsupportedLanguage, lang)
 	default:
 		return nil, fmt.Errorf("%w %q", ErrUnsupportedLanguage, lang)
 	}

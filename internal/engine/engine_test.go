@@ -316,6 +316,23 @@ func TestResults(t *testing.T) {
 		{"load failure", "syntax", statusMessage(wire.StatusLoad, "syntax"), nil, wire.StatusLoad, false},
 		{"panic breaks the instance", "oops", statusMessage(wire.StatusPanic, "oops"), nil, wire.StatusPanic, true},
 		{"abi rejection breaks the instance", "bad", statusMessage(wire.StatusABI, "bad"), nil, wire.StatusABI, true},
+		// A step that ran deep flags its status; the status means the same, and the instance keeps serving, on a
+		// fresh function of each export (the call after Init runs on one).
+		{
+			"deep-stack flag on ok", "",
+			[]byte{byte(wire.StatusOK) | engine.FlagDeepStack, 7},
+			[]byte{7},
+			wire.StatusOK,
+			false,
+		},
+		{
+			"deep-stack flag on a plugin error", "boom", flagged(statusMessage(wire.StatusError, "boom")), nil,
+			wire.StatusError, false,
+		},
+		{
+			"deep-stack flag on a panic", "oops", flagged(statusMessage(wire.StatusPanic, "oops")), nil,
+			wire.StatusPanic, true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -346,6 +363,13 @@ func TestResults(t *testing.T) {
 			assert.NoError(t, inst.Close(t.Context()))
 		})
 	}
+}
+
+// flagged returns result with the deep-stack flag set on its status.
+func flagged(result []byte) []byte {
+	result[0] |= engine.FlagDeepStack
+
+	return result
 }
 
 func TestCloseReportsAFailingPluginClose(t *testing.T) {
@@ -396,6 +420,10 @@ func TestABIViolations(t *testing.T) {
 		{"result beyond memory", "invalid result buffer", fakeGuest{data: ok, bodies: abiOK(engine.PageSize-1, 2)}},
 		{"zero status", "invalid status 0", fakeGuest{data: []byte{0}, bodies: abiOK(0, 1)}},
 		{"unknown status", "invalid status 99", fakeGuest{data: []byte{99}, bodies: abiOK(0, 1)}},
+		{
+			"deep-stack flag without a status", "invalid status 128",
+			fakeGuest{data: []byte{engine.FlagDeepStack}, bodies: abiOK(0, 1)},
+		},
 		{
 			"truncated message", wire.ErrTruncated.Error(),
 			fakeGuest{data: []byte{byte(wire.StatusError), 9, 0, 0, 0, 'x'}, bodies: abiOK(0, 6)},

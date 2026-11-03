@@ -16,6 +16,7 @@ import (
 	// and plg.Warm compiles what is registered.
 	_ "github.com/heynemann/go-plg/guest/golang"
 	_ "github.com/heynemann/go-plg/guest/lua"
+	_ "github.com/heynemann/go-plg/guest/typescript"
 	"github.com/heynemann/go-plg/internal/buildguest"
 	"github.com/heynemann/go-plg/internal/gen"
 )

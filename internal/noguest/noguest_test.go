@@ -23,21 +23,36 @@ func TestMain(m *testing.M) {
 func TestRegisterNamesTheMissingGuestImport(t *testing.T) {
 	t.Parallel()
 
-	_, linked := guestreg.Lookup(string(plg.LanguageGo))
-	require.False(t, linked, "this test binary must not link the Go guest")
-
-	store := plg.NewMemoryStorage("mem")
-	files := fstest.MapFS{"plugin.go": {Data: []byte("package p\n")}}
-	require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
+	tests := []struct {
+		lang  plg.Language
+		entry string
+		guest string // the import naming the guest
+	}{
+		{lang: plg.LanguageGo, entry: "plugin.go", guest: "github.com/heynemann/go-plg/guest/golang"},
+		{lang: plg.LanguageTypeScript, entry: "plugin.ts", guest: "github.com/heynemann/go-plg/guest/typescript"},
+	}
 
 	ctr := plg.New()
 
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 
-	err := plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer", plg.WithStorage(store))
-	require.ErrorIs(t, err, plg.ErrGuestNotLinked)
-	require.ErrorContains(t, err, `import _ "github.com/heynemann/go-plg/guest/golang"`)
-	require.ErrorContains(t, err, "plugin k (storage mem)")
+	for _, tc := range tests {
+		t.Run(string(tc.lang), func(t *testing.T) {
+			t.Parallel()
+
+			_, linked := guestreg.Lookup(string(tc.lang))
+			require.False(t, linked, "this test binary must not link the %s guest", tc.lang)
+
+			store := plg.NewMemoryStorage("mem")
+			files := fstest.MapFS{tc.entry: {Data: []byte("package p\n")}}
+			require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: tc.lang, Entrypoint: tc.entry}, files))
+
+			err := plg.Register[testcontract.Fooer](t.Context(), ctr, string(tc.lang), plg.WithStorage(store))
+			require.ErrorIs(t, err, plg.ErrGuestNotLinked)
+			require.ErrorContains(t, err, `import _ "`+tc.guest+`"`)
+			require.ErrorContains(t, err, "plugin k (storage mem)")
+		})
+	}
 }
 
 func TestWarmNeedsALinkedGuest(t *testing.T) {
