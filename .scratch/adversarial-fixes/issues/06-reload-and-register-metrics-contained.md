@@ -8,9 +8,11 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests with a meter provider that starts panicking after registration, for a reload round and for Register reproduces the bug (fails on the current code) and passes with the fix
-The host survives, the reloader keeps running, PhaseCallback entries are recorded, and no version/instance/budget leaks (asserted via test hooks)
-An audit list of all instrument call sites is recorded in PLAN.md with each one guarded
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Tests with a meter provider that starts panicking after registration, for a reload round and for Register reproduces the bug (fails on the current code) and passes with the fix
+- [x] The host survives, the reloader keeps running, PhaseCallback entries are recorded, and no version/instance/budget leaks (asserted via test hooks)
+- [x] An audit list of all instrument call sites is recorded in PLAN.md with each one guarded
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+
+Resolution: every lifecycle measurement (`countLoad`, `countReloadFailure`, `countSkipped`, now `Container` methods) runs through the panic reporter's callback guard and is taken only once what it counts has an owner (the Register's plugins, the round's `changes.loaded`); the audit also guarded `New`'s instrument creation and callback registration, `Close`'s unregistration and the gauges' observations. `TestReloadRoundsContainAPanickingMeterProvider` and `TestReloadContainsAPanickingMeterProvider` crashed the test binary from the reloader goroutine before the fix; `TestRegisterContainsAPanickingMeterProvider` and `TestCountingSkippedPluginsContainsAPanickingMeterProvider` saw Register panic (leaking an instance, its reservations and the name); `TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer` and `TestObservingAPoolContainsAPanickingObserver` cover the audit's other sites. All pass with the fix; the audit table is in PLAN.md (Adversarial review fixes, 06).

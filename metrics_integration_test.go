@@ -338,6 +338,96 @@ func TestMetricsCoverEveryLanguage(t *testing.T) {
 	})
 }
 
+// goInstance is the memory limit of one Go plugin instance: the Register default.
+const goInstance = 128 * mib
+
+// TestRegisterContainsAPanickingMeterProvider registers Go plugins while every measurement panics: each count of a
+// load, ok or failed, is a PanicError in PhaseCallback; a Register whose plugins load succeeds, and one whose
+// plugin cannot be created returns ErrLoad and leaks nothing: no instance, no version's reservation, not its name.
+func TestRegisterContainsAPanickingMeterProvider(t *testing.T) {
+	t.Parallel()
+
+	broken := new(atomic.Bool)
+	broken.Store(true)
+
+	ctr := newContainer(t, plg.WithMeterProvider(brokenMeters{broken: broken}))
+	register := func(name string, versions map[string]string) error {
+		store := plg.NewMemoryStorage(name)
+		for key, version := range versions {
+			putVersioned(t, store, key, version)
+		}
+
+		var err error
+
+		require.NotPanics(t, func() {
+			err = plg.Register[testcontract.Fooer](t.Context(), ctr, name, plg.WithStorage(store), plg.WithPool(1, 1))
+		}, "registering %s", name)
+
+		return err
+	}
+	inUse := func(t *testing.T, instances uint64, msg string) {
+		t.Helper()
+		assert.Equal(t, instances*goInstance, plg.MemoryInUse(ctr), "%s: instances alive", msg)
+		assert.Equal(t, instances*goInstance, plg.MemoryReserved(ctr), "%s: versions held", msg)
+	}
+
+	require.NoError(t, register("ok", map[string]string{"a": "v1", "b": "v1"}))
+	assert.Equal(t, "v1", plg.Version(ctr, "ok/a"))
+	assert.Equal(t, "v1", plg.Version(ctr, "ok/b"))
+	inUse(t, 2, "both published")
+	assert.Equal(t, []string{"ok/a", "ok/b"}, meterPanicKeys(t, ctr.RecentPanics()), "counting each load")
+
+	require.ErrorIs(t, register("bad", map[string]string{"a": "v1", "b": "create-fails"}), plg.ErrLoad)
+	assert.Nil(t, plg.Generation(ctr, "bad/a"), "nothing published")
+	inUse(t, 2, "bad/a closed")
+	assert.Equal(t, []string{"ok/a", "ok/b", "bad/a", "bad/b"}, meterPanicKeys(t, ctr.RecentPanics()),
+		"counting bad/a's load, then bad/b's failure")
+
+	require.NoError(t, register("bad", map[string]string{"a": "v1"}), "the failed Register gave its name back")
+	inUse(t, 3, "bad/a published")
+}
+
+// TestReloadContainsAPanickingMeterProvider reloads a Go plugin once every measurement panics: counting the new
+// version's load, and a broken update's failed load and reload failure, are PanicErrors in PhaseCallback; the
+// update is served, the broken one is not, nothing leaks (instances, versions' reservations) and the reloader keeps
+// serving rounds.
+func TestReloadContainsAPanickingMeterProvider(t *testing.T) {
+	t.Parallel()
+
+	broken := new(atomic.Bool)
+	ctr := newContainer(t, plg.WithMeterProvider(brokenMeters{broken: broken}))
+	store := plg.NewMemoryStorage("metered")
+	putVersioned(t, store, "k", "v1")
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "metered", plg.WithStorage(store),
+		plg.WithPool(1, 1)))
+
+	broken.Store(true)
+
+	served := func(t *testing.T, version string) {
+		t.Helper()
+		require.NoError(t, plg.AwaitRetired(t.Context(), ctr))
+		assert.Equal(t, version, plg.Version(ctr, "metered/k"))
+		assert.Equal(t, uint64(goInstance), plg.MemoryInUse(ctr), "%s's one instance alone", version)
+		assert.Equal(t, uint64(goInstance), plg.MemoryReserved(ctr), "%s alone", version)
+	}
+
+	putVersioned(t, store, "k", "v2")
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "metered"))
+	served(t, "v2")
+	assert.Equal(t, []string{"metered/k"}, meterPanicKeys(t, ctr.RecentPanics()), "counting the load")
+
+	putVersioned(t, store, "k", "create-fails")
+	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "metered"), plg.ErrLoad)
+	served(t, "v2")
+	assert.Equal(t, []string{"metered/k", "metered/k", "metered/k"}, meterPanicKeys(t, ctr.RecentPanics()),
+		"counting the failed load and the reload failure")
+
+	putVersioned(t, store, "k", "v3")
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "metered"), "the reloader serves the next round")
+	served(t, "v3")
+	assert.Equal(t, "v3:x", greet(t, getFooer(t, ctr, "metered/k"), "x"))
+}
+
 // BenchmarkCallGoMetered is BenchmarkCallGo with an OpenTelemetry SDK meter provider collecting every
 // measurement, against BenchmarkCallGo's default global (no-op) provider: the cost of metrics on a call.
 func BenchmarkCallGoMetered(b *testing.B) {

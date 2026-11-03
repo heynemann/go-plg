@@ -54,7 +54,9 @@ const meterName = "github.com/heynemann/go-plg"
 // The gauges (instances, in use, calls in flight, memory) cover the plugin versions the container serves; a
 // version replaced by a reload is no longer observed while it drains. Measurements on the call path use attribute
 // sets built once per plugin version, so recording them does not allocate beyond what the provider's SDK does. A
-// panic in the provider's instruments is reported as a [PanicError] in [PhaseCallback] and never fails a call.
+// panic in the provider (creating an instrument, recording or observing a measurement, registering or
+// unregistering the gauges' callback) is reported as a [PanicError] in [PhaseCallback] and never fails New,
+// Register, a reload, a call or Close; the instruments it left uncreated do nothing.
 func WithMeterProvider(provider metric.MeterProvider) Option {
 	return func(c *containerConfig) {
 		c.meterProvider = provider
@@ -138,7 +140,9 @@ func orNoop[I any](inst I, err error, fallback I, errs *[]error) I {
 }
 
 // instrument creates the container's instruments from its configured provider, the global one by default, and
-// registers the callback observing its pools. Failures are logged; the instruments concerned do nothing.
+// registers the callback observing its pools, then has the panic reporter count panics with them. Failures are
+// logged; the instruments concerned do nothing. A panic in the provider meanwhile is reported as a [PanicError]
+// in [PhaseCallback], and the instruments it left uncreated do nothing too.
 func (c *Container) instrument(cfg *containerConfig) {
 	provider := cfg.meterProvider
 	if provider == nil {
@@ -147,13 +151,21 @@ func (c *Container) instrument(cfg *containerConfig) {
 
 	var err, regErr error
 
-	c.meters, err = newInstruments(provider)
+	c.panics.callback(context.Background(), "", "", meterMethod, func() {
+		c.meters, err = newInstruments(provider)
+		c.observation, regErr = provider.Meter(meterName).RegisterCallback(c.observe, c.meters.instances,
+			c.meters.inUse, c.meters.inFlight, c.meters.memory)
+	})
 
-	c.observation, regErr = provider.Meter(meterName).RegisterCallback(c.observe, c.meters.instances,
-		c.meters.inUse, c.meters.inFlight, c.meters.memory)
-	if regErr != nil {
+	if c.meters == nil { // the provider panicked creating them: no-op instruments, which never fail
+		c.meters, err = newInstruments(noop.NewMeterProvider())
+	}
+
+	if regErr != nil || c.observation == nil { // failed, or panicked
 		c.observation = noop.Registration{}
 	}
+
+	c.panics.meters = c.meters
 
 	err = errors.Join(err, regErr)
 	if err != nil {
@@ -162,23 +174,36 @@ func (c *Container) instrument(cfg *containerConfig) {
 	}
 }
 
+// unobserve unregisters the callback observing the pools. A panic in the provider is reported as a [PanicError]
+// in [PhaseCallback].
+func (c *Container) unobserve(ctx context.Context) error {
+	var err error
+
+	c.panics.callback(ctx, "", "", meterMethod, func() { err = c.observation.Unregister() })
+
+	return err //nolint:wrapcheck // Close wraps every failure it returns
+}
+
 // observe reports the gauges of every plugin version the container serves.
-func (c *Container) observe(_ context.Context, obs metric.Observer) error {
+func (c *Container) observe(ctx context.Context, obs metric.Observer) error {
 	for _, gen := range c.catalogue.Load().plugins {
-		gen.pool.observe(obs)
+		gen.pool.observe(ctx, obs)
 	}
 
 	return nil
 }
 
-// observe reports the pool's gauges: its instances, those in use, the calls they serve and their memory.
-func (p *pool) observe(obs metric.Observer) {
+// observe reports the pool's gauges: its instances, those in use, the calls they serve and their memory. A panic
+// in the observer is reported as a [PanicError] in [PhaseCallback].
+func (p *pool) observe(ctx context.Context, obs metric.Observer) {
 	inst, opts := p.meters.inst, p.meters.observe
 
-	obs.ObserveInt64(inst.instances, int64(p.size.Load()), opts...)
-	obs.ObserveInt64(inst.inUse, int64(p.inUse.Load()), opts...)
-	obs.ObserveInt64(inst.inFlight, int64(p.busy.Load()), opts...)
-	obs.ObserveInt64(inst.memory, p.memory.Load(), opts...)
+	p.guard(ctx, meterMethod, func() {
+		obs.ObserveInt64(inst.instances, int64(p.size.Load()), opts...)
+		obs.ObserveInt64(inst.inUse, int64(p.inUse.Load()), opts...)
+		obs.ObserveInt64(inst.inFlight, int64(p.busy.Load()), opts...)
+		obs.ObserveInt64(inst.memory, p.memory.Load(), opts...)
+	})
 }
 
 // count adds one to counter with opts. A panic in the instrument is reported as a [PanicError] in
@@ -193,32 +218,43 @@ func (p *pool) called(ctx context.Context, index uint32, elapsed time.Duration, 
 	p.guard(ctx, meterMethod, func() { p.meters.called(ctx, index, elapsed, err) })
 }
 
-// countPanic counts a reported PanicError.
+// countPanic counts a reported PanicError; the panic reporter guards it.
 func (i *instruments) countPanic(ctx context.Context, pe *PanicError) {
 	i.panics.Add(ctx, 1, metric.WithAttributes(attribute.String("key", pe.Key),
 		attribute.String("phase", string(pe.Phase))))
 }
 
+// The lifecycle measurements below report a panic in their instrument as a [PanicError] in [PhaseCallback], as
+// every measurement does, so that it cannot fail a Register or a reload round. Take them once what they count
+// has an owner that cleans it up: a version counted as loaded is already the Register's, or its round's, to
+// close.
+
 // countLoad counts a plugin version loaded, or failing to load when err is not nil.
-func (i *instruments) countLoad(ctx context.Context, key string, lang Language, err error) {
+func (c *Container) countLoad(ctx context.Context, key string, lang Language, err error) {
 	outcome := "ok"
 	if err != nil {
 		outcome = "failed"
 	}
 
-	i.loads.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-		attribute.String("language", string(lang)), attribute.String("outcome", outcome)))
+	c.panics.callback(ctx, key, lang, meterMethod, func() {
+		c.meters.loads.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
+			attribute.String("language", string(lang)), attribute.String("outcome", outcome)))
+	})
 }
 
 // countReloadFailure counts a plugin, or a whole reload (key being the Register name), a reload failed to load.
-func (i *instruments) countReloadFailure(ctx context.Context, key string) {
-	i.reloadFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key)))
+func (c *Container) countReloadFailure(ctx context.Context, key string) {
+	c.panics.callback(ctx, key, "", meterMethod, func() {
+		c.meters.reloadFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key)))
+	})
 }
 
 // countSkipped counts a listed plugin skipped for its language.
-func (i *instruments) countSkipped(ctx context.Context, key string, lang Language) {
-	i.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-		attribute.String("language", string(lang))))
+func (c *Container) countSkipped(ctx context.Context, key string, lang Language) {
+	c.panics.callback(ctx, key, lang, meterMethod, func() {
+		c.meters.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
+			attribute.String("language", string(lang))))
+	})
 }
 
 // callOutcome classifies how a call ended, for the call instruments.

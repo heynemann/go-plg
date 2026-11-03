@@ -210,7 +210,7 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled",
 			slog.String("key", key), slog.String("storage", src.storeName),
 			slog.String("language", string(src.desc.Language)))
-		c.meters.countSkipped(ctx, key, src.desc.Language)
+		c.countSkipped(ctx, key, src.desc.Language)
 
 		return false, nil
 	}
@@ -362,9 +362,8 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		key := reg.name + "/" + srcs[i].desc.Key
 
 		plug, err := c.load(ctx, reg, key, &srcs[i])
-		c.meters.countLoad(ctx, key, srcs[i].desc.Language, err)
-
 		if err != nil {
+			c.countLoad(ctx, key, srcs[i].desc.Language, err)
 			c.closeUnpublished(ctx, plugins)
 			c.budget.unreserve(reserved)
 
@@ -374,7 +373,9 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		plug.value = reg.contr.bind(c, key) //nolint:contextcheck // each adapter call takes the context it is passed
 		plug.reserved = worstCase(reg.cfg, &srcs[i])
 		reserved -= plug.reserved
-		plugins = append(plugins, plug)
+		plugins = append(plugins, plug) // the Register's to close from now on
+
+		c.countLoad(ctx, key, srcs[i].desc.Language, nil)
 	}
 
 	return plugins, nil

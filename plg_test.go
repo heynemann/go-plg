@@ -12,12 +12,15 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg"
@@ -205,6 +208,77 @@ func goPluginStorage(t *testing.T) *plg.MemoryStorage {
 	require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
 
 	return store
+}
+
+// brokenMeters is a meter provider whose counters and histograms panic on every measurement once broken is set:
+// a provider that starts failing while the container runs.
+type brokenMeters struct {
+	noop.MeterProvider
+
+	broken *atomic.Bool
+}
+
+//nolint:ireturn // the provider returns the API's Meter interface
+func (p brokenMeters) Meter(string, ...metric.MeterOption) metric.Meter {
+	return brokenMeter{broken: p.broken}
+}
+
+type brokenMeter struct {
+	noop.Meter
+
+	broken *atomic.Bool
+}
+
+//nolint:ireturn // the meter returns the API's instrument interface
+func (m brokenMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	return brokenCounter{broken: m.broken}, nil
+}
+
+//nolint:ireturn // the meter returns the API's instrument interface
+func (m brokenMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return brokenHistogram{broken: m.broken}, nil
+}
+
+type brokenCounter struct {
+	noop.Int64Counter
+
+	broken *atomic.Bool
+}
+
+func (c brokenCounter) Add(context.Context, int64, ...metric.AddOption) {
+	if c.broken.Load() {
+		panic("meter bug")
+	}
+}
+
+type brokenHistogram struct {
+	noop.Float64Histogram
+
+	broken *atomic.Bool
+}
+
+func (h brokenHistogram) Record(context.Context, float64, ...metric.RecordOption) {
+	if h.broken.Load() {
+		panic("meter bug")
+	}
+}
+
+// meterPanicKeys checks that every PanicError of panics is a broken meter's panic, contained in PhaseCallback,
+// and returns their keys in order.
+func meterPanicKeys(t *testing.T, panics []*plg.PanicError) []string {
+	t.Helper()
+
+	keys := make([]string, 0, len(panics))
+
+	for _, pe := range panics {
+		assert.Equal(t, plg.PhaseCallback, pe.Phase, pe)
+		assert.Equal(t, "metric.MeterProvider", pe.Method, pe)
+		assert.Equal(t, "meter bug", pe.Value, pe)
+
+		keys = append(keys, pe.Key)
+	}
+
+	return keys
 }
 
 // Interfaces breaking the interface contract.

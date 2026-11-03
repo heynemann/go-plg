@@ -196,3 +196,92 @@ func TestReloadSurvivesAPanicInTheRound(t *testing.T) {
 
 	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "ping"))
 }
+
+// TestReloadRoundsContainAPanickingMeterProvider fails reload rounds (a storage that cannot be listed) once every
+// measurement panics: counting the failure is a PanicError in PhaseCallback, also when the round itself panicked
+// (the user's logger, logging the failure) and its recovery counts it, and the reloader serves the next round.
+func TestReloadRoundsContainAPanickingMeterProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		check   func(t *testing.T, err error, recent []*plg.PanicError)
+		handler slog.Handler
+		name    string
+	}{
+		{
+			name: "failed round", handler: slog.DiscardHandler,
+			check: func(t *testing.T, err error, recent []*plg.PanicError) {
+				t.Helper()
+				require.ErrorIs(t, err, errStorage)
+				assert.Equal(t, []string{"ping"}, meterPanicKeys(t, recent), "counting the failure")
+			},
+		},
+		{
+			name: "panicking round", handler: panickingLogger{Handler: slog.DiscardHandler, msg: "plg: reload failed"},
+			check: func(t *testing.T, err error, recent []*plg.PanicError) {
+				t.Helper()
+
+				pe, ok := errors.AsType[*plg.PanicError](err)
+				require.True(t, ok, "the round's panic is reported: %v", err)
+				assert.Equal(t, plg.PhasePoll, pe.Phase)
+				assert.Equal(t, "logger exploded", pe.Value)
+
+				require.Len(t, recent, 3)
+				assert.Equal(t, pe, recent[0])
+				assert.Equal(t, []string{"ping", "ping"}, meterPanicKeys(t, recent[1:]),
+					"counting the round's panic, then its failure")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			broken := new(atomic.Bool)
+			ctr := plg.New(plg.WithLogger(slog.New(tc.handler)), plg.WithMeterProvider(brokenMeters{broken: broken}))
+
+			t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+			store := &failingStorage{MemoryStorage: plg.NewMemoryStorage("flaky")}
+			require.NoError(t, plg.Register[pinger](t.Context(), ctr, "ping", plg.WithStorage(store)))
+
+			broken.Store(true)
+
+			store.failList = true // read by the reload round, which the request starts
+
+			tc.check(t, plg.ReloadInterface(t.Context(), ctr, "ping"), ctr.RecentPanics())
+
+			store.failList = false
+
+			require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "ping"), "the reloader serves the next round")
+		})
+	}
+}
+
+// TestCountingSkippedPluginsContainsAPanickingMeterProvider lists a plugin in a language the Register does not
+// enable while every measurement panics: Register succeeds, the reload skips the plugin again, and each count of
+// it is a PanicError in PhaseCallback.
+func TestCountingSkippedPluginsContainsAPanickingMeterProvider(t *testing.T) {
+	t.Parallel()
+
+	broken := new(atomic.Bool)
+	broken.Store(true)
+
+	ctr := plg.New(plg.WithMeterProvider(brokenMeters{broken: broken}))
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	store := plg.NewMemoryStorage("scripts")
+	lua := plg.Descriptor{Key: "l", Language: plg.LanguageLua, Entrypoint: "main.lua"}
+	require.NoError(t, store.Put(lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
+
+	var err error
+
+	require.NotPanics(t, func() {
+		err = plg.Register[pinger](t.Context(), ctr, "langs", plg.WithStorage(store), plg.WithGolangPlugins())
+	}, "counting the skipped plugin")
+	require.NoError(t, err)
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "langs"), "the reload skips it again")
+	assert.Equal(t, []string{"langs/l", "langs/l"}, meterPanicKeys(t, ctr.RecentPanics()))
+}

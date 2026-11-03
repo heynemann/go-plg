@@ -77,9 +77,9 @@ func New(opts ...Option) *Container {
 		closeTimeout: closeTimeout,
 	}
 	ctr.catalogue.Store(&snapshot{})
-	ctr.instrument(&cfg)
 
-	ctr.panics = newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory, ctr.meters)
+	ctr.panics = newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory, nil) // instrument gives it the meters
+	ctr.instrument(&cfg)
 
 	return ctr
 }
@@ -127,7 +127,7 @@ func (c *Container) Close(ctx context.Context) error {
 		errs = append(errs, rt.Close(ctx))
 	}
 
-	errs = append(errs, c.engine.Close(ctx), c.observation.Unregister())
+	errs = append(errs, c.engine.Close(ctx), c.unobserve(ctx))
 
 	err := errors.Join(errs...)
 	if err != nil {

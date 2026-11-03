@@ -2157,8 +2157,8 @@ func TestHTTPMeasurements(t *testing.T) {
 func observing(t *testing.T, provider *sdkmetric.MeterProvider, inst *instruments, instances *pool) {
 	t.Helper()
 
-	reg, err := provider.Meter(meterName).RegisterCallback(func(_ context.Context, obs metric.Observer) error {
-		instances.observe(obs)
+	reg, err := provider.Meter(meterName).RegisterCallback(func(ctx context.Context, obs metric.Observer) error {
+		instances.observe(ctx, obs)
 
 		return nil
 	}, inst.instances, inst.inUse, inst.inFlight, inst.memory)
@@ -2352,12 +2352,130 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	meters.called(t.Context(), 0, time.Millisecond, errFake)
 	meters.requested(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
-	ctr.meters.countLoad(t.Context(), "n/k", LanguageGo, nil)
-	ctr.meters.countReloadFailure(t.Context(), "n")
-	ctr.meters.countSkipped(t.Context(), "n/k", LanguageLua)
+	ctr.countLoad(t.Context(), "n/k", LanguageGo, nil)
+	ctr.countReloadFailure(t.Context(), "n")
+	ctr.countSkipped(t.Context(), "n/k", LanguageLua)
 
 	assert.Len(t, ctr.RecentPanics(), 1, "the container kept working")
 	require.NoError(t, ctr.Close(t.Context()))
+}
+
+// setupPanicProvider is a meter provider that panics in one step of the container's setup or teardown, named by
+// at: getting its meter ("Meter"), creating a counter ("Int64Counter"), registering the gauges' callback
+// ("RegisterCallback") or unregistering it ("Unregister").
+type setupPanicProvider struct {
+	noop.MeterProvider
+
+	at string
+}
+
+//nolint:ireturn // the provider returns the API's Meter interface
+func (p setupPanicProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	if p.at == "Meter" {
+		panic("meter bug")
+	}
+
+	return setupPanicMeter{at: p.at}
+}
+
+type setupPanicMeter struct {
+	noop.Meter
+
+	at string
+}
+
+//nolint:ireturn // the meter returns the API's instrument interface
+func (m setupPanicMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	if m.at == "Int64Counter" {
+		panic("meter bug")
+	}
+
+	return noop.Int64Counter{}, nil
+}
+
+//nolint:ireturn // the meter returns the API's registration interface
+func (m setupPanicMeter) RegisterCallback(metric.Callback, ...metric.Observable) (metric.Registration, error) {
+	if m.at == "RegisterCallback" {
+		panic("meter bug")
+	}
+
+	return setupPanicRegistration{at: m.at}, nil
+}
+
+type setupPanicRegistration struct {
+	noop.Registration
+
+	at string
+}
+
+func (r setupPanicRegistration) Unregister() error {
+	if r.at == "Unregister" {
+		panic("meter bug")
+	}
+
+	return nil
+}
+
+// TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer: a provider panicking while New creates the
+// instruments or registers the gauges' callback, or while Close unregisters it, fails neither. The panic is a
+// PanicError in PhaseCallback with no key (the container's own), and the instruments a panic left uncreated do
+// nothing.
+func TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range []string{"Meter", "Int64Counter", "RegisterCallback", "Unregister"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+
+			var ctr *Container
+
+			require.NotPanics(t, func() { ctr = New(WithMeterProvider(setupPanicProvider{at: step})) })
+
+			ctr.countLoad(t.Context(), "n/k", LanguageGo, nil)
+			ctr.countReloadFailure(t.Context(), "n")
+			ctr.countSkipped(t.Context(), "n/k", LanguageLua)
+			ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
+
+			require.NotPanics(t, func() { require.NoError(t, ctr.Close(t.Context())) })
+
+			recent := ctr.RecentPanics()
+			require.Len(t, recent, 2, "the provider's panic and the one reported")
+
+			failed, reported := recent[0], recent[1]
+			if step == "Unregister" { // at Close, after the report
+				failed, reported = reported, failed
+			}
+
+			assert.Empty(t, failed.Key)
+			assert.Equal(t, PhaseCallback, failed.Phase)
+			assert.Equal(t, "metric.MeterProvider", failed.Method)
+			assert.Equal(t, "meter bug", failed.Value)
+			assert.Equal(t, PhaseCall, reported.Phase)
+		})
+	}
+}
+
+// panickingObserver is a metric observer whose every observation panics.
+type panickingObserver struct {
+	metric.Observer
+}
+
+func (panickingObserver) ObserveInt64(metric.Int64Observable, int64, ...metric.ObserveOption) {
+	panic("meter bug")
+}
+
+func TestObservingAPoolContainsAPanickingObserver(t *testing.T) {
+	t.Parallel()
+
+	reporter := reporting(slog.DiscardHandler)
+	instances := warmPool(t, &fakeSpawner{}, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+
+	assert.NotPanics(t, func() { instances.observe(t.Context(), panickingObserver{}) })
+
+	recent := reporter.history.recent()
+	require.Len(t, recent, 1)
+	requireMeterPanic(t, recent[0])
+	require.NoError(t, instances.close(t.Context()))
 }
 
 // TestMetersDefaultToTheGlobalProvider sets the process-global meter provider, so it cannot run in parallel.

@@ -57,7 +57,8 @@ type PanicError struct {
 	// Time is when the failure was reported.
 	Time time.Time
 	// Key is the plugin key, "<name>/<descriptor key>", or the Register name when no plugin is involved (a
-	// storage's List, polling).
+	// storage's List, polling); it is empty for the container's own calls to its meter provider ([New] creating
+	// the instruments, [Container.Close] unregistering them).
 	Key string
 	// Language is the plugin's language, empty when no plugin is involved.
 	Language Language
