@@ -89,6 +89,15 @@ func (in *Instance) Broken() bool {
 	return in.broken
 }
 
+// Memory returns the size of the instance's linear memory in bytes. It reads the size in whole pages (growing
+// by zero pages changes nothing), which is exact up to the 4 GiB maximum, unlike the byte size wazero reports as
+// a uint32.
+func (in *Instance) Memory() uint64 {
+	pages, _ := in.mem.Grow(0)
+
+	return uint64(pages) * PageSize
+}
+
 // Init sends the init payload to plg_init.
 func (in *Instance) Init(ctx context.Context, payload []byte) (Result, error) {
 	err := in.write(ctx, payload)

@@ -201,9 +201,11 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 	bool, error,
 ) {
 	if !cfg.enabled(src.desc.Language) {
+		key := name + "/" + src.desc.Key
 		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled",
-			slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storeName),
+			slog.String("key", key), slog.String("storage", src.storeName),
 			slog.String("language", string(src.desc.Language)))
+		c.meters.countSkipped(ctx, key, src.desc.Language)
 
 		return false, nil
 	}
@@ -354,6 +356,8 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		key := reg.name + "/" + srcs[i].desc.Key
 
 		plug, err := c.load(ctx, reg, key, &srcs[i])
+		c.meters.countLoad(ctx, key, srcs[i].desc.Language, err)
+
 		if err != nil {
 			c.closeUnpublished(ctx, plugins)
 			c.budget.unreserve(reserved)
@@ -481,7 +485,8 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		return nil, err
 	}
 
-	instances := c.goPool(reg, key, src, tree, mod)
+	meters := newPluginMeters(c.meters, key, src.desc.Language, reg.contr.iface)
+	instances := c.pluginPool(reg, key, src, meters, c.goLauncher(reg, key, src, tree, mod, meters).start)
 
 	err = instances.warm(ctx)
 	if err != nil {
@@ -505,25 +510,33 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	return gen, nil
 }
 
-// goPool returns the (not yet warm) pool of a Go plugin's instances, which mount tree.
-func (c *Container) goPool(reg *registration, key string, src *source, tree fs.FS, mod *engine.Module) *pool {
-	launcher := &goLauncher{
+// goLauncher returns the launcher of a Go plugin's instances, which mount tree.
+func (c *Container) goLauncher(reg *registration, key string, src *source, tree fs.FS, mod *engine.Module,
+	meters *pluginMeters,
+) *goLauncher {
+	return &goLauncher{
 		mod:     mod,
 		logger:  c.logger,
 		panics:  c.panics,
 		payload: reg.goPayload,
 		opts: engine.InstanceOptions{
 			Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
-			HTTP:   reg.http.Handler(key, c.httpPanicked(key, src.desc.Language)),
+			HTTP:   c.httpHandler(reg, key, src.desc.Language, meters),
 			Host:   reg.host.handler(key, src.desc.Language, c.panics),
 		},
 		key: key,
 	}
+}
 
-	return newPool(poolConfig{
+// pluginPool returns the (not yet warm) pool of a plugin's instances, started by spawn and measured in meters.
+func (c *Container) pluginPool(reg *registration, key string, src *source, meters *pluginMeters,
+	spawn func(context.Context) (instance, error),
+) *pool {
+	return newPool(&poolConfig{
 		panics:  c.panics,
-		spawn:   launcher.start,
+		spawn:   spawn,
 		budget:  &c.budget,
+		meters:  meters,
 		key:     key,
 		lang:    src.desc.Language,
 		limit:   src.limit,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/wire"
@@ -187,8 +188,18 @@ func (c *Container) call(key string, meth *method, args []reflect.Value) ([]refl
 	return gen.call(ctx, meth, args)
 }
 
-// call runs one method call on an instance of the plugin, waiting for one while all are busy.
+// call runs one method call on an instance of the plugin, waiting for one while all are busy, and records it in
+// the plugin's call metrics.
 func (p *plugin) call(ctx context.Context, meth *method, args []reflect.Value) ([]reflect.Value, error) {
+	start := time.Now()
+	out, err := p.callInstance(ctx, meth, args)
+	p.pool.meters.called(ctx, meth.index, time.Since(start), err)
+
+	return out, err
+}
+
+// callInstance is call without its metrics.
+func (p *plugin) callInstance(ctx context.Context, meth *method, args []reflect.Value) ([]reflect.Value, error) {
 	held, err := p.pool.acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, err)

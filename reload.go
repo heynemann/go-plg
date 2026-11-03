@@ -221,6 +221,7 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 		if v := recover(); v != nil {
 			failure := &PanicError{Key: reg.name, Phase: PhasePoll}
 			c.panics.recovered(ctx, failure, v)
+			c.meters.countReloadFailure(ctx, reg.name)
 
 			err = failure
 		}
@@ -242,6 +243,7 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		err = fmt.Errorf("plg: reloading %s: %w", reg.name, err)
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload failed", slog.String("name", reg.name),
 			slog.String("error", err.Error()))
+		c.meters.countReloadFailure(ctx, reg.name)
 
 		return err
 	}
@@ -289,8 +291,12 @@ func (c *Container) reloadOne(ctx context.Context, reg *registration, key string
 	case err != nil && ctx.Err() != nil: // the container is closing: not the plugin's failure
 		return err
 	case err != nil:
+		c.meters.countLoad(ctx, key, src.desc.Language, err)
+
 		return c.rejected(ctx, key, old, err)
 	case gen != old:
+		c.meters.countLoad(ctx, key, src.desc.Language, nil)
+
 		changes.loaded = append(changes.loaded, gen)
 	default: // unchanged
 	}
@@ -376,6 +382,7 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 // updated one keeps old, its last good generation.
 func (c *Container) rejected(ctx context.Context, key string, old *plugin, err error) error {
 	err = fmt.Errorf("plg: reloading %s: %w", key, err)
+	c.meters.countReloadFailure(ctx, key)
 
 	if old == nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload skipped a new plugin that failed to load",

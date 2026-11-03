@@ -19,6 +19,8 @@ type instance interface {
 	Close(ctx context.Context) error
 	// Guest returns what the guest wrote to stderr during its last call or close.
 	Guest() string
+	// Memory returns the size of the instance's linear memory in bytes.
+	Memory() uint64
 }
 
 // slot is an instance taken from a pool, with its argument buffer. Whoever holds the slot owns both; slots
@@ -27,6 +29,7 @@ type slot struct {
 	inst instance
 	buf  []byte
 	id   uint64 // unique within the pool, in start order
+	mem  uint64 // the instance's memory when last sampled, counted in the pool's memory
 }
 
 // The refiller retries a failing Create after refillBackoffMin, doubling the delay up to refillBackoffMax.
@@ -45,6 +48,7 @@ type poolConfig struct {
 	panics  *panicReporter
 	spawn   func(context.Context) (instance, error) // starts an instance, running the plugin's Create
 	budget  *memoryBudget
+	meters  *pluginMeters
 	key     string
 	lang    Language
 	limit   uint64 // memory limit of each instance, charged to the budget while it lives
@@ -66,6 +70,7 @@ type pool struct {
 	panics  *panicReporter
 	spawn   func(context.Context) (instance, error)
 	budget  *memoryBudget
+	meters  *pluginMeters
 	stop    context.CancelFunc // ends the refiller's context
 	idle    chan *slot
 	wake    chan struct{} // one pending signal for the refiller (and close): an instance retired
@@ -77,19 +82,22 @@ type pool struct {
 	ids     atomic.Uint64
 	refills atomic.Uint64 // instances the refiller started
 	grows   atomic.Uint64 // instances callers started
+	memory  atomic.Int64  // linear memory of the live instances, as last sampled: at start and on each release
 	minSize int32
 	maxSize int32
 	size    atomic.Int32
+	busy    atomic.Int32 // instances handed out to callers
 	waiting atomic.Int32 // callers blocked on the idle channel
 	closed  atomic.Bool
 }
 
-func newPool(cfg poolConfig) *pool {
+func newPool(cfg *poolConfig) *pool {
 	return &pool{
 		logger:  cfg.panics.logger,
 		panics:  cfg.panics,
 		spawn:   cfg.spawn,
 		budget:  cfg.budget,
+		meters:  cfg.meters,
 		key:     cfg.key,
 		lang:    cfg.lang,
 		limit:   cfg.limit,
@@ -178,6 +186,8 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 
 	defer p.waiting.Add(-1)
 
+	p.meters.inst.waits.Add(ctx, 1, p.meters.key...)
+
 	select {
 	case held := <-p.idle:
 		return p.open(held)
@@ -196,16 +206,28 @@ func (p *pool) open(held *slot) (*slot, error) {
 		return nil, ErrClosed
 	}
 
+	p.busy.Add(1)
+
 	return held, nil
 }
 
-// release gives an instance back for the next call.
+// release gives an instance back for the next call, sampling its memory first: memory grows during calls.
 func (p *pool) release(held *slot) {
+	if mem := held.inst.Memory(); mem != held.mem {
+		p.memory.Add(int64(mem) - int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
+
+		held.mem = mem
+	}
+
+	p.busy.Add(-1)
+
 	p.idle <- held
 }
 
 // discard closes a broken instance and gives its place back; the refiller replaces it.
 func (p *pool) discard(ctx context.Context, held *slot) {
+	p.busy.Add(-1)
+
 	err := p.closeInstance(context.WithoutCancel(ctx), held)
 	if err != nil {
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
@@ -216,6 +238,8 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 // closeInstance closes an instance and gives its place back. A panic meanwhile is reported as a [PanicError]
 // in [PhaseClose] and returned.
 func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
+	p.memory.Add(-int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
+
 	defer p.retire()
 	defer func() {
 		if v := recover(); v != nil {
@@ -268,7 +292,10 @@ func (p *pool) start(ctx context.Context, phase Phase) (*slot, error) {
 		return nil, err
 	}
 
-	return &slot{inst: inst, id: p.ids.Add(1)}, nil
+	held := &slot{inst: inst, id: p.ids.Add(1), mem: inst.Memory()}
+	p.memory.Add(int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
+
+	return held, nil
 }
 
 //nolint:ireturn // it returns what spawn returns: the pool's instance interface
@@ -373,6 +400,8 @@ func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
 	case ctx.Err() != nil:
 		return false
 	default:
+		p.meters.inst.refills.Add(ctx, 1, p.meters.refillFailed...)
+
 		*delay = backoff(*delay)
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
 			slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
@@ -404,6 +433,7 @@ func (p *pool) refillOne(ctx context.Context) error {
 	}
 
 	p.refills.Add(1)
+	p.meters.inst.refills.Add(ctx, 1, p.meters.refillOK...)
 
 	p.idle <- held // if the pool closed meanwhile, close collects it
 

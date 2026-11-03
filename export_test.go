@@ -17,14 +17,15 @@ func Hold(ctx context.Context, c *Container, key string) (func(), error) {
 	return held.Release, err
 }
 
-// Held is an instance taken by [HoldInstance].
+// Held is an instance taken by [HoldInstance]. Call exactly one of Release and Discard.
 type Held struct {
 	Release func() // gives the instance back
+	Discard func() // closes the instance as a broken one; the pool's refiller replaces it
 	ID      uint64 // instances of a plugin are numbered from 1 in the order they started
 }
 
 // HoldInstance is [Hold], also returning the identity of the instance taken. Like a call, it counts as in
-// flight on the generation of the plugin it holds until it is released.
+// flight on the generation of the plugin it holds until it is released or discarded.
 func HoldInstance(ctx context.Context, c *Container, key string) (Held, error) {
 	gen, err := c.serving(key)
 	if err != nil {
@@ -38,10 +39,17 @@ func HoldInstance(ctx context.Context, c *Container, key string) (Held, error) {
 		return Held{}, err
 	}
 
-	return Held{ID: held.id, Release: func() {
-		gen.pool.release(held)
-		gen.leave()
-	}}, nil
+	return Held{
+		ID: held.id,
+		Release: func() {
+			gen.pool.release(held)
+			gen.leave()
+		},
+		Discard: func() {
+			gen.pool.discard(context.WithoutCancel(ctx), held)
+			gen.leave()
+		},
+	}, nil
 }
 
 // PoolStats describes a plugin's pool.

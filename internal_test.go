@@ -19,8 +19,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/httpcap"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -218,7 +225,8 @@ type fakeSpawner struct {
 	quota    int32                         // when non-zero, starts beyond this many fail
 	started  atomic.Int32
 	closed   atomic.Int32
-	closeBug atomic.Bool // the instances' Close panics
+	closeBug atomic.Bool   // the instances' Close panics
+	memory   atomic.Uint64 // the instances' Memory
 }
 
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
@@ -276,6 +284,8 @@ func (f *fakeInstance) Close(context.Context) error {
 
 func (f *fakeInstance) Guest() string { return f.owner.guest }
 
+func (f *fakeInstance) Memory() uint64 { return f.owner.memory.Load() }
+
 // recorder is a slog handler keeping every record, for tests to read once the logging goroutine is idle.
 type recorder struct {
 	records chan slog.Record
@@ -327,12 +337,12 @@ func attr(rec *slog.Record, key string) slog.Value {
 
 // reporting returns a panic reporter keeping 16 entries, logging to handler.
 func reporting(handler slog.Handler) *panicReporter {
-	return newPanicReporter(slog.New(handler), nil, 16)
+	return newPanicReporter(slog.New(handler), nil, 16, discardInstruments())
 }
 
 // newTestPool returns a pool of sp's instances; cfg's spawn, key, language and limit are set, and its panic
-// reporter and budget default to a discarding one and no budget.
-func newTestPool(spawner *fakeSpawner, cfg poolConfig) *pool {
+// reporter, budget and meters default to a discarding one, no budget and discarding instruments.
+func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
 	cfg.spawn, cfg.key, cfg.lang, cfg.limit = spawner.spawn, "test/k", LanguageGo, testLimit
 	if cfg.panics == nil {
 		cfg.panics = reporting(slog.DiscardHandler)
@@ -342,11 +352,30 @@ func newTestPool(spawner *fakeSpawner, cfg poolConfig) *pool {
 		cfg.budget = &memoryBudget{}
 	}
 
+	if cfg.meters == nil {
+		cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, reflect.TypeFor[testIface]())
+	}
+
 	return newPool(cfg)
 }
 
+// testIface is the interface of the plugins of internal tests: their contracts cannot import this package.
+type testIface interface {
+	Do(ctx context.Context) error
+}
+
+// discardInstruments returns instruments of a no-op meter provider.
+func discardInstruments() *instruments {
+	inst, err := newInstruments(noop.NewMeterProvider())
+	if err != nil {
+		panic(err)
+	}
+
+	return inst
+}
+
 // warmPool warms a pool built by newTestPool.
-func warmPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
+func warmPool(tb testing.TB, spawner *fakeSpawner, cfg *poolConfig) *pool {
 	tb.Helper()
 
 	instances := newTestPool(spawner, cfg)
@@ -358,7 +387,7 @@ func warmPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
 // startPool warms a pool built by newTestPool in a synctest bubble, then waits for its refiller to find the pool
 // at its minimum and wait for a signal. Otherwise the refiller's first look at the pool races the test's first
 // callers: seeing one waiting, it could start the instance the test expects that caller to start.
-func startPool(t *testing.T, spawner *fakeSpawner, cfg poolConfig) *pool {
+func startPool(t *testing.T, spawner *fakeSpawner, cfg *poolConfig) *pool {
 	t.Helper()
 
 	instances := warmPool(t, spawner, cfg)
@@ -404,7 +433,7 @@ func TestPoolGrowsToItsMaximumThenWaits(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner, budget := &fakeSpawner{}, &memoryBudget{}
-		instances := startPool(t, spawner, poolConfig{budget: budget, minSize: 1, maxSize: 3})
+		instances := startPool(t, spawner, &poolConfig{budget: budget, minSize: 1, maxSize: 3})
 
 		held := acquireN(t, instances, 3)
 		assert.Equal(t, []uint64{1, 2, 3}, []uint64{held[0].id, held[1].id, held[2].id})
@@ -443,7 +472,7 @@ func TestPoolCallerStartFailureGivesThePlaceBack(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner, budget := &fakeSpawner{}, &memoryBudget{}
-		instances := startPool(t, spawner, poolConfig{budget: budget, minSize: 1, maxSize: 2})
+		instances := startPool(t, spawner, &poolConfig{budget: budget, minSize: 1, maxSize: 2})
 		held := acquireN(t, instances, 1)[0]
 
 		spawner.failures.Store(1)
@@ -467,7 +496,7 @@ func TestPoolRefillsToItsMinimumInTheBackground(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner := &fakeSpawner{}
-		instances := startPool(t, spawner, poolConfig{minSize: 3, maxSize: 4})
+		instances := startPool(t, spawner, &poolConfig{minSize: 3, maxSize: 4})
 
 		for _, held := range acquireN(t, instances, 2) {
 			instances.discard(t.Context(), held)
@@ -488,7 +517,7 @@ func TestPoolStartsAnInstanceForWaitingCallers(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		instances := startPool(t, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 2})
+		instances := startPool(t, &fakeSpawner{}, &poolConfig{minSize: 1, maxSize: 2})
 		held := acquireN(t, instances, 2)
 		got := acquireLater(t, instances)
 
@@ -510,7 +539,7 @@ func TestPoolRefillBacksOffExponentially(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner, rec := &fakeSpawner{attempts: make(chan time.Time, 32)}, newRecorder()
-		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{panics: reporting(rec), minSize: 1, maxSize: 1})
 		<-spawner.attempts // warm's
 
 		spawner.failures.Store(10)
@@ -564,7 +593,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		spawner, rec := &fakeSpawner{}, newRecorder()
 		budget := &memoryBudget{total: 2 * testLimit}
-		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), budget: budget, minSize: 1, maxSize: 4})
+		instances := startPool(t, spawner, &poolConfig{panics: reporting(rec), budget: budget, minSize: 1, maxSize: 4})
 		held := acquireN(t, instances, 2)
 
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -582,9 +611,10 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 		assert.Contains(t, attr(&records[0], "error").String(), ErrMemoryBudget.Error())
 
 		// Another pool on the same budget cannot start until an instance is closed.
-		otherCfg := poolConfig{
+		otherCfg := &poolConfig{
 			panics: reporting(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/other",
-			limit: testLimit, minSize: 1, maxSize: 1,
+			meters: newPluginMeters(discardInstruments(), "test/other", LanguageGo, reflect.TypeFor[testIface]()),
+			limit:  testLimit, minSize: 1, maxSize: 1,
 		}
 		require.ErrorIs(t, newPool(otherCfg).warm(t.Context()), ErrMemoryBudget)
 
@@ -618,10 +648,7 @@ func TestPoolWarmFailureClosesWhatItStarted(t *testing.T) {
 			t.Parallel()
 
 			spawner, budget := &fakeSpawner{quota: tc.quota}, &memoryBudget{total: tc.budget}
-			instances := newPool(poolConfig{
-				panics: reporting(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/k",
-				limit: testLimit, minSize: 3, maxSize: 3,
-			})
+			instances := newTestPool(spawner, &poolConfig{budget: budget, minSize: 3, maxSize: 3})
 
 			require.ErrorIs(t, instances.warm(t.Context()), tc.want)
 			assert.Equal(t, int32(2), spawner.started.Load())
@@ -650,7 +677,7 @@ func TestPoolCloseWaitsForInstancesInUse(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner := &fakeSpawner{}
-		instances := startPool(t, spawner, poolConfig{minSize: 2, maxSize: 2})
+		instances := startPool(t, spawner, &poolConfig{minSize: 2, maxSize: 2})
 		held := acquireN(t, instances, 1)[0]
 		done := closeLater(t, instances)
 
@@ -667,7 +694,7 @@ func TestPoolCloseCollectsADiscard(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		instances := startPool(t, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 1})
+		instances := startPool(t, &fakeSpawner{}, &poolConfig{minSize: 1, maxSize: 1})
 		held := acquireN(t, instances, 1)[0]
 		done := closeLater(t, instances)
 
@@ -681,7 +708,7 @@ func TestPoolCloseGivesUpWaitingWhenItsContextEnds(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner := &fakeSpawner{}
-		instances := startPool(t, spawner, poolConfig{minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{minSize: 1, maxSize: 1})
 		held := acquireN(t, instances, 1)[0]
 
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -697,7 +724,7 @@ func TestPoolCloseFailsWaitingCallers(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		instances := startPool(t, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 1})
+		instances := startPool(t, &fakeSpawner{}, &poolConfig{minSize: 1, maxSize: 1})
 		held := acquireN(t, instances, 1)[0]
 		failed := make(chan error, 1)
 
@@ -723,7 +750,7 @@ func TestPoolCloseCollectsAnInstanceACallerStartedMeanwhile(t *testing.T) {
 		spawner := &fakeSpawner{gate: make(chan struct{}, 1)}
 		spawner.gate <- struct{}{} // warm's
 
-		instances := startPool(t, spawner, poolConfig{minSize: 1, maxSize: 2})
+		instances := startPool(t, spawner, &poolConfig{minSize: 1, maxSize: 2})
 		held := acquireN(t, instances, 1)[0]
 		failed := make(chan error, 1)
 
@@ -750,7 +777,7 @@ func TestPoolCloseStopsARefillerBackingOff(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner := &fakeSpawner{}
-		instances := startPool(t, spawner, poolConfig{minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{minSize: 1, maxSize: 1})
 		spawner.failures.Store(1 << 30)
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
 		synctest.Wait()
@@ -769,7 +796,7 @@ func TestPoolCloseStopsARefillerStartingAnInstance(t *testing.T) {
 		spawner := &fakeSpawner{gate: make(chan struct{}, 1)}
 		spawner.gate <- struct{}{} // warm's
 
-		instances := startPool(t, spawner, poolConfig{minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{minSize: 1, maxSize: 1})
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
 		synctest.Wait()
 
@@ -784,7 +811,7 @@ func TestPoolReportsInstancesFailingToClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rec := newRecorder()
 		spawner := &fakeSpawner{closeErr: errFake}
-		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), minSize: 2, maxSize: 2})
+		instances := startPool(t, spawner, &poolConfig{panics: reporting(rec), minSize: 2, maxSize: 2})
 
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
 		synctest.Wait()
@@ -807,7 +834,7 @@ func TestPoolUnderContention(t *testing.T) {
 	const workers, rounds, maxSize = 64, 1000, 8
 
 	spawner, budget := &fakeSpawner{}, &memoryBudget{total: maxSize * testLimit}
-	instances := warmPool(t, spawner, poolConfig{budget: budget, minSize: 2, maxSize: maxSize})
+	instances := warmPool(t, spawner, &poolConfig{budget: budget, minSize: 2, maxSize: maxSize})
 	errs := make(chan error, workers)
 
 	var wg sync.WaitGroup
@@ -882,7 +909,7 @@ func TestMemoryBudgetAccounting(t *testing.T) {
 
 // BenchmarkPoolAcquireRelease is one call's pool overhead with an instance idle.
 func BenchmarkPoolAcquireRelease(b *testing.B) {
-	instances := warmPool(b, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 1})
+	instances := warmPool(b, &fakeSpawner{}, &poolConfig{minSize: 1, maxSize: 1})
 	b.Cleanup(func() { assert.NoError(b, instances.close(context.Background())) })
 
 	ctx := b.Context()
@@ -904,7 +931,7 @@ func BenchmarkPoolAcquireRelease(b *testing.B) {
 func BenchmarkPoolAcquireReleaseParallel(b *testing.B) {
 	for _, size := range []int32{1, int32(runtime.GOMAXPROCS(0))} { //nolint:gosec // G115: a handful of CPUs
 		b.Run("pool="+strconv.Itoa(int(size)), func(b *testing.B) {
-			instances := warmPool(b, &fakeSpawner{}, poolConfig{minSize: size, maxSize: size})
+			instances := warmPool(b, &fakeSpawner{}, &poolConfig{minSize: size, maxSize: size})
 			b.Cleanup(func() { assert.NoError(b, instances.close(context.Background())) })
 
 			ctx := b.Context()
@@ -944,18 +971,18 @@ func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
+		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16, discardInstruments())
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 16)}
 		spawner.panics.Store(1)
 
-		cold := newTestPool(spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 2})
+		cold := newTestPool(spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 2})
 		failure := requirePanicError(t, cold.warm(t.Context()), PhaseLoad)
 		assert.Equal(t, "spawn bug", failure.Value)
 		assert.Contains(t, string(failure.Stack), "(*fakeSpawner).spawn", "the stack where it panicked")
 		assert.Equal(t, PoolStats{}, cold.stats(), "the place was given back")
 		<-spawner.attempts
 
-		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 2})
+		instances := startPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 2})
 		<-spawner.attempts
 
 		held := acquireN(t, instances, 1)[0]
@@ -1004,7 +1031,7 @@ func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reporter := reporting(panickingHandler{})
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 4)}
-		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
 		<-spawner.attempts
 
 		spawner.failures.Store(1)
@@ -1034,7 +1061,7 @@ func TestPoolReportsPanicsClosingInstances(t *testing.T) {
 		rec := newRecorder()
 		reporter := reporting(rec)
 		spawner := &fakeSpawner{}
-		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
 
 		spawner.closeBug.Store(true)
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
@@ -1120,9 +1147,9 @@ func TestCallFailuresArePanicErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
+			reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16, discardInstruments())
 			spawner := &fakeSpawner{call: tc.call, guest: tc.guest}
-			instances := warmPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+			instances := warmPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
 			plug := &plugin{key: "test/k", desc: Descriptor{Language: LanguageGo}, pool: instances}
 
 			_, err := plug.call(t.Context(), meth, []reflect.Value{reflect.ValueOf(t.Context())})
@@ -1160,7 +1187,7 @@ func TestPanicReporter(t *testing.T) {
 
 		reporter := newPanicReporter(slog.New(rec), func(_ context.Context, failure *PanicError) {
 			seen = append(seen, failure)
-		}, 4)
+		}, 4, discardInstruments())
 		before := time.Now()
 		full := &PanicError{
 			Key: "n/k", Language: LanguageGo, Phase: PhaseCall, Method: "M", Value: "v", Guest: "g", Stack: []byte("s"),
@@ -1201,7 +1228,7 @@ func TestPanicReporter(t *testing.T) {
 			calls++
 
 			panic("callback bug")
-		}, 4)
+		}, 4, discardInstruments())
 
 		failure := &PanicError{Key: "n/k", Language: LanguageGo, Phase: PhaseHTTP, Value: 1}
 		reporter.report(t.Context(), failure)
@@ -1224,7 +1251,12 @@ func TestPanicReporter(t *testing.T) {
 		t.Parallel()
 
 		calls := 0
-		reporter := newPanicReporter(slog.New(panickingHandler{}), func(context.Context, *PanicError) { calls++ }, 4)
+		reporter := newPanicReporter(
+			slog.New(panickingHandler{}),
+			func(context.Context, *PanicError) { calls++ },
+			4,
+			discardInstruments(),
+		)
 		failure := &PanicError{Key: "n/k", Phase: PhaseCall, Value: 1}
 		reporter.report(t.Context(), failure)
 
@@ -1271,7 +1303,7 @@ func TestPanicHistoryKeepsTheNewest(t *testing.T) {
 		{size: 0, records: 2, want: nil},
 		{size: -1, records: 2, want: nil},
 	} {
-		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, tc.size)
+		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, tc.size, discardInstruments())
 		for i := range tc.records {
 			reporter.history.record(&PanicError{Value: i})
 		}
@@ -1333,7 +1365,7 @@ func TestPanicHistoryUnderConcurrency(t *testing.T) {
 		rounds  = 2000
 	)
 
-	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, size).history
+	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, size, discardInstruments()).history
 
 	var (
 		writing, reading sync.WaitGroup
@@ -1378,7 +1410,7 @@ func TestPanicHistoryUnderConcurrency(t *testing.T) {
 func TestPanicHistoryKeepsANewerEntryFromALateWriter(t *testing.T) {
 	t.Parallel()
 
-	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, 2).history
+	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, 2, discardInstruments()).history
 	late := history.next.Add(1) - 1
 	newer := []*PanicError{{Value: "second"}, {Value: "third"}} // the third takes the late first's slot
 
@@ -1695,4 +1727,372 @@ func TestReloaderStops(t *testing.T) {
 		require.ErrorIs(t, pending.wait(t.Context()), ErrClosed, "the pending round never runs")
 		require.ErrorIs(t, reloads.request().wait(t.Context()), ErrClosed, "nor does any later one")
 	})
+}
+
+// sdkInstruments returns instruments of an SDK meter provider, with the in-memory reader collecting them.
+func sdkInstruments(tb testing.TB) (*instruments, *sdkmetric.ManualReader, *sdkmetric.MeterProvider) {
+	tb.Helper()
+
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	tb.Cleanup(func() { assert.NoError(tb, provider.Shutdown(context.Background())) })
+
+	inst, err := newInstruments(provider)
+	require.NoError(tb, err)
+
+	return inst, reader, provider
+}
+
+// histogramPoint is a histogram data point's count and sum.
+type histogramPoint struct {
+	count uint64
+	sum   float64
+}
+
+// measured is one collection: the int64 sums and the histograms, by instrument name, then by encoded attribute
+// set ("key=n/k,outcome=ok").
+type measured struct {
+	sums       map[string]map[string]int64
+	histograms map[string]map[string]histogramPoint
+}
+
+func collect(t *testing.T, reader *sdkmetric.ManualReader) measured {
+	t.Helper()
+
+	var rm metricdata.ResourceMetrics
+
+	require.NoError(t, reader.Collect(t.Context(), &rm))
+
+	got := measured{sums: map[string]map[string]int64{}, histograms: map[string]map[string]histogramPoint{}}
+
+	for _, scope := range rm.ScopeMetrics {
+		for _, instrument := range scope.Metrics {
+			name := instrument.Name
+
+			switch data := instrument.Data.(type) {
+			case metricdata.Sum[int64]:
+				got.sums[name] = map[string]int64{}
+				for _, dp := range data.DataPoints {
+					got.sums[name][dp.Attributes.Encoded(attribute.DefaultEncoder())] = dp.Value
+				}
+			case metricdata.Histogram[float64]:
+				got.histograms[name] = map[string]histogramPoint{}
+				for _, dp := range data.DataPoints {
+					got.histograms[name][dp.Attributes.Encoded(attribute.DefaultEncoder())] = histogramPoint{
+						count: dp.Count, sum: dp.Sum,
+					}
+				}
+			default:
+				require.Failf(t, "unexpected aggregation", "%s: %T", name, instrument.Data)
+			}
+		}
+	}
+
+	return got
+}
+
+// twoMethods is a plugin interface with two methods, for the call measurements by method.
+type twoMethods interface {
+	A(ctx context.Context) error
+	B(ctx context.Context) error
+}
+
+func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
+	t.Parallel()
+
+	inst, reader, _ := sdkInstruments(t)
+	meters := newPluginMeters(inst, "n/k", LanguageLua, reflect.TypeFor[twoMethods]())
+	ctx := t.Context()
+
+	for _, call := range []struct {
+		err     error
+		index   uint32
+		elapsed time.Duration
+	}{
+		{index: 0, elapsed: time.Millisecond},
+		{index: 0, elapsed: 3 * time.Millisecond},
+		{index: 1, elapsed: time.Millisecond, err: &PluginError{Key: "n/k", Method: "B", Message: "no"}},
+		{index: 1, elapsed: time.Millisecond, err: fmt.Errorf("%w: n/k.B: parameter 1", ErrConversion)},
+		{index: 0, elapsed: time.Millisecond, err: &PanicError{Key: "n/k", Phase: PhaseCall, Value: "trap"}},
+		{index: 0, elapsed: time.Second, err: fmt.Errorf("plg: n/k.A: waiting: %w", context.DeadlineExceeded)},
+		{index: 1, elapsed: time.Millisecond, err: fmt.Errorf("plg: n/k.B: %w", ErrClosed)},
+	} {
+		meters.called(ctx, call.index, call.elapsed, call.err)
+	}
+
+	set := func(method, outcome string) string {
+		return "key=n/k,language=lua,method=" + method + ",outcome=" + outcome
+	}
+	got := collect(t, reader)
+
+	assert.Equal(t, map[string]int64{
+		set("A", "ok"): 2, set("B", "error"): 1, set("B", "conversion"): 1, set("A", "panic"): 1,
+		set("A", "unavailable"): 1, set("B", "unavailable"): 1,
+	}, got.sums["plg.plugin.calls"])
+	assert.Equal(t, map[string]int64{
+		set("B", "error"): 1, set("B", "conversion"): 1, set("A", "panic"): 1, set("A", "unavailable"): 1,
+		set("B", "unavailable"): 1,
+	}, got.sums["plg.plugin.call.errors"], "every outcome but ok")
+	assert.Equal(t, histogramPoint{count: 2, sum: 0.004}, got.histograms["plg.plugin.call.duration"][set("A", "ok")],
+		"latencies in seconds")
+	assert.Equal(
+		t,
+		histogramPoint{count: 1, sum: 1},
+		got.histograms["plg.plugin.call.duration"][set("A", "unavailable")],
+	)
+	assert.Len(t, got.histograms["plg.plugin.call.duration"], 6)
+}
+
+func TestHTTPMeasurements(t *testing.T) {
+	t.Parallel()
+
+	inst, reader, _ := sdkInstruments(t)
+	meters := newPluginMeters(inst, "web/p", LanguageGo, reflect.TypeFor[testIface]())
+	ctx := t.Context()
+
+	for _, report := range []httpcap.Report{
+		{Outcome: httpcap.OutcomeOK, Status: 200, Sent: 10, Received: 100, Duration: time.Millisecond},
+		{Outcome: httpcap.OutcomeOK, Status: 200, Sent: 20, Received: 200, Duration: time.Millisecond},
+		{Outcome: httpcap.OutcomeOK, Status: 404, Sent: 30, Received: 50, Duration: time.Millisecond},
+		{Outcome: httpcap.OutcomeRefused, Sent: 40, Duration: time.Microsecond},
+		{Outcome: httpcap.OutcomeFailed, Sent: 50, Duration: 2 * time.Second},
+	} {
+		meters.requested(ctx, report)
+	}
+
+	got := collect(t, reader)
+
+	assert.Equal(t, map[string]int64{
+		"key=web/p,outcome=ok,status=200": 2, "key=web/p,outcome=ok,status=404": 1,
+		"key=web/p,outcome=refused": 1, "key=web/p,outcome=failed": 1,
+	}, got.sums["plg.http.requests"], "responses by status code")
+	assert.Equal(t, map[string]histogramPoint{
+		"key=web/p,outcome=ok":      {count: 3, sum: 0.003},
+		"key=web/p,outcome=refused": {count: 1, sum: 0.000001},
+		"key=web/p,outcome=failed":  {count: 1, sum: 2},
+	}, got.histograms["plg.http.duration"])
+	assert.Equal(t, map[string]int64{"key=web/p": 150}, got.sums["plg.http.request.size"], "every request sent")
+	assert.Equal(t, map[string]int64{"key=web/p": 350}, got.sums["plg.http.response.size"], "responses only")
+}
+
+// observing registers a callback observing instances' gauges with inst's meter provider.
+func observing(t *testing.T, provider *sdkmetric.MeterProvider, inst *instruments, instances *pool) {
+	t.Helper()
+
+	reg, err := provider.Meter(meterName).RegisterCallback(func(_ context.Context, obs metric.Observer) error {
+		instances.observe(obs)
+
+		return nil
+	}, inst.instances, inst.inUse, inst.memory)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { assert.NoError(t, reg.Unregister()) })
+}
+
+func TestPoolMeasurements(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		inst, reader, provider := sdkInstruments(t)
+		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
+		spawner.memory.Store(3 * engine.PageSize)
+
+		meters := newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]())
+		instances := startPool(t, spawner, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
+		observing(t, provider, inst, instances)
+
+		gauges := func() map[string]int64 {
+			got := collect(t, reader)
+
+			return map[string]int64{
+				"instances": got.sums["plg.pool.instances"]["key=test/k"],
+				"in_use":    got.sums["plg.pool.instances.in_use"]["key=test/k"],
+				"memory":    got.sums["plg.plugin.memory"]["key=test/k"],
+			}
+		}
+		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 0, "memory": 3 * engine.PageSize}, gauges(),
+			"the warm instance, its memory sampled at start")
+
+		held := acquireN(t, instances, 1)[0]
+		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 1, "memory": 3 * engine.PageSize}, gauges())
+
+		spawner.memory.Store(5 * engine.PageSize) // the call grew the instance's memory
+		instances.release(held)
+		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 0, "memory": 5 * engine.PageSize}, gauges(),
+			"memory is sampled when the instance comes back")
+
+		held = acquireN(t, instances, 1)[0]
+		got := acquireLater(t, instances)
+
+		synctest.Wait() // the second caller waits: the pool is at its maximum
+		assert.Equal(t, map[string]int64{"key=test/k": 1}, collect(t, reader).sums["plg.pool.waits"])
+
+		spawner.memory.Store(2 * engine.PageSize)
+		instances.discard(t.Context(), held) // the refiller replaces it, for the waiting caller
+
+		held = <-got
+
+		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 1, "memory": 2 * engine.PageSize}, gauges(),
+			"the discarded instance's memory is gone, the new one's counted")
+
+		<-spawner.attempts // warm's
+		<-spawner.attempts // the first refill's
+		spawner.failures.Store(1)
+		instances.discard(t.Context(), held)
+
+		failed, retried := <-spawner.attempts, <-spawner.attempts
+		assert.Equal(t, refillBackoffMin, retried.Sub(failed), "the refiller retried after its backoff")
+		synctest.Wait() // the retry's instance is idle
+
+		measured := collect(t, reader)
+		assert.Equal(t, map[string]int64{"key=test/k,outcome=ok": 2, "key=test/k,outcome=failed": 1},
+			measured.sums["plg.pool.refills"])
+		assert.Equal(t, map[string]int64{"key=test/k": 1}, measured.sums["plg.pool.waits"], "callers that found an "+
+			"instance idle did not wait")
+
+		require.NoError(t, instances.close(t.Context()))
+		assert.Equal(t, map[string]int64{"instances": 0, "in_use": 0, "memory": 0}, gauges())
+	})
+}
+
+func TestPanicsAreCountedByKeyAndPhase(t *testing.T) {
+	t.Parallel()
+
+	inst, reader, _ := sdkInstruments(t)
+	reporter := newPanicReporter(slog.New(slog.DiscardHandler), func(context.Context, *PanicError) {
+		panic("callback bug")
+	}, 4, inst)
+
+	reporter.report(t.Context(), &PanicError{Key: "n/k", Language: LanguageGo, Phase: PhaseCall, Value: "trap"})
+	reporter.recovered(t.Context(), &PanicError{Key: "n", Phase: PhaseStorage}, "storage bug")
+
+	assert.Equal(t, map[string]int64{
+		"key=n/k,phase=call": 1, "key=n,phase=storage": 1,
+		"key=n/k,phase=callback": 1, "key=n,phase=callback": 1, // the callback panicked on both
+	}, collect(t, reader).sums["plg.plugin.panics"])
+}
+
+// failingProvider is a meter provider failing to create any instrument or callback, returning nil ones.
+type failingProvider struct {
+	noop.MeterProvider
+}
+
+var errMeter = errors.New("meter failure")
+
+//nolint:ireturn // the provider returns the API's Meter interface
+func (failingProvider) Meter(string, ...metric.MeterOption) metric.Meter { return failingMeter{} }
+
+type failingMeter struct {
+	noop.Meter
+}
+
+//nolint:ireturn // a failing meter returns no instrument, as a faulty provider might
+func (failingMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	return nil, errMeter
+}
+
+//nolint:ireturn // a failing meter returns no instrument, as a faulty provider might
+func (failingMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return nil, errMeter
+}
+
+//nolint:ireturn // a failing meter returns no instrument, as a faulty provider might
+func (failingMeter) Int64ObservableUpDownCounter(string, ...metric.Int64ObservableUpDownCounterOption) (
+	metric.Int64ObservableUpDownCounter, error,
+) {
+	return nil, errMeter
+}
+
+//nolint:ireturn // a failing meter returns no registration, as a faulty provider might
+func (failingMeter) RegisterCallback(metric.Callback, ...metric.Observable) (metric.Registration, error) {
+	return nil, errMeter
+}
+
+func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
+	t.Parallel()
+
+	_, err := newInstruments(failingProvider{})
+	require.ErrorIs(t, err, errMeter)
+
+	rec := newRecorder()
+	ctr := New(WithMeterProvider(failingProvider{}), WithLogger(slog.New(rec)))
+
+	records := rec.drain()
+	require.Len(t, records, 1)
+	assert.Equal(t, slog.LevelWarn, records[0].Level)
+	assert.Equal(t, "plg: creating metric instruments failed", records[0].Message)
+	assert.Contains(t, attr(&records[0], "error").String(), errMeter.Error())
+
+	// Every measurement goes to a no-op instrument instead.
+	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, reflect.TypeFor[testIface]())
+	meters.called(t.Context(), 0, time.Millisecond, errFake)
+	meters.requested(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
+	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
+	ctr.meters.countLoad(t.Context(), "n/k", LanguageGo, nil)
+	ctr.meters.countReloadFailure(t.Context(), "n")
+	ctr.meters.countSkipped(t.Context(), "n/k", LanguageLua)
+
+	assert.Len(t, ctr.RecentPanics(), 1, "the container kept working")
+	require.NoError(t, ctr.Close(t.Context()))
+}
+
+// TestMetersDefaultToTheGlobalProvider sets the process-global meter provider, so it cannot run in parallel.
+//
+//nolint:paralleltest // it sets the process-global meter provider
+func TestMetersDefaultToTheGlobalProvider(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(noop.NewMeterProvider())
+		assert.NoError(t, provider.Shutdown(context.Background()))
+	})
+
+	for _, ctr := range []*Container{New(), New(WithMeterProvider(nil))} {
+		ctr.panics.report(t.Context(), &PanicError{Key: "global/k", Phase: PhaseLoad})
+		require.NoError(t, ctr.Close(t.Context()))
+	}
+
+	assert.Equal(t, int64(2), collect(t, reader).sums["plg.plugin.panics"]["key=global/k,phase=load"])
+}
+
+// TestMetricsDoNotAllocate: measuring a call, its pool and an HTTP request allocates nothing beyond what the
+// OpenTelemetry SDK does, which is nothing for measurements on attribute sets it has seen (`make allocs`, part of
+// `make check`, runs it uninstrumented).
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestMetricsDoNotAllocate(t *testing.T) {
+	if testing.CoverMode() != "" {
+		t.Skip("allocations are measured without coverage instrumentation, by make allocs")
+	}
+
+	inst, _, _ := sdkInstruments(t)
+	meters := newPluginMeters(inst, "n/k", LanguageGo, reflect.TypeFor[testIface]())
+	instances := warmPool(t, &fakeSpawner{}, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
+	ctx := t.Context()
+	pluginErr := &PluginError{Key: "n/k", Method: "Do", Message: "no"}
+	ok := httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Sent: 10, Received: 20, Duration: time.Millisecond}
+	refused := httpcap.Report{Outcome: httpcap.OutcomeRefused, Sent: 10, Duration: time.Millisecond}
+
+	var failures int
+
+	allocs := testing.AllocsPerRun(100, func() {
+		held, err := instances.acquire(ctx)
+		if err != nil {
+			failures++
+
+			return
+		}
+
+		instances.release(held)
+		meters.called(ctx, 0, time.Millisecond, nil)
+		meters.called(ctx, 0, time.Millisecond, pluginErr)
+		meters.requested(ctx, ok)
+		meters.requested(ctx, refused)
+	})
+	assert.Zero(t, allocs)
+	assert.Zero(t, failures)
+	require.NoError(t, instances.close(ctx))
 }

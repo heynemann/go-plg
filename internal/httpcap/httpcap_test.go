@@ -89,10 +89,12 @@ func request(method, rawURL string, header http.Header, body string) []byte {
 	return append(httpabi.AppendRequestHead(nil, method, rawURL, header), body...)
 }
 
-// answer is the decoded answer to one request: a response, or the reason the host refused or failed it.
+// answer is the decoded answer to one request: a response, or the reason the host refused or failed it, and the
+// request's report.
 type answer struct {
 	refused string
 	resp    httpabi.Response
+	report  httpcap.Report
 }
 
 // unexpectedPanic is the panicked function of handlers whose capability must not panic.
@@ -107,26 +109,51 @@ func unexpectedPanic(tb testing.TB) func(context.Context, any) {
 func serve(ctx context.Context, t *testing.T, client *httpcap.Client, req []byte, n int) answer {
 	t.Helper()
 
-	return serveWith(ctx, t, client.Handler("web/p", unexpectedPanic(t)), req, n)
+	return serveWith(ctx, t, client, unexpectedPanic(t), req, n)
 }
 
-func serveWith(ctx context.Context, t *testing.T, handler func(context.Context, []byte, []byte, int) []byte,
+// serveWith is serve passing the capability's panics to panicked. Every request is reported once, with the
+// bytes the plugin sent and, for a response, the bytes it received.
+func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panicked func(context.Context, any),
 	req []byte, n int,
 ) answer {
 	t.Helper()
 
+	var reports []httpcap.Report
+
+	handler := client.Handler("web/p", httpcap.Hooks{
+		Panicked: panicked,
+		Done:     func(_ context.Context, r httpcap.Report) { reports = append(reports, r) },
+	})
+
 	prefix := []byte("keep")
 	out := handler(ctx, bytes.Clone(prefix), req, n)
 	require.Equal(t, prefix, out[:len(prefix)], "the answer is appended")
+	require.Len(t, reports, 1, "one report per request")
+
+	got := answer{report: reports[0]}
+	assert.Positive(t, got.report.Duration)
+	assert.Equal(t, len(req), got.report.Sent)
 
 	resp, err := httpabi.DecodeResponse(bytes.Clone(out[len(prefix):]))
 	if hostErr, ok := errors.AsType[*httpabi.HostError](err); ok {
-		return answer{refused: hostErr.Message}
+		assert.NotEqual(t, httpcap.OutcomeOK, got.report.Outcome)
+		assert.Zero(t, got.report.Status)
+		assert.Zero(t, got.report.Received)
+
+		got.refused = hostErr.Message
+
+		return got
 	}
 
 	require.NoError(t, err, "a well-formed answer")
+	assert.Equal(t, httpcap.OutcomeOK, got.report.Outcome)
+	assert.Equal(t, resp.Status, got.report.Status)
+	assert.Equal(t, len(out)-len(prefix), got.report.Received, "the encoded response")
 
-	return answer{resp: resp}
+	got.resp = resp
+
+	return got
 }
 
 func TestPolicyDefaults(t *testing.T) {
@@ -251,8 +278,9 @@ func TestHandlerRefusals(t *testing.T) {
 
 			client, logs := newClient(t, policy)
 
-			refused := serve(t.Context(), t, client, tc.req, tc.n).refused
-			assert.True(t, strings.HasPrefix(refused, tc.want.Error()), "%q", refused)
+			got := serve(t.Context(), t, client, tc.req, tc.n)
+			assert.True(t, strings.HasPrefix(got.refused, tc.want.Error()), "%q", got.refused)
+			assert.Equal(t, httpcap.OutcomeRefused, got.report.Outcome)
 			assert.Contains(
 				t,
 				logs.String(),
@@ -276,6 +304,7 @@ func TestDisabledRefusesEverything(t *testing.T) {
 
 	got := serve(t.Context(), t, client, request("GET", srv.URL, nil, ""), 1)
 	assert.Equal(t, httpcap.ErrDisabled.Error(), got.refused)
+	assert.Equal(t, httpcap.OutcomeRefused, got.report.Outcome)
 	assert.Contains(t, logs.String(), `"key":"web/p"`, "refusals are logged too")
 	assert.Zero(t, srv.hits.Load())
 }
@@ -295,6 +324,7 @@ func TestPrivateNetworksAreBlockedAtDialTime(t *testing.T) {
 		got := serve(t.Context(), t, client, request("GET", target, nil, ""), 1)
 		assert.Equal(t, httpcap.ErrPrivateAddress.Error(), got.refused, "%s: the plugin does not learn the address",
 			target)
+		assert.Equal(t, httpcap.OutcomeRefused, got.report.Outcome, "the policy refused it, at dial time")
 	}
 
 	assert.Contains(t, logs.String(), "127.0.0.1", "the log has the refused address")
@@ -325,9 +355,11 @@ func TestResponseLimits(t *testing.T) {
 
 	got = serve(t.Context(), t, client, request("GET", srv.URL+"/4097", nil, ""), 1)
 	assert.Contains(t, got.refused, httpcap.ErrResponseTooLarge.Error())
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome, "the request was made")
 
 	got = serve(t.Context(), t, client, request("GET", srv.URL+"/short", nil, ""), 1)
 	assert.Contains(t, got.refused, httpcap.ErrFailed.Error(), "a truncated body fails the request")
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
 }
 
 func TestRequestsEndWithTheirContext(t *testing.T) {
@@ -346,13 +378,19 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 	// The timeout ends the request wherever it is: on a loaded machine it may not have reached the server yet.
 	got := serve(t.Context(), t, short, request("GET", srv.URL+"/timeout", nil, ""), 1)
 	assert.Equal(t, httpcap.ErrTimeout.Error(), got.refused, "the policy's timeout")
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
 
 	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}, Timeout: time.Hour})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan []byte)
+	reports := make(chan httpcap.Report, 1)
+	handler := client.Handler("web/p", httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(_ context.Context, r httpcap.Report) { reports <- r },
+	})
 
 	go func() {
-		done <- client.Handler("web/p", unexpectedPanic(t))(ctx, nil, request("GET", srv.URL+"/canceled", nil, ""), 1)
+		done <- handler(ctx, nil, request("GET", srv.URL+"/canceled", nil, ""), 1)
 	}()
 
 	<-canceled // the server holds the request, which only the call's context can end within the hour
@@ -366,6 +404,7 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 	refused := hostErr.Message
 	assert.Contains(t, refused, httpcap.ErrFailed.Error())
 	assert.Contains(t, refused, context.Canceled.Error(), "the call's own context")
+	assert.Equal(t, httpcap.OutcomeFailed, (<-reports).Outcome)
 }
 
 func TestTransportFailures(t *testing.T) {
@@ -383,6 +422,7 @@ func TestTransportFailures(t *testing.T) {
 
 	got := serve(t.Context(), t, client, request("GET", srv.URL, nil, ""), 1)
 	assert.Contains(t, got.refused, httpcap.ErrFailed.Error(), "the server hung up")
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
 }
 
 type panickingTransport struct{}
@@ -399,11 +439,11 @@ func TestHandlerRecoversPanics(t *testing.T) {
 
 	var recovered []any
 
-	handler := client.Handler("web/p", func(_ context.Context, v any) { recovered = append(recovered, v) })
-
-	got := serveWith(t.Context(), t, handler, request("GET", "http://a.example/", nil, ""), 1)
+	got := serveWith(t.Context(), t, client, func(_ context.Context, v any) { recovered = append(recovered, v) },
+		request("GET", "http://a.example/", nil, ""), 1)
 	assert.Equal(t, httpcap.ErrInternal.Error(), got.refused, "the plugin is told about an internal error")
 	assert.Equal(t, []any{"transport bug"}, recovered, "the panic went to the panicked function, once")
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
 }
 
 // benchTarget is a handler allowed to reach a loopback server answering "ok", and a GET for it.
@@ -428,8 +468,9 @@ func benchClient(b *testing.B) benchTarget {
 	require.NoError(b, err)
 	b.Cleanup(client.Close)
 
-	return benchTarget{handler: client.Handler("bench/p", unexpectedPanic(b)), req: request(http.MethodGet, srv.URL,
-		nil, "")}
+	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}}
+
+	return benchTarget{handler: client.Handler("bench/p", hooks), req: request(http.MethodGet, srv.URL, nil, "")}
 }
 
 // BenchmarkRoundTrip is the host side of one plugin request (checks, request, response encoding) against a

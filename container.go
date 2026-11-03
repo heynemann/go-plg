@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
@@ -47,6 +48,8 @@ type Container struct {
 	engine       *engine.Engine
 	logger       *slog.Logger
 	panics       *panicReporter
+	meters       *instruments
+	observation  metric.Registration                 // the callback observing the pools' gauges
 	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
 	modules      *xsync.Map[moduleKey, *compiledGuest]
 	names        *xsync.Map[string, bool]          // registered (or registering) names
@@ -65,7 +68,6 @@ func New(opts ...Option) *Container {
 	ctr := &Container{
 		engine:       engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
 		logger:       cfg.logger,
-		panics:       newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory),
 		runtimes:     xsync.NewMap[uint64, *engine.Runtime](),
 		modules:      xsync.NewMap[moduleKey, *compiledGuest](),
 		names:        xsync.NewMap[string, bool](),
@@ -75,6 +77,9 @@ func New(opts ...Option) *Container {
 		closeTimeout: closeTimeout,
 	}
 	ctr.catalogue.Store(&snapshot{})
+	ctr.instrument(&cfg)
+
+	ctr.panics = newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory, ctr.meters)
 
 	return ctr
 }
@@ -122,7 +127,7 @@ func (c *Container) Close(ctx context.Context) error {
 		errs = append(errs, rt.Close(ctx))
 	}
 
-	errs = append(errs, c.engine.Close(ctx))
+	errs = append(errs, c.engine.Close(ctx), c.observation.Unregister())
 
 	err := errors.Join(errs...)
 	if err != nil {

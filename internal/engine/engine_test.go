@@ -469,6 +469,29 @@ func TestInputBufferGrowsOnlyWhenNeeded(t *testing.T) {
 	assert.True(t, inst.Broken())
 }
 
+func TestMemoryFollowsTheGuestsGrowth(t *testing.T) {
+	t.Parallel()
+
+	grow := func(pages int32) []byte {
+		return slices.Concat(i32Const(pages), []byte{0x40, 0x00}, drop(), packed(0, 1)) // memory.grow, result dropped
+	}
+	bodies := abiOK(0, 1)
+	inst := mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
+	assert.Equal(t, uint64(engine.PageSize), inst.Memory(), "the module's one page")
+
+	bodies["plg_call"] = grow(2)
+	inst = mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
+	_, err := inst.Call(t.Context(), 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3*engine.PageSize), inst.Memory())
+
+	bodies["plg_call"] = grow(16) // the runtime's limit is 16 pages
+	inst = mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
+	_, err = inst.Call(t.Context(), 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(engine.PageSize), inst.Memory(), "growth beyond the limit fails and changes nothing")
+}
+
 func TestCloseRunsPlgClose(t *testing.T) {
 	t.Parallel()
 

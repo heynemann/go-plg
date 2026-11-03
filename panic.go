@@ -107,19 +107,24 @@ func (e *PanicError) Unwrap() []error {
 	return errs
 }
 
-// panicReporter reports a container's PanicErrors: an Error-level log, the panic history and the WithOnPanic
-// function. It is safe for concurrent use.
+// panicReporter reports a container's PanicErrors: an Error-level log, the panic history, the plg.plugin.panics
+// metric and the WithOnPanic function. It is safe for concurrent use.
 type panicReporter struct {
 	logger  *slog.Logger
 	onPanic func(context.Context, *PanicError)
+	meters  *instruments
 	history panicHistory
 }
 
-// newPanicReporter returns a reporter keeping the newest history PanicErrors (none for zero or less).
-func newPanicReporter(logger *slog.Logger, onPanic func(context.Context, *PanicError), history int) *panicReporter {
+// newPanicReporter returns a reporter keeping the newest history PanicErrors (none for zero or less) and
+// counting them in meters.
+func newPanicReporter(logger *slog.Logger, onPanic func(context.Context, *PanicError), history int,
+	meters *instruments,
+) *panicReporter {
 	return &panicReporter{
 		logger:  logger,
 		onPanic: onPanic,
+		meters:  meters,
 		history: panicHistory{ring: make([]atomic.Pointer[panicEntry], max(history, 0))},
 	}
 }
@@ -135,6 +140,7 @@ func (r *panicReporter) recovered(ctx context.Context, failure *PanicError, valu
 func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	failure.Time = time.Now()
 	r.history.record(failure)
+	r.meters.countPanic(ctx, failure)
 	r.log(ctx, failure)
 
 	if r.onPanic != nil {
@@ -152,6 +158,7 @@ func (r *panicReporter) callback(ctx context.Context, failure *PanicError, metho
 				Stack: debug.Stack(), Time: time.Now(),
 			}
 			r.history.record(failed)
+			r.meters.countPanic(ctx, failed)
 
 			if method != logMethod {
 				r.log(ctx, failed)

@@ -4,9 +4,9 @@
 
 **Blocked by:** 07 (Stability), 09 (Host-mediated HTTP)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test with an in-memory metric reader observes every listed instrument with correct labels
-- [ ] CI fails if Get or All allocate or Get exceeds 50 ns/op
-- [ ] Call benchmarks per guest are published as CI artifacts in benchstat format
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A test with an in-memory metric reader observes every listed instrument with correct labels
+- [x] CI fails if Get or All allocate or Get exceeds 50 ns/op
+- [x] Call benchmarks per guest are published as CI artifacts in benchstat format
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

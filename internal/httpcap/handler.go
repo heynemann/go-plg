@@ -13,15 +13,45 @@ import (
 	"github.com/heynemann/go-plg/internal/httpabi"
 )
 
+// Hooks are the functions a [Client.Handler] reports to.
+type Hooks struct {
+	// Panicked receives a panic in the capability (or net/http), from the recovering goroutine (so it may record
+	// the panicking stack); the request is answered with [ErrInternal].
+	Panicked func(ctx context.Context, value any)
+	// Done receives the report of every request, made, refused or failed, once it is answered.
+	Done func(ctx context.Context, report Report)
+}
+
+// Outcome is how a request ended.
+type Outcome uint8
+
+// Outcomes of a request.
+const (
+	// OutcomeOK is a request that got a response, whatever its status code.
+	OutcomeOK Outcome = iota
+	// OutcomeRefused is a request the policy refused: HTTP disabled, a limit, a host not allowed, a private
+	// address, an invalid request.
+	OutcomeRefused
+	// OutcomeFailed is a request that failed in transit, timed out, had too large a response, or met a panic.
+	OutcomeFailed
+)
+
+// Report describes one request, for metrics.
+type Report struct {
+	Duration time.Duration // from the request reaching the host to its answer
+	Status   int           // the response's status code; 0 unless the outcome is OutcomeOK
+	Sent     int           // bytes of the encoded request (URL, header and body) the plugin handed over
+	Received int           // bytes of the encoded response (status, header and body); 0 unless OutcomeOK
+	Outcome  Outcome
+}
+
 // Handler returns the function serving the http_roundtrip requests of the plugin with the given key (the
 // shape of engine.HTTPFunc). It appends the encoded answer to dst; req is the encoded request and n counts the
-// requests of the current call. A panic in the capability (or net/http) is passed to panicked, from the
-// recovering goroutine (so it may record the panicking stack), and answered with [ErrInternal].
-func (c *Client) Handler(key string, panicked func(ctx context.Context, value any)) func(
-	ctx context.Context, dst, req []byte, n int,
-) []byte {
+// requests of the current call. Each request is reported to hooks.Done once answered; a panic in the capability
+// (or net/http) is passed to hooks.Panicked and answered with [ErrInternal].
+func (c *Client) Handler(key string, hooks Hooks) func(ctx context.Context, dst, req []byte, n int) []byte {
 	return func(ctx context.Context, dst, req []byte, n int) []byte {
-		return c.serve(ctx, key, panicked, dst, req, n)
+		return c.serve(ctx, key, hooks, dst, req, n)
 	}
 }
 
@@ -36,42 +66,61 @@ type exchange struct {
 }
 
 // serve answers one request, turning a panic in the capability (or net/http) into an internal error.
-func (c *Client) serve(ctx context.Context, key string, panicked func(context.Context, any), dst, req []byte,
-	n int,
-) []byte {
+func (c *Client) serve(ctx context.Context, key string, hooks Hooks, dst, req []byte, n int) []byte {
 	var out []byte
+
+	start := time.Now()
 
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				panicked(ctx, v)
+				hooks.Panicked(ctx, v)
+				hooks.Done(ctx, Report{Duration: time.Since(start), Sent: len(req), Outcome: OutcomeFailed})
 
 				out = httpabi.AppendFailure(dst, ErrInternal.Error())
 			}
 		}()
 
-		out = c.answer(ctx, key, dst, req, n)
+		out = c.answer(ctx, key, hooks.Done, start, dst, req, n)
 	}()
 
 	return out
 }
 
-// answer makes or refuses one request and logs it.
-func (c *Client) answer(ctx context.Context, key string, dst, req []byte, n int) []byte {
-	xch := exchange{start: time.Now(), sent: len(req)}
+// answer makes or refuses one request, logs it and reports it to done.
+func (c *Client) answer(ctx context.Context, key string, done func(context.Context, Report), start time.Time,
+	dst, req []byte, n int,
+) []byte {
+	xch := exchange{start: start, sent: len(req)}
 	head := len(dst)
 
 	out, err := c.do(ctx, &xch, dst, req, n)
 	if err != nil {
 		c.log(ctx, key, &xch, err)
+		done(ctx, Report{Duration: time.Since(start), Sent: xch.sent, Outcome: outcome(err)})
 
 		return httpabi.AppendFailure(out[:head], message(err))
 	}
 
 	xch.received = len(out) - head
 	c.log(ctx, key, &xch, nil)
+	done(ctx, Report{
+		Duration: time.Since(start), Status: xch.status, Sent: xch.sent, Received: xch.received, Outcome: OutcomeOK,
+	})
 
 	return out
+}
+
+// outcome classifies a request's failure: in transit (a timeout and a too large response included) or refused
+// by the policy.
+func outcome(err error) Outcome {
+	for _, failed := range []error{ErrFailed, ErrTimeout, ErrResponseTooLarge} {
+		if errors.Is(err, failed) {
+			return OutcomeFailed
+		}
+	}
+
+	return OutcomeRefused
 }
 
 // do checks and makes one request, appending the encoded response to dst.

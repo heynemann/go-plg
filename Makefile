@@ -10,6 +10,8 @@ BIN := $(CURDIR)/bin
 COVERAGE := coverage.out
 COVERAGE_MIN := 95
 BENCH_OUT := bench.txt
+BUDGET_RUNS := 5
+BUDGET_OUT := $(BIN)/budgets.txt
 
 # The Go guest's standard library allowlist (PLAN.md) has one source, internal/goallow/packages.txt, which
 # `plg gen` and the tests read too. Symbol tables are extracted for every package except cmp (yaegi compiles it
@@ -36,9 +38,9 @@ GUEST_SYMBOLS := guestsrc/golang/symbols
 GO_GUEST := guest/golang/golang.wasm.gz
 GO_GUEST_RAW := $(BIN)/golang.wasm
 
-.PHONY: check fmt-check lint test coverage allocs repeat bench symbols guests verify-guests clean
+.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests verify-guests clean
 
-check: fmt-check lint test coverage allocs repeat
+check: fmt-check lint test coverage allocs budgets repeat
 
 # Formatting must leave no diff.
 fmt-check:
@@ -59,6 +61,15 @@ coverage:
 # Allocation budgets (RULES.md §3). Coverage instrumentation changes inlining, so they run uninstrumented.
 allocs:
 	go test -race -shuffle=on -tags integration -count=1 -run 'DoNotAllocate' ./...
+
+# Benchmark budgets (RULES.md §3): Get <= 50 ns/op, Get and All 0 allocs/op, checked by scripts/bench-budget.sh.
+# Measured without the race detector and coverage (both slow every operation down), BUDGET_RUNS times: the time
+# budget applies to the fastest run, so one run slowed by other work on the machine cannot fail the gate.
+budgets:
+	mkdir -p $(BIN)
+	go test -tags integration -run='^$$' -bench='^Benchmark(Get|All)$$' -benchmem -count=$(BUDGET_RUNS) . | \
+		tee $(BUDGET_OUT)
+	scripts/bench-budget.sh $(BUDGET_OUT)
 
 # Unit tests repeated to flush out flakiness and state leaking between runs (RULES.md §2).
 repeat:

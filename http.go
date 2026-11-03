@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/httpcap"
 )
 
@@ -68,6 +69,12 @@ func httpClient(policy *HTTPPolicy, logger *slog.Logger) (*httpcap.Client, error
 	}
 
 	return client, nil
+}
+
+// httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
+// Register call's policy, its panics reported and its requests counted in meters.
+func (c *Container) httpHandler(reg *registration, key string, lang Language, meters *pluginMeters) engine.HTTPFunc {
+	return reg.http.Handler(key, httpcap.Hooks{Panicked: c.httpPanicked(key, lang), Done: meters.requested})
 }
 
 // httpPanicked returns the function the HTTP capability passes its panics to: they become reported
