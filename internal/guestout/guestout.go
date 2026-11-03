@@ -114,6 +114,10 @@ func (c *Capture) keepTail(data []byte) {
 
 // Write logs every complete line of data and keeps the rest for the next write. It never fails. The guest
 // writes during a call without its context, so the lines are logged without one.
+//
+// Its cost is linear in len(data) at most, since the guest's write runs in a host function that no deadline
+// interrupts: a newline is searched for only within the line being filled, and once the step's budget and its
+// truncation notice are spent the rest of the step is dropped unread (stderr's tail is still kept).
 func (s *stream) Write(data []byte) (int, error) {
 	if s.keep {
 		s.capture.keepTail(data)
@@ -121,16 +125,12 @@ func (s *stream) Write(data []byte) (int, error) {
 
 	ctx := context.Background()
 
-	for rest := data; len(rest) > 0; {
-		end := bytes.IndexByte(rest, '\n')
+	for rest := data; len(rest) > 0 && !s.dropped; {
+		room := MaxLine - len(s.line)
+		end := bytes.IndexByte(rest[:min(len(rest), room+1)], '\n')
 
-		chunk := rest
-		if end >= 0 {
-			chunk = rest[:end]
-		}
-
-		if room := MaxLine - len(s.line); len(chunk) > room {
-			s.line = append(s.line, chunk[:room]...)
+		if end < 0 && len(rest) > room {
+			s.line = append(s.line, rest[:room]...)
 			s.emit(ctx)
 
 			rest = rest[room:]
@@ -138,12 +138,13 @@ func (s *stream) Write(data []byte) (int, error) {
 			continue
 		}
 
-		s.line = append(s.line, chunk...)
-
 		if end < 0 {
+			s.line = append(s.line, rest...)
+
 			break
 		}
 
+		s.line = append(s.line, rest[:end]...)
 		s.emit(ctx)
 
 		rest = rest[end+1:]

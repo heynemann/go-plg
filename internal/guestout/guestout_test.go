@@ -3,9 +3,13 @@ package guestout_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"runtime/debug"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -232,6 +236,70 @@ func TestGuestKeepsTheLastBytesOfALongStep(t *testing.T) {
 	assert.Equal(t, "after\n", capture.Guest(), "only the new step, though the ring holds more")
 }
 
+// guarded maps size bytes of which only the first head and the last tail bytes (whole pages) can be read:
+// reading anything in between faults.
+func guarded(t *testing.T, size, head, tail int) []byte {
+	t.Helper()
+
+	page := os.Getpagesize()
+	require.Zero(t, size%page+head%page+tail%page, "whole pages")
+
+	data, err := syscall.Mmap(-1, 0, size, syscall.PROT_NONE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, syscall.Munmap(data)) })
+
+	require.NoError(t, syscall.Mprotect(data[:head], syscall.PROT_READ|syscall.PROT_WRITE))
+	require.NoError(t, syscall.Mprotect(data[size-tail:], syscall.PROT_READ|syscall.PROT_WRITE))
+
+	return data
+}
+
+// A newline-free write far past the budget: only its first bytes, up to the line crossing the budget and the
+// one bringing the truncation notice, and its last TailSize bytes may be read. The rest of the 64 MiB is
+// unreadable, so a scan for a newline beyond the next line, or any per-line work after the notice, faults.
+func TestOutputPastTheBudgetIsNotScanned(t *testing.T) {
+	t.Parallel()
+
+	const size, head = 64 << 20, guestout.StepBudget + 2*guestout.MaxLine
+
+	data := guarded(t, size, head, guestout.TailSize)
+	copy(data[:head], strings.Repeat("x", head))
+	copy(data[size-guestout.TailSize:], strings.Repeat("y", guestout.TailSize))
+
+	capture, logs := newCapture()
+	capture.Begin()
+
+	var (
+		n     int
+		err   error
+		fault any
+	)
+
+	func() {
+		defer debug.SetPanicOnFault(debug.SetPanicOnFault(true)) // a fault panics instead of crashing
+		defer func() { fault = recover() }()
+
+		n, err = capture.Stderr().Write(data)
+	}()
+	require.Nil(t, fault, "the write read output past the budget")
+	require.NoError(t, err)
+	assert.Equal(t, size, n)
+
+	capture.End(t.Context())
+
+	piece := strings.Repeat("x", guestout.MaxLine)
+	want := make([]string, guestout.StepBudget/(guestout.MaxLine+1)+1) // the pieces up to the one crossing it
+
+	for i := range want {
+		want[i] = piece
+	}
+
+	assert.Equal(t, want, logs.texts("stderr"))
+	assert.Len(t, logs.records, len(want)+1)
+	assert.Equal(t, "plg: guest output truncated", logs.records[len(logs.records)-1].msg)
+	assert.Equal(t, strings.Repeat("y", guestout.TailSize), capture.Guest(), "the tail is still kept")
+}
+
 // BenchmarkStep is what every call pays for the capture when the guest writes nothing: Begin and End.
 func BenchmarkStep(b *testing.B) {
 	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
@@ -259,5 +327,28 @@ func BenchmarkStderrLine(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// BenchmarkNewlineFreeWrite is one step's single write without a newline, of growing size, to stderr: the cost
+// grows linearly at most (past the budget only the tail is kept).
+func BenchmarkNewlineFreeWrite(b *testing.B) {
+	for _, mib := range []int{1, 8, 64} {
+		b.Run(fmt.Sprintf("%dMiB", mib), func(b *testing.B) {
+			capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+			data := bytes.Repeat([]byte("x"), mib<<20)
+
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+
+			for b.Loop() {
+				capture.Begin()
+
+				_, err := capture.Stderr().Write(data)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
