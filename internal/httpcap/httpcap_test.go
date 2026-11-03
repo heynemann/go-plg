@@ -336,6 +336,25 @@ func TestPrivateNetworksAreBlockedAtDialTime(t *testing.T) {
 	assert.Zero(t, srv.hits.Load())
 }
 
+func TestLocalUseNAT64IsBlockedWithPrivateNetworks(t *testing.T) {
+	t.Parallel()
+
+	const target = "http://[64:ff9b:1:0:c0:a801:800:0]:1/" // 192.168.1.8 under the /64 layout
+
+	hosts := []string{"64:ff9b:1:0:c0:a801:800:0"}
+
+	blocked, _ := newClient(t, httpcap.Policy{AllowedHosts: hosts, BlockPrivateNetworks: true})
+	got := serve(t.Context(), t, blocked, request("GET", target, nil, ""), 1)
+	assert.Equal(t, httpcap.ErrPrivateAddress.Error(), got.refused, "refused before connecting")
+	assert.Equal(t, httpcap.OutcomeRefused, got.report.Outcome)
+
+	// Unblocked, the dial is made: it fails in transit (unreachable, or its 1ms timeout), never as private.
+	open, _ := newClient(t, httpcap.Policy{AllowedHosts: hosts, Timeout: time.Millisecond})
+	got = serve(t.Context(), t, open, request("GET", target, nil, ""), 1)
+	assert.NotEqual(t, httpcap.ErrPrivateAddress.Error(), got.refused)
+	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome, "%s", got.refused)
+}
+
 func TestResponseLimits(t *testing.T) {
 	t.Parallel()
 

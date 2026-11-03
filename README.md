@@ -477,7 +477,9 @@ Go plugins use `net/http` (`http.Get`, `http.Client`, …), TypeScript plugins `
 `http.request{method = "POST", url = "...", headers = {...}, body = "..."}` (returning
 `{status, headers, body}` or `nil, reason`). The host makes every request: it checks the allowlist (names,
 wildcards, IPs, optional ports; http and https only), refuses private, loopback, link-local and metadata
-addresses after DNS resolution (`BlockPrivateNetworks`; set it to `new(false)` to reach them), never uses an
+addresses after DNS resolution, including IPv6 addresses embedding them (mapped, `64:ff9b::/96` NAT64, 6to4)
+and the whole local-use NAT64 range `64:ff9b:1::/48`, whose embedding layout cannot be known
+(`BlockPrivateNetworks`; set it to `new(false)` to reach them), never uses an
 environment proxy, bounds sizes and time (never past the call's `ctx`), and logs and counts each request with the
 plugin's key. Redirects are followed by the plugin's side, each hop checked like the first. Plugins get requests
 and responses, not tunnels or upgraded protocols: `CONNECT` is refused, and a `101 Switching Protocols` answer

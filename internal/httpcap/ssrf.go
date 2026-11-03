@@ -24,20 +24,23 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"), // documentation
 	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
 	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
+	// Local-use NAT64 (RFC 8215): a network may place the IPv4 address under any RFC 6052 layout (/32 to /96),
+	// so which one it embeds cannot be known from the address, and the whole range is refused.
+	netip.MustParsePrefix("64:ff9b:1::/48"),
 }
 
 // Prefixes of IPv6 addresses that embed an IPv4 address, which is checked in turn.
 //
 //nolint:gochecknoglobals // immutable, built once
 var (
-	nat64      = netip.MustParsePrefix("64:ff9b::/96")   // well-known NAT64: the low 32 bits
-	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48") // local-use NAT64: the low 32 bits
-	sixToFour  = netip.MustParsePrefix("2002::/16")      // 6to4: bits 16-47
+	nat64     = netip.MustParsePrefix("64:ff9b::/96") // well-known NAT64: the low 32 bits
+	sixToFour = netip.MustParsePrefix("2002::/16")    // 6to4: bits 16-47
 )
 
 // isPrivate reports whether addr is not a public unicast address: loopback, private and unique-local,
 // link-local (which includes the 169.254.169.254 cloud metadata address), multicast, unspecified, reserved,
-// shared, documentation, or an IPv6 address embedding (mapping, NAT64, 6to4) any of these.
+// shared, documentation, local-use NAT64, or an IPv6 address embedding (mapping, well-known NAT64, 6to4) any of
+// these.
 func isPrivate(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	if !addr.IsGlobalUnicast() || addr.IsPrivate() || inNonPublic(addr) {
@@ -64,7 +67,7 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
 	b := addr.As16()
 
 	switch {
-	case nat64.Contains(addr) || nat64Local.Contains(addr):
+	case nat64.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[12:16])), true
 	case sixToFour.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[2:6])), true
