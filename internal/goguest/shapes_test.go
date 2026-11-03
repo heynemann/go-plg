@@ -24,7 +24,7 @@ func shaperType() reflect.Type { return reflect.TypeFor[testcontract.Shaper]() }
 func loadShaper(t *testing.T) *goguest.Guest {
 	t.Helper()
 
-	dispatcher, err := goabi.RenderDispatcher(shaperType())
+	dispatcher, err := goabi.RenderDispatcher(shaperType(), nil)
 	require.NoError(t, err)
 
 	names := make([]string, shaperType().NumMethod())
@@ -34,7 +34,7 @@ func loadShaper(t *testing.T) *goguest.Guest {
 
 	var out bytes.Buffer
 
-	guest := goguest.New(&out, &out)
+	guest := goguest.New(&out, &out, nil)
 	root := gopathWith(t, testdataPlugin(t, "shaper"), string(dispatcher))
 	res := parse(t, guest.Init(send(guest, initPayload(t, root, names))))
 	require.Equal(t, wire.StatusOK, res.status, res.msg)

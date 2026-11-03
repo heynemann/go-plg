@@ -104,6 +104,37 @@ func (a *plgShaper) Sum(p0 context.Context, p1 int, p2 ...int) (int, error) {
 	return a.WSum(p0, p1, p2...)
 }
 
+// plgHosted implements Hosted for plg, which fills each W field with a call into a plugin.
+type plgHosted struct {
+	WDescribe func(context.Context, string) (User, error)
+	WOrigin   func(context.Context) (string, error)
+	WRelay    func(context.Context, string) (string, error)
+	WTotal    func(context.Context, int, ...int) (int, error)
+	WValue    func(context.Context) (string, error)
+}
+
+var _ Hosted = (*plgHosted)(nil)
+
+func (a *plgHosted) Describe(p0 context.Context, p1 string) (User, error) {
+	return a.WDescribe(p0, p1)
+}
+
+func (a *plgHosted) Origin(p0 context.Context) (string, error) {
+	return a.WOrigin(p0)
+}
+
+func (a *plgHosted) Relay(p0 context.Context, p1 string) (string, error) {
+	return a.WRelay(p0, p1)
+}
+
+func (a *plgHosted) Total(p0 context.Context, p1 int, p2 ...int) (int, error) {
+	return a.WTotal(p0, p1, p2...)
+}
+
+func (a *plgHosted) Value(p0 context.Context) (string, error) {
+	return a.WValue(p0)
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
@@ -113,6 +144,11 @@ func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Shaper](),
 		Adapter:   reflect.TypeFor[plgShaper](),
+		Source:    plgFooerSource,
+	})
+	plg.MustRegisterContract(plg.Contract{
+		Interface: reflect.TypeFor[Hosted](),
+		Adapter:   reflect.TypeFor[plgHosted](),
 		Source:    plgFooerSource,
 	})
 }

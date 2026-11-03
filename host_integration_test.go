@@ -1,0 +1,264 @@
+//go:build integration
+
+package plg_test
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/internal/testcontract"
+)
+
+// registerHosted registers the hosted test plugin as "hosted/ref", with Register's context carrying "register".
+func registerHosted(tb testing.TB, ctr *plg.Container) {
+	tb.Helper()
+
+	err := plg.Register[testcontract.Hosted](withHostValue(tb.Context(), "register"), ctr, "hosted",
+		plg.WithStorage(goStorage(tb, "hosted", map[string]string{"ref": "hosted"})),
+		plg.WithHost[testcontract.Host](newTestHost()))
+	require.NoError(tb, err)
+}
+
+// hostedPlugin registers the hosted test plugin in ctr and returns it.
+//
+//nolint:ireturn // the plugin is served as the contract interface under test
+func hostedPlugin(tb testing.TB, ctr *plg.Container) testcontract.Hosted {
+	tb.Helper()
+
+	registerHosted(tb, ctr)
+
+	hosted, err := plg.Get[testcontract.Hosted](tb.Context(), ctr, "hosted/ref")
+	require.NoError(tb, err)
+
+	return hosted
+}
+
+func TestHostMethodsReturnTypedResults(t *testing.T) {
+	t.Parallel()
+
+	hosted := hostedPlugin(t, newContainer(t))
+
+	user, err := hosted.Describe(t.Context(), "ada")
+	require.NoError(t, err)
+
+	want := newTestHost().users["ada"]
+	want.Name = "described Ada"
+	assert.Equal(t, want, user, "the struct crossed host -> guest -> host, nested pointer, slice and time included")
+
+	tests := []struct {
+		more []int
+		base int
+		want int
+	}{
+		{base: 1, more: []int{2, 3}, want: 6},
+		{base: 7, want: 7},
+		{base: -maxSafeInt, more: []int{maxSafeInt, maxSafeInt}, want: maxSafeInt},
+	}
+
+	for _, tc := range tests {
+		got, err := hosted.Total(t.Context(), tc.base, tc.more...)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got, "variadic host method with %d, %v", tc.base, tc.more)
+	}
+}
+
+func TestHostMethodsSeeTheContextOfTheCallInProgress(t *testing.T) {
+	t.Parallel()
+
+	hosted := hostedPlugin(t, newContainer(t))
+
+	for _, v := range []string{"first call", "second call", ""} {
+		got, err := hosted.Value(withHostValue(t.Context(), v))
+		require.NoError(t, err)
+		assert.Equal(t, v, got)
+	}
+
+	origin, err := hosted.Origin(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "register", origin, "while Create runs, host calls see Register's context")
+}
+
+func TestHostErrorsReachThePluginAsErrors(t *testing.T) {
+	t.Parallel()
+
+	hosted := hostedPlugin(t, newContainer(t))
+
+	seen, err := hosted.Relay(t.Context(), "quota exceeded")
+	require.NoError(t, err, "the plugin handled the host's error itself")
+	assert.Equal(t, "quota exceeded", seen, "the plugin got an error with the host's exact message")
+
+	seen, err = hosted.Relay(t.Context(), "")
+	require.NoError(t, err)
+	assert.Empty(t, seen, "a nil error stays nil")
+
+	_, err = hosted.Describe(t.Context(), "nobody")
+
+	var pluginErr *plg.PluginError
+
+	require.ErrorAs(t, err, &pluginErr, "the plugin returned the host's error")
+	assert.Equal(t, `no user "nobody"`, pluginErr.Message)
+	require.NotErrorIs(t, err, plg.ErrCall, "an error from the host is the plugin's to handle")
+
+	// A result the host cannot encode is an error for the plugin too, naming the method and result.
+	_, err = hosted.Total(t.Context(), maxSafeInt, 1)
+	require.ErrorAs(t, err, &pluginErr)
+	assert.Contains(t, pluginErr.Message, "host method testcontract.Host.Sum: result 0: wire: integer beyond ±2^53")
+}
+
+func TestHostPanicReachesThePluginAsAnError(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	hosted := hostedPlugin(t, loggedContainer(t, &logs))
+
+	seen, err := hosted.Relay(t.Context(), "panic")
+	require.NoError(t, err, "the plugin handled the error the panic became")
+	assert.Equal(t, "plg: host method panicked: testcontract.Host.Fail: host panicked on purpose", seen)
+
+	origin, err := hosted.Origin(withHostValue(t.Context(), "later"))
+	require.NoError(t, err)
+	assert.Equal(t, "register", origin, "the same instance keeps serving: a host panic does not discard it")
+
+	user, err := hosted.Describe(t.Context(), "ada")
+	require.NoError(t, err, "the host keeps serving")
+	assert.Equal(t, "described Ada", user.Name)
+
+	logged := logs.String()
+	assert.Contains(t, logged, `"level":"ERROR","msg":"plg: host method panicked","key":"hosted/ref"`)
+	assert.Contains(t, logged, `"method":"testcontract.Host.Fail","panic":"host panicked on purpose"`)
+	assert.Contains(t, logged, "(*testHost).Fail", "the host stack is logged")
+}
+
+func TestCreateMustMatchWithHost(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+	impl := plg.WithHost[testcontract.Host](newTestHost())
+
+	err := plg.Register[testcontract.Hosted](t.Context(), ctr, "nohost",
+		plg.WithStorage(goStorage(t, "nohost", map[string]string{"ref": "hosted"})))
+	require.ErrorIs(t, err, plg.ErrLoad)
+	require.ErrorContains(t, err, "nohost/ref")
+	require.ErrorContains(t, err, "Create has the wrong type: Create has type func(")
+	require.ErrorContains(t, err, "want func Create() (<interface>, error) (Create takes a Host only when "+
+		"Register passes plg.WithHost)")
+
+	err = plg.Register[testcontract.Fooer](t.Context(), ctr, "noparam",
+		plg.WithStorage(goStorage(t, "noparam", map[string]string{"ref": "fooer"})), impl)
+	require.ErrorIs(t, err, plg.ErrLoad)
+	require.ErrorContains(t, err, "want func Create(testcontract.Host) (<interface>, error) (Register passes "+
+		"plg.WithHost[testcontract.Host])")
+
+	wrongParam := strings.Replace(hostedSource(t), "Create(host testcontract.Host)",
+		"Create(host testcontract.Hosted)", 1)
+	store := plg.NewMemoryStorage("wrongparam")
+	require.NoError(t, store.Put(plg.Descriptor{Key: "ref", Language: plg.LanguageGo, Entrypoint: "."},
+		fstest.MapFS{"plugin.go": {Data: []byte(wrongParam)}}))
+
+	err = plg.Register[testcontract.Hosted](t.Context(), ctr, "wrongparam", plg.WithStorage(store), impl)
+	require.ErrorIs(t, err, plg.ErrLoad, "a Create taking another interface is rejected, though yaegi would run it")
+	require.ErrorContains(t, err, "wrongparam/ref")
+	require.ErrorContains(t, err, "plugin Create must take the Host interface testcontract.Host (from "+
+		`"github.com/heynemann/go-plg/internal/testcontract"); it takes testcontract.Hosted`)
+}
+
+func hostedSource(t *testing.T) string {
+	t.Helper()
+
+	src, err := fs.ReadFile(pluginFiles("hosted"), "plugin.go")
+	require.NoError(t, err)
+
+	return string(src)
+}
+
+func TestHostServesConcurrentPlugins(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+	err := plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
+		plg.WithStorage(goStorage(t, "hosted", map[string]string{"a": "hosted", "b": "hosted", "c": "hosted"})),
+		plg.WithHost[testcontract.Host](newTestHost()))
+	require.NoError(t, err)
+
+	errs := make(chan error, 3*4)
+
+	for key, hosted := range plg.All[testcontract.Hosted](t.Context(), ctr) {
+		for i := range 4 {
+			go func() {
+				want := fmt.Sprintf("%s#%d", key, i)
+
+				got, err := hosted.Value(withHostValue(t.Context(), want))
+				if err == nil && got != want {
+					err = fmt.Errorf("%w: %s: got %q", errWrongValue, want, got)
+				}
+
+				errs <- err
+			}()
+		}
+	}
+
+	for range cap(errs) {
+		require.NoError(t, <-errs, "each call's host methods see that call's context")
+	}
+}
+
+var errWrongValue = errors.New("wrong value")
+
+// BenchmarkCallGoHost is one call into a Go plugin making one host call (Value), every protection on; compare
+// with BenchmarkCallGo for the host call's round trip.
+func BenchmarkCallGoHost(b *testing.B) {
+	hosted := hostedPlugin(b, newContainer(b))
+	ctx := withHostValue(b.Context(), "bench")
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_, err := hosted.Value(ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkCallGoHostStruct is one call making one host call returning a struct (Describe).
+func BenchmarkCallGoHostStruct(b *testing.B) {
+	hosted := hostedPlugin(b, newContainer(b))
+	ctx := b.Context()
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_, err := hosted.Describe(ctx, "ada")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkCallGoHostParallel contends for the plugin's single instance.
+func BenchmarkCallGoHostParallel(b *testing.B) {
+	hosted := hostedPlugin(b, newContainer(b))
+	ctx := withHostValue(b.Context(), "bench")
+
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, err := hosted.Value(ctx)
+			if err != nil {
+				b.Error(err)
+
+				return
+			}
+		}
+	})
+}

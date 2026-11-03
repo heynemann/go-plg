@@ -4,11 +4,11 @@
 
 **Blocked by:** 03 (Full data-type encoding)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A Go plugin calls a Host method and gets typed results, including structs
-- [ ] Values stored in the plugin call's ctx are visible inside the Host implementation
-- [ ] Invalid Host interfaces fail Register with precise messages
-- [ ] Errors returned by Host methods reach the plugin as errors
-- [ ] A panicking Host implementation returns a PanicError (Phase Host) to the plugin call without crashing
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A Go plugin calls a Host method and gets typed results, including structs
+- [x] Values stored in the plugin call's ctx are visible inside the Host implementation
+- [x] Invalid Host interfaces fail Register with precise messages
+- [x] Errors returned by Host methods reach the plugin as errors
+- [x] A panicking Host implementation returns a PanicError (Phase Host) to the plugin call without crashing (recovered on the host and returned to the plugin as an error through the `hostPanic` seam; the `*PanicError` type itself is ticket 07's, see PLAN.md)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

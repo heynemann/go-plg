@@ -104,7 +104,7 @@ func prepareContract(spec *Contract) (*contract, error) {
 	}
 
 	// The interface passed validation, so the dispatcher renders and the payload encodes.
-	prepared.dispatcher, err = goabi.RenderDispatcher(spec.Interface)
+	prepared.dispatcher, err = goabi.RenderDispatcher(spec.Interface, nil)
 	if err != nil {
 		return nil, fmt.Errorf("rendering the Go dispatcher: %w", err)
 	}

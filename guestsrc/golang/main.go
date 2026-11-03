@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"unsafe"
 
 	"github.com/heynemann/go-plg/internal/goguest"
@@ -19,7 +20,7 @@ import (
 // instance is single-threaded.
 //
 //nolint:gochecknoglobals,unused // see above; reached only through the //go:wasmexport functions
-var guest = goguest.New(os.Stdout, os.Stderr)
+var guest = goguest.New(os.Stdout, os.Stderr, callHost)
 
 func main() {}
 
@@ -48,6 +49,23 @@ func exchange(req []byte) []byte {
 	takeResult(ptr(resp), size)
 
 	return resp
+}
+
+// hostCall hands the encoded arguments at ptr of a call to the Host method with the given index to the host,
+// which calls it and keeps the status-prefixed answer for takeResult; it returns the answer's length.
+//
+//go:wasmimport plg host_call
+func hostCall(method, ptr, size uint32) uint32 //nolint:unused // called by callHost, see there
+
+// callHost calls a Host method and returns the host's answer, reusing dst's storage.
+func callHost(method uint32, args, dst []byte) []byte { //nolint:unused // reached through guest, see there
+	size := hostCall(method, ptr(args), uint32(len(args))) //nolint:gosec // G115: wasm32 lengths fit 32 bits
+	runtime.KeepAlive(args)
+
+	answer := slices.Grow(dst[:0], int(size))[:size]
+	takeResult(ptr(answer), size)
+
+	return answer
 }
 
 // plgAlloc returns a pointer to the guest-owned input buffer, grown to at least size bytes.

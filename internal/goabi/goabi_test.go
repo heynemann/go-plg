@@ -29,9 +29,13 @@ func TestInitPayloadRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	for _, payload := range []goabi.InitPayload{
-		{GoPath: "/gopath", Dispatch: goabi.DispatchImportPath, Methods: []string{"Foo", "Bar"}},
-		{GoPath: "", Dispatch: "", Methods: []string{}},
-		{GoPath: "/x", Dispatch: "y", Methods: []string{""}},
+		{GoPath: "/gopath", Dispatch: goabi.DispatchImportPath, Methods: []string{"Foo", "Bar"}, HostMethods: []string{}},
+		{GoPath: "", Dispatch: "", Methods: []string{}, HostMethods: []string{}},
+		{GoPath: "/x", Dispatch: "y", Methods: []string{""}, HostMethods: []string{}},
+		{
+			GoPath: "/gopath", Dispatch: "d", Methods: []string{"Foo"}, Host: "contract.Host",
+			HostPath: "example.com/contract", HostMethods: []string{"Lookup", "Sum"},
+		},
 	} {
 		b, err := payload.Append(nil)
 		require.NoError(t, err)
@@ -45,13 +49,21 @@ func TestInitPayloadRoundTrip(t *testing.T) {
 func TestDecodeInitPayloadRejectsMalformedInput(t *testing.T) {
 	t.Parallel()
 
-	valid, err := (&goabi.InitPayload{GoPath: "/g", Dispatch: "d", Methods: []string{"A", "B"}}).Append(nil)
+	valid, err := (&goabi.InitPayload{
+		GoPath: "/g", Dispatch: "d", Methods: []string{"A", "B"}, Host: "c.H", HostPath: "c", HostMethods: []string{"M"},
+	}).Append(nil)
 	require.NoError(t, err)
 
-	countOffset := 4 + 2 + 4 + 1 // the two strings before the method count
-
+	countOffset := 4 + 2 + 4 + 1                      // the two strings before the method count
+	hostOffset := countOffset + 8 + 2*(4+1)           // the method count and the two methods
+	hostCountOffset := hostOffset + (4 + 3) + (4 + 1) // the host and its path
+	methodsEnd := hostOffset                          // where the methods end
+	hostMethodsEnd := len(valid)                      // where the host methods end
 	hugeCount := bytes.Clone(valid)
 	copy(hugeCount[countOffset:], wire.AppendUint(nil, 1<<40))
+
+	hugeHostCount := bytes.Clone(valid)
+	copy(hugeHostCount[hostCountOffset:], wire.AppendUint(nil, 1<<40))
 
 	tests := []struct {
 		name string
@@ -62,8 +74,13 @@ func TestDecodeInitPayloadRejectsMalformedInput(t *testing.T) {
 		{"truncated dispatch path", "dispatch path", valid[:7]},
 		{"truncated count", "method count", valid[:countOffset+3]},
 		{"count beyond the payload", "exceeds the payload", hugeCount},
-		{"truncated method", "method 1", valid[:len(valid)-1]},
-		{"trailing bytes", "trailing", append(bytes.Clone(valid), 0)},
+		{"truncated method", "method 1", valid[:methodsEnd-1]},
+		{"truncated host", "host: ", valid[:hostOffset+5]},
+		{"truncated host path", "host path", valid[:hostOffset+8]},
+		{"truncated host method count", "host method count", valid[:hostCountOffset+3]},
+		{"host method count beyond the payload", "host method count exceeds the payload", hugeHostCount},
+		{"truncated host method", "host method 0", valid[:hostMethodsEnd-1]},
+		{"trailing bytes", "after host methods: wire: trailing", append(bytes.Clone(valid), 0)},
 	}
 
 	for _, tc := range tests {
@@ -100,7 +117,7 @@ func FuzzDecodeInitPayload(f *testing.F) {
 func TestRenderDispatcherForTheTestContract(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer]())
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil)
 	require.NoError(t, err)
 
 	file := parse(t, src)
@@ -131,9 +148,47 @@ func TestRenderDispatcherForTheTestContract(t *testing.T) {
 		assert.Contains(t, string(src), want)
 	}
 
-	again, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer]())
+	assert.NotContains(t, string(src), "plgHost", "without a Host, there are no stubs")
+
+	again, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil)
 	require.NoError(t, err)
 	assert.Equal(t, src, again, "rendering is deterministic")
+}
+
+func TestRenderDispatcherWithAHost(t *testing.T) {
+	t.Parallel()
+
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Hosted](), reflect.TypeFor[testcontract.Host]())
+	require.NoError(t, err)
+	parse(t, src)
+
+	for _, want := range []string{
+		"var create func(p1.Host) (p1.Hosted, error) = plugin.Create",
+		"\tv, err := create(plgHost{})\n",
+		"type plgHost struct{}\n",
+		"var PlgHostCall_Lookup func(p0.Context, string) (p1.User, error)\n",
+		"func (plgHost) Lookup(a0 p0.Context, a1 string) (p1.User, error) {\n\treturn PlgHostCall_Lookup(a0, a1)\n}",
+		"func (plgHost) Fail(a0 p0.Context, a1 string) error {\n\treturn PlgHostCall_Fail(a0, a1)\n}",
+		"func (plgHost) Sum(a0 p0.Context, a1 int, a2 ...int) (int, error) {\n\treturn PlgHostCall_Sum(a0, a1, a2...)\n}",
+		"var PlgCall_Describe func(p0.Context, string) (p1.User, error)\n", // the plugin side is unchanged
+	} {
+		assert.Contains(t, string(src), want)
+	}
+
+	// A Host from another package is imported too; a method without results is forwarded without return.
+	src, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), reflect.TypeFor[Shapes]())
+	require.NoError(t, err)
+	parse(t, src)
+
+	for _, want := range []string{
+		`p1 "github.com/heynemann/go-plg/internal/goabi_test"`,
+		`p2 "github.com/heynemann/go-plg/internal/testcontract"`,
+		"var create func(p1.Shapes) (p2.Fooer, error) = plugin.Create",
+		"var PlgHostCall_Maps func(p0.Context, map[string]*p1.Point, p3.Time) (map[string][]int, error)\n",
+		"func (plgHost) None() {\n\tPlgHostCall_None()\n}",
+	} {
+		assert.Contains(t, string(src), want)
+	}
 }
 
 func parse(t *testing.T, src []byte) *ast.File {
@@ -167,7 +222,7 @@ type (
 func TestRenderDispatcherTypeExpressions(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[Shapes]())
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[Shapes](), nil)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -243,8 +298,13 @@ func TestRenderDispatcherRejects(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		_, err := goabi.RenderDispatcher(tc.typ)
+		_, err := goabi.RenderDispatcher(tc.typ, nil)
 		require.ErrorIs(t, err, goabi.ErrRender, tc.name)
-		assert.ErrorContains(t, err, tc.msg, tc.name)
+		require.ErrorContains(t, err, tc.msg, tc.name)
+
+		_, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), tc.typ)
+		require.ErrorIs(t, err, goabi.ErrRender, tc.name+" as the host")
+		require.ErrorContains(t, err, "host: ", tc.name+" as the host")
+		require.ErrorContains(t, err, tc.msg, tc.name+" as the host")
 	}
 }

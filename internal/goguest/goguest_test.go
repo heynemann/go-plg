@@ -51,7 +51,7 @@ func methodNames() []string {
 func gopath(t *testing.T, plugin map[string]string) string {
 	t.Helper()
 
-	dispatcher, err := goabi.RenderDispatcher(fooerType())
+	dispatcher, err := goabi.RenderDispatcher(fooerType(), nil)
 	require.NoError(t, err)
 
 	return gopathWith(t, plugin, string(dispatcher))
@@ -148,7 +148,7 @@ func load(t *testing.T, plugin map[string]string) (*goguest.Guest, result) {
 
 	var stdout bytes.Buffer
 
-	guest := goguest.New(&stdout, &stdout)
+	guest := goguest.New(&stdout, &stdout, nil)
 	res := guest.Init(send(guest, initPayload(t, gopath(t, plugin), methodNames())))
 
 	return guest, parse(t, bytes.Clone(res))
@@ -351,7 +351,7 @@ func TestLoadFailures(t *testing.T) {
 		status wire.Status
 	}{
 		{"syntaxerror", []string{"loading plugin", "plugin.go"}, wire.StatusLoad},
-		{"nocreate", []string{"must declare func Create"}, wire.StatusLoad},
+		{"nocreate", []string{"must declare Create: func Create()"}, wire.StatusLoad},
 		{"badcreate", []string{"Create has type func(string)"}, wire.StatusLoad},
 		{"forbidden", []string{"loading plugin", `"os"`}, wire.StatusLoad},
 		{"wronginterface", []string{"loading dispatcher", "half", "testcontract.Fooer"}, wire.StatusLoad},
@@ -398,7 +398,7 @@ func TestStdlibAllowlist(t *testing.T) {
 		plugin := importingPlugin(`fmt.Println("ready")`, goallow.Packages()...)
 		plugin["p.go"] = strings.Replace(plugin["p.go"], "\t_ \"fmt\"\n", "\t\"fmt\"\n", 1)
 
-		guest := goguest.New(&stdout, &stdout)
+		guest := goguest.New(&stdout, &stdout, nil)
 		res := parse(t, guest.Init(send(guest, initPayload(t, gopath(t, plugin), methodNames()))))
 		require.Equal(t, wire.StatusOK, res.status, res.msg)
 		assert.Equal(t, "ready\n", stdout.String(), "plugin stdout goes to the guest's writer")
@@ -472,26 +472,26 @@ func TestABIViolations(t *testing.T) {
 	payload := initPayload(t, root, methodNames())
 
 	t.Run("init larger than the input buffer", func(t *testing.T) {
-		guest := goguest.New(nil, nil)
+		guest := goguest.New(nil, nil, nil)
 		res := parse(t, guest.Init(send(guest, payload)+1))
 		assert.Equal(t, wire.StatusABI, res.status)
 	})
 
 	t.Run("malformed init payload", func(t *testing.T) {
-		guest := goguest.New(nil, nil)
+		guest := goguest.New(nil, nil, nil)
 		res := parse(t, guest.Init(send(guest, payload[:len(payload)-1])))
 		assert.Equal(t, wire.StatusABI, res.status)
 		assert.Contains(t, res.msg, goabi.ErrPayload.Error())
 	})
 
 	t.Run("unknown method in payload", func(t *testing.T) {
-		guest := goguest.New(nil, nil)
+		guest := goguest.New(nil, nil, nil)
 		res := parse(t, guest.Init(send(guest, initPayload(t, root, []string{"Missing"}))))
 		assert.Equal(t, wire.StatusABI, res.status)
 		assert.Contains(t, res.msg, "PlgCall_Missing")
 	})
 
-	guest := goguest.New(nil, nil)
+	guest := goguest.New(nil, nil, nil)
 	assert.Equal(t, wire.StatusABI, parse(t, guest.Call(0, send(guest, nil))).status, "call before init")
 	require.Equal(t, wire.StatusOK, parse(t, guest.Init(send(guest, payload))).status)
 	assert.Equal(t, wire.StatusABI, parse(t, guest.Init(send(guest, payload))).status, "init twice")
@@ -533,7 +533,7 @@ func TestABIViolations(t *testing.T) {
 func TestAllocReusesTheInputBuffer(t *testing.T) {
 	t.Parallel()
 
-	guest := goguest.New(nil, nil)
+	guest := goguest.New(nil, nil, nil)
 	big := guest.Alloc(64)
 	small := guest.Alloc(8)
 
@@ -584,7 +584,7 @@ func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := gopathWith(t, testdataPlugin(t, "fooer"), tc.dispatcher)
-			guest := goguest.New(nil, nil)
+			guest := goguest.New(nil, nil, nil)
 			res := parse(t, guest.Init(send(guest, initPayload(t, root, []string{"Foo"}))))
 			assert.Equal(t, wire.StatusABI, res.status, res.msg)
 			assert.Contains(t, res.msg, tc.msg)

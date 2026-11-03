@@ -35,6 +35,8 @@ func signatureOf(export string) [2][]byte {
 		return [2][]byte{{i32, i32}, {i32}}
 	case "take_result":
 		return [2][]byte{{i32, i32}, nil}
+	case "host_call":
+		return [2][]byte{{i32, i32, i32}, {i32}}
 	default: // _initialize
 		return [2][]byte{}
 	}

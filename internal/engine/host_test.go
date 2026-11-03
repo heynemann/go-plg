@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -150,3 +151,93 @@ func TestPendingAnswersDoNotOutliveTheirCall(t *testing.T) {
 	_, err = inst.Call(t.Context(), 0, nil)
 	require.ErrorIs(t, err, engine.ErrABI, "the next call cannot take it")
 }
+
+// hostCallGuest imports host_call (function 0) and take_result (function 1); its plg_call runs body.
+func hostCallGuest(body []byte) fakeGuest {
+	bodies := abiOK(0, 1)
+	bodies["plg_call"] = body
+
+	return fakeGuest{data: hostData(), bodies: bodies, imports: []string{"host_call", "take_result"}}
+}
+
+// hostCall calls Host method 7 with the four request bytes as arguments, leaving the answer length.
+func hostCall() []byte {
+	return slices.Concat(i32Const(7), i32Const(0), i32Const(4), call(0))
+}
+
+func TestHostCallReachesTheHostFunc(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	host := func(ctx context.Context, dst []byte, method uint32, args []byte) ([]byte, error) {
+		assert.Equal(t, "call ctx", ctx.Value(ctxKey{}), "the host runs with the call's context")
+		assert.Equal(t, uint32(7), method)
+		assert.Equal(t, hostData(), args)
+
+		calls++
+
+		return append(dst, byte(wire.StatusOK), 'o', 'k'), nil
+	}
+
+	// Push take_result's destination, call the host, take its answer and return it as the call's result.
+	body := slices.Concat(i32Const(answerAt), hostCall(), call(1), packed(answerAt, 3))
+
+	inst, err := instantiateWith(t, hostCallGuest(body), engine.InstanceOptions{Host: host})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(t.Context(), ctxKey{}, "call ctx")
+
+	for range 2 {
+		res, err := inst.Call(ctx, 0, nil)
+		require.NoError(t, err)
+		assert.Equal(t, wire.StatusOK, res.Status)
+		assert.Equal(t, "ok", string(res.Body), "take_result copied the host's answer into guest memory")
+	}
+
+	assert.Equal(t, 2, calls)
+	assert.False(t, inst.Broken())
+	require.NoError(t, inst.Close(t.Context()))
+}
+
+func TestHostCallViolationsBreakTheInstance(t *testing.T) {
+	t.Parallel()
+
+	ok := packed(0, 1)
+	answer := func(_ context.Context, dst []byte, _ uint32, _ []byte) ([]byte, error) {
+		return append(dst, byte(wire.StatusOK)), nil
+	}
+	refuse := func(_ context.Context, dst []byte, _ uint32, _ []byte) ([]byte, error) {
+		return dst, errRefused
+	}
+
+	tests := []struct {
+		host engine.HostFunc
+		name string
+		msg  string
+		body []byte
+	}{
+		{nil, "no host", "host_call from an instance without a host", slices.Concat(hostCall(), drop(), ok)},
+		{refuse, "host refuses the request", "host_call: refused", slices.Concat(hostCall(), drop(), ok)},
+		{
+			answer, "arguments out of range", "host_call arguments out of range",
+			slices.Concat(i32Const(0), i32Const(engine.PageSize-2), i32Const(10), call(0), drop(), ok),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			inst, err := instantiateWith(t, hostCallGuest(tc.body), engine.InstanceOptions{Host: tc.host})
+			require.NoError(t, err)
+
+			_, err = inst.Call(t.Context(), 0, nil)
+			require.ErrorIs(t, err, engine.ErrABI)
+			require.ErrorContains(t, err, tc.msg)
+			assert.True(t, inst.Broken())
+		})
+	}
+}
+
+var errRefused = errors.New("refused")

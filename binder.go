@@ -99,6 +99,43 @@ func (m *method) decodeResults(body []byte) ([]reflect.Value, error) {
 	return out, nil
 }
 
+// decodeArgs decodes the arguments after the context from body, returning the call's arguments with ctx first.
+func (m *method) decodeArgs(ctx context.Context, body []byte) ([]reflect.Value, error) {
+	args := make([]reflect.Value, len(m.args)+1)
+	args[0] = reflect.ValueOf(ctx)
+	reader := wire.NewReader(body)
+
+	for k, codec := range m.args {
+		args[k+1] = reflect.New(codec.Type()).Elem()
+
+		err := codec.Decode(&reader, args[k+1])
+		if err != nil {
+			return nil, fmt.Errorf("parameter %d: %w", k+1, err)
+		}
+	}
+
+	err := reader.End()
+	if err != nil {
+		return nil, fmt.Errorf("arguments: %w", err)
+	}
+
+	return args, nil
+}
+
+// encodeResults appends the encoding of the results before the final error.
+func (m *method) encodeResults(dst []byte, out []reflect.Value) ([]byte, error) {
+	for k, codec := range m.results {
+		next, err := codec.Append(dst, out[k])
+		if err != nil {
+			return dst, fmt.Errorf("result %d: %w", k, err)
+		}
+
+		dst = next
+	}
+
+	return dst, nil
+}
+
 // failed returns the method's zero results with err.
 func (m *method) failed(err error) []reflect.Value {
 	out := make([]reflect.Value, len(m.zeros))

@@ -27,21 +27,31 @@ const (
 )
 
 var (
-	errNoCreate   = errors.New("plugin package must declare func Create() (<interface>, error)")
-	errCreateType = errors.New("plugin Create has the wrong type; want func() (<interface>, error)")
+	errNoCreate   = errors.New("plugin package must declare Create")
+	errCreateType = errors.New("plugin Create has the wrong type")
 	errCallType   = errors.New("dispatcher function has the wrong type; want func(context.Context, ...) (..., error)")
+	errAnswer     = errors.New("malformed host answer")
 )
+
+// HostFunc sends the encoded arguments of a call to the Host method with the given index (the order of
+// [goabi.InitPayload.HostMethods]) to the host and returns the host's status-prefixed answer: the encoded
+// results for [wire.StatusOK], otherwise a message. The answer may reuse dst's storage.
+type HostFunc func(method uint32, args, dst []byte) []byte
 
 // Guest serves one plugin instance. The zero value is not usable; call [New].
 type Guest struct {
 	stdout, stderr io.Writer
+	host           HostFunc
+	fault          error // a host answer broke the ABI during the current call; the instance must be discarded
 
-	in      []byte // input buffer handed out by Alloc; the host writes requests into it
-	out     []byte // result buffer; valid until the next call
-	methods []method
-	started bool // Init ran; it runs at most once
-	ready   bool // Init succeeded
-	closed  bool
+	in         []byte // input buffer handed out by Alloc; the host writes requests into it
+	out        []byte // result buffer; valid until the next call
+	hostArgs   []byte // encoded arguments of the current host call
+	hostAnswer []byte // the host's answer to it
+	methods    []method
+	started    bool // Init ran; it runs at most once
+	ready      bool // Init succeeded
+	closed     bool
 }
 
 type method struct {
@@ -53,9 +63,9 @@ type method struct {
 	variadic bool            // the last argument is the variadic slice
 }
 
-// New returns a Guest whose plugin writes to stdout and stderr.
-func New(stdout, stderr io.Writer) *Guest {
-	return &Guest{stdout: stdout, stderr: stderr}
+// New returns a Guest whose plugin writes to stdout and stderr and calls its Host, if it has one, through host.
+func New(stdout, stderr io.Writer, host HostFunc) *Guest {
+	return &Guest{stdout: stdout, stderr: stderr, host: host}
 }
 
 // Alloc returns the input buffer, grown to at least size bytes. The host writes the next request into it.
@@ -91,6 +101,8 @@ func (g *Guest) Close() []byte {
 // guarded runs fn, turning a panic in the plugin (or the interpreter) into a StatusPanic result.
 func (g *Guest) guarded(fn func() []byte) []byte {
 	var res []byte
+
+	g.fault = nil // a panic may have left the previous call's
 
 	func() {
 		defer func() {
@@ -137,6 +149,11 @@ func (g *Guest) initialize(size uint32) []byte {
 	}
 
 	out := initFn.Call(nil)
+
+	if fault := g.takeFault(); fault != "" {
+		return g.fail(wire.StatusABI, fault)
+	}
+
 	if createErr, failed := reflect.TypeAssert[error](out[1]); failed {
 		return g.fail(wire.StatusError, createErr.Error())
 	}
@@ -172,6 +189,11 @@ func (g *Guest) invoke(index, size uint32) []byte {
 	}
 
 	out := meth.call()
+
+	if fault := g.takeFault(); fault != "" {
+		return g.fail(wire.StatusABI, fault)
+	}
+
 	if callErr, failed := reflect.TypeAssert[error](out[len(out)-1]); failed {
 		return g.fail(wire.StatusError, callErr.Error())
 	}
@@ -201,7 +223,7 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 		return reflect.Value{}, wire.StatusLoad, fmt.Errorf("loading the standard library: %w", err)
 	}
 
-	err = checkCreate(interpreter)
+	err = checkCreate(interpreter, payload)
 	if err != nil {
 		return reflect.Value{}, wire.StatusLoad, err
 	}
@@ -218,6 +240,13 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 
 	var planner wire.Planner // shared by the methods, so each type is planned once
 
+	for i, name := range payload.HostMethods {
+		err = g.bindHost(interpreter, &planner, i, name)
+		if err != nil {
+			return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
+		}
+	}
+
 	g.methods = make([]method, len(payload.Methods))
 	for i, name := range payload.Methods {
 		err = g.methods[i].resolve(interpreter, &planner, name)
@@ -229,8 +258,12 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 	return initFn, 0, nil
 }
 
-// checkCreate imports the plugin package and checks that it declares func Create() (T, error).
-func checkCreate(interpreter *interp.Interpreter) error {
+// checkCreate imports the plugin package and checks that it declares func Create() (T, error), or
+// func Create(H) (T, error) when the plugins have the Host interface H. yaegi checks the exact types when it
+// compiles the dispatcher; this check gives the common mistakes a clear message.
+func checkCreate(interpreter *interp.Interpreter, payload *goabi.InitPayload) error {
+	host := payload.Host
+
 	_, err := interpreter.Eval(`import ` + pluginAlias + ` "` + goabi.PluginImportPath + `"`)
 	if err != nil {
 		return fmt.Errorf("loading plugin: %w", err)
@@ -238,15 +271,33 @@ func checkCreate(interpreter *interp.Interpreter) error {
 
 	create, err := interpreter.Eval(pluginAlias + "." + goabi.CreateFunc)
 	if err != nil || create.Kind() != reflect.Func {
-		return errNoCreate
+		return fmt.Errorf("%w: %s", errNoCreate, wantCreate(host))
+	}
+
+	params := 0
+	if host != "" {
+		params = 1
 	}
 
 	typ := create.Type()
-	if typ.NumIn() != 0 || typ.NumOut() != 2 || typ.Out(1) != reflect.TypeFor[error]() {
-		return fmt.Errorf("%w: Create has type %s", errCreateType, typ)
+	if typ.NumIn() != params || typ.NumOut() != 2 || typ.Out(1) != reflect.TypeFor[error]() {
+		return fmt.Errorf("%w: Create has type %s; want %s", errCreateType, typ, wantCreate(host))
+	}
+
+	if host != "" {
+		return checkHostParam(payload.GoPath, host, payload.HostPath)
 	}
 
 	return nil
+}
+
+// wantCreate describes the Create a plugin must declare.
+func wantCreate(host string) string {
+	if host == "" {
+		return "func Create() (<interface>, error) (Create takes a Host only when Register passes plg.WithHost)"
+	}
+
+	return "func Create(" + host + ") (<interface>, error) (Register passes plg.WithHost[" + host + "])"
 }
 
 // resolve looks up the dispatcher's variable holding the named method of the plugin instance (bound by
@@ -259,14 +310,20 @@ func (m *method) resolve(interpreter *interp.Interpreter, planner *wire.Planner,
 	}
 
 	typ := fn.Type()
-	if typ.Kind() != reflect.Func || typ.NumIn() == 0 || typ.In(0) != reflect.TypeFor[context.Context]() ||
-		typ.NumOut() == 0 || typ.Out(typ.NumOut()-1) != reflect.TypeFor[error]() {
+	if !methodShaped(typ) {
 		return fmt.Errorf("%w: %s has type %s", errCallType, name, typ)
 	}
 
 	m.name, m.fn, m.variadic = name, fn, typ.IsVariadic()
 
 	return m.buildCodecs(planner, typ)
+}
+
+// methodShaped reports whether typ is the type of an interface method of the contract:
+// func(context.Context, ...) (..., error).
+func methodShaped(typ reflect.Type) bool {
+	return typ.Kind() == reflect.Func && typ.NumIn() > 0 && typ.In(0) == reflect.TypeFor[context.Context]() &&
+		typ.NumOut() > 0 && typ.Out(typ.NumOut()-1) == reflect.TypeFor[error]()
 }
 
 func (m *method) buildCodecs(planner *wire.Planner, typ reflect.Type) error {

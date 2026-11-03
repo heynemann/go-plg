@@ -18,6 +18,10 @@ var (
 	// ErrInvalidInterface reports an interface that breaks the interface contract: every method takes a
 	// context.Context first, returns an error last and uses only data types.
 	ErrInvalidInterface = errors.New("plg: invalid interface")
+	// ErrInvalidHost reports a [WithHost] option Register cannot accept: its interface breaks the interface
+	// contract or is declared outside the registered interface's package, its implementation is nil, or the
+	// option is given twice.
+	ErrInvalidHost = errors.New("plg: invalid host")
 	// ErrInvalidContract reports a [Contract] that [RegisterContract] cannot accept.
 	ErrInvalidContract = errors.New("plg: invalid contract")
 	// ErrNoContract reports an interface without a registered [Contract].

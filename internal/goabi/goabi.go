@@ -3,8 +3,9 @@
 //
 // The host mounts one read-only tree at [GoPath]: the contract package's source at its real import path, the
 // plugin's source at [PluginImportPath] and the rendered dispatcher at [DispatchImportPath]. The guest
-// imports the dispatcher, calls [InitFunc] (which runs the plugin's Create) and resolves one
-// [CallPrefix]+<Method> function per interface method, in the order of [InitPayload.Methods].
+// imports the dispatcher, fills its [HostCallPrefix]+<Method> variables with calls into the host (when the
+// plugins have a Host), calls [InitFunc] (which runs the plugin's Create, passing it the Host stubs) and resolves
+// one [CallPrefix]+<Method> function per interface method, in the order of [InitPayload.Methods].
 package goabi
 
 import (
@@ -29,6 +30,9 @@ const (
 	CreateFunc = "Create"
 	// CallPrefix prefixes the dispatcher function forwarding each interface method.
 	CallPrefix = "PlgCall_"
+	// HostCallPrefix prefixes the dispatcher variable each Host stub method calls: the guest sets it to a function
+	// that encodes the arguments, calls the plg.host_call import and decodes the answer.
+	HostCallPrefix = "PlgHostCall_"
 )
 
 // ErrPayload reports a malformed init payload.
@@ -42,16 +46,31 @@ type InitPayload struct {
 	Dispatch string
 	// Methods lists the interface's method names; a call's method index refers to this order.
 	Methods []string
+	// Host names the Host interface the plugin's Create takes as Go source refers to it, such as
+	// "contract.Host", or is empty when the plugins have no Host and Create takes nothing.
+	Host string
+	// HostPath is the import path of the Host interface's package.
+	HostPath string
+	// HostMethods lists the Host interface's method names; a host_call's method index refers to this order.
+	HostMethods []string
 }
 
 // Append appends the encoding of p. It fails only for a string over 4 GiB.
-func (p *InitPayload) Append(b []byte) ([]byte, error) {
-	b, err := appendStrings(b, p.GoPath, p.Dispatch)
-	if err != nil {
-		return b, err
+func (p *InitPayload) Append(dst []byte) ([]byte, error) {
+	dst, err := appendStrings(dst, p.GoPath, p.Dispatch)
+	if err == nil {
+		dst, err = appendStrings(wire.AppendUint(dst, uint64(len(p.Methods))), p.Methods...)
 	}
 
-	return appendStrings(wire.AppendUint(b, uint64(len(p.Methods))), p.Methods...)
+	if err == nil {
+		dst, err = appendStrings(dst, p.Host, p.HostPath)
+	}
+
+	if err != nil {
+		return dst, err
+	}
+
+	return appendStrings(wire.AppendUint(dst, uint64(len(p.HostMethods))), p.HostMethods...)
 }
 
 func appendStrings(dst []byte, strs ...string) ([]byte, error) {
@@ -70,7 +89,7 @@ func appendStrings(dst []byte, strs ...string) ([]byte, error) {
 // minStringSize is the encoded size of an empty string; it bounds how many methods a payload can describe.
 const minStringSize = 4
 
-var errMethodCount = errors.New("method count exceeds the payload")
+var errCount = errors.New("count exceeds the payload")
 
 // DecodeInitPayload decodes what [InitPayload.Append] wrote. It never allocates more than the input justifies.
 func DecodeInitPayload(b []byte) (InitPayload, error) {
@@ -95,34 +114,52 @@ func decodePayload(reader *wire.Reader) (InitPayload, error) {
 		return InitPayload{}, fmt.Errorf("dispatch path: %w", err)
 	}
 
-	methods, err := decodeMethods(reader)
+	methods, err := decodeMethods(reader, "method")
+	if err != nil {
+		return InitPayload{}, err
+	}
+
+	host, err := reader.Text()
+	if err != nil {
+		return InitPayload{}, fmt.Errorf("host: %w", err)
+	}
+
+	hostPath, err := reader.Text()
+	if err != nil {
+		return InitPayload{}, fmt.Errorf("host path: %w", err)
+	}
+
+	hostMethods, err := decodeMethods(reader, "host method")
 	if err != nil {
 		return InitPayload{}, err
 	}
 
 	err = reader.End()
 	if err != nil {
-		return InitPayload{}, fmt.Errorf("after methods: %w", err)
+		return InitPayload{}, fmt.Errorf("after host methods: %w", err)
 	}
 
-	return InitPayload{GoPath: goPath, Dispatch: dispatch, Methods: methods}, nil
+	return InitPayload{
+		GoPath: goPath, Dispatch: dispatch, Methods: methods, Host: host, HostPath: hostPath, HostMethods: hostMethods,
+	}, nil
 }
 
-func decodeMethods(reader *wire.Reader) ([]string, error) {
+// decodeMethods decodes a list of method names; what names them in errors.
+func decodeMethods(reader *wire.Reader, what string) ([]string, error) {
 	count, err := reader.Uint64()
 	if err != nil {
-		return nil, fmt.Errorf("method count: %w", err)
+		return nil, fmt.Errorf("%s count: %w", what, err)
 	}
 
 	if count > math.MaxInt32 || int(count) > reader.Len()/minStringSize {
-		return nil, fmt.Errorf("%w: %d", errMethodCount, count)
+		return nil, fmt.Errorf("%s %w: %d", what, errCount, count)
 	}
 
 	methods := make([]string, count)
 	for i := range methods {
 		methods[i], err = reader.Text()
 		if err != nil {
-			return nil, fmt.Errorf("method %d: %w", i, err)
+			return nil, fmt.Errorf("%s %d: %w", what, i, err)
 		}
 	}
 

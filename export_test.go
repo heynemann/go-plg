@@ -1,6 +1,12 @@
 package plg
 
-import "context"
+import (
+	"context"
+	"log/slog"
+	"reflect"
+
+	"github.com/heynemann/go-plg/internal/engine"
+)
 
 // Hold takes an instance of the plugin with the given key, as a call in flight would, until the returned
 // release function is called. It lets tests make a plugin busy without a slow plugin method.
@@ -56,4 +62,23 @@ func (p *pool) stats() PoolStats {
 		Refills: p.refills.Load(),
 		Grows:   p.grows.Load(),
 	}
+}
+
+// HostHandler returns the host_call handler Register gives the instances of the plugin key when it registers
+// iface with the WithHost option opt, reporting panics to logger.
+func HostHandler(iface reflect.Type, opt RegisterOption, key string, logger *slog.Logger) (engine.HostFunc, error) {
+	contr, err := lookupContract(iface)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &registerConfig{}
+	opt(cfg)
+
+	hst, err := newHost(contr, cfg.hosts)
+	if err != nil {
+		return nil, err
+	}
+
+	return hst.handler(key, logger), nil
 }

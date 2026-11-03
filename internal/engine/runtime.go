@@ -31,7 +31,7 @@ type RuntimeOptions struct {
 
 // Runtime is a wazero runtime: every instance it creates has the same memory limit and is stopped
 // preemptively when the context of its current call ends. Its guests may import the plg host module
-// (http_roundtrip, take_result). It is safe for concurrent use.
+// (http_roundtrip, host_call, take_result). It is safe for concurrent use.
 type Runtime struct {
 	rt     wazero.Runtime
 	logger *slog.Logger
@@ -108,6 +108,8 @@ type InstanceOptions struct {
 	Stdout, Stderr io.Writer
 	// HTTP serves the instance's HTTP requests; nil refuses them all.
 	HTTP HTTPFunc
+	// Host serves the instance's calls to its Host; nil means the plugin has no Host.
+	Host HostFunc
 	// Mounts are the instance's only file system access.
 	Mounts []Mount
 }
@@ -123,7 +125,7 @@ func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instan
 
 	// The host imports find the instance's state by its module name, unique within the runtime.
 	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := &hostState{http: opts.HTTP}
+	state := &hostState{http: opts.HTTP, host: opts.Host}
 	m.rt.hosts.Store(name, state)
 
 	cfg := wazero.NewModuleConfig().

@@ -55,6 +55,7 @@ type registerConfig struct {
 	http        *HTTPPolicy // nil: HTTP refused
 	storages    []Storage
 	languages   []Language // enabled languages; empty enables every language
+	hosts       []hostSpec // WithHost options; at most one is valid
 	memoryLimit uint64     // per-instance limit, whole pages
 	poolMin     int
 	poolMax     int

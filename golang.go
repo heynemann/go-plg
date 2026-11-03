@@ -37,7 +37,7 @@ var (
 // goSourceTree returns the tree a Go plugin instance mounts at [goabi.GoPath]: the contract package's source
 // at its import path, the plugin's package directory at [goabi.PluginImportPath] and the dispatcher at
 // [goabi.DispatchImportPath].
-func goSourceTree(contr *contract, files fs.FS, entrypoint string) (*memfs.FS, error) {
+func goSourceTree(contr *contract, dispatcher []byte, files fs.FS, entrypoint string) (*memfs.FS, error) {
 	dir, err := goPackageDir(files, entrypoint)
 	if err != nil {
 		return nil, err
@@ -51,7 +51,7 @@ func goSourceTree(contr *contract, files fs.FS, entrypoint string) (*memfs.FS, e
 	}
 
 	if err == nil {
-		err = tree.Add(path.Join("src", goabi.DispatchImportPath, "dispatch.go"), contr.dispatcher)
+		err = tree.Add(path.Join("src", goabi.DispatchImportPath, "dispatch.go"), dispatcher)
 	}
 
 	if err != nil {

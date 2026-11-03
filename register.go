@@ -60,14 +60,17 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 
 // registration is a checked Register call.
 type registration struct {
-	contr *contract
-	cfg   *registerConfig
-	http  *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
-	name  string
+	contr      *contract
+	cfg        *registerConfig
+	http       *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
+	host       *host           // the WithHost option's; nil without one
+	name       string
+	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host's stubs
+	goPayload  []byte // the Go init payload, likewise
 }
 
 // prepare checks a Register call's arguments and returns the interface's contract, the Register options (with
-// their defaults) and the HTTP client of its policy.
+// their defaults), the HTTP client of its policy and its Host.
 func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (*registration, error) {
 	if c.closed.Load() {
 		return nil, ErrClosed
@@ -92,12 +95,24 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
+	hst, err := newHost(contr, cfg.hosts)
+	if err != nil {
+		return nil, err
+	}
+
 	client, err := httpClient(cfg.http, c.logger)
 	if err != nil {
 		return nil, err
 	}
 
-	return &registration{contr: contr, cfg: cfg, http: client, name: name}, nil
+	reg := &registration{contr: contr, cfg: cfg, http: client, host: hst, name: name}
+	reg.dispatcher, reg.goPayload = contr.dispatcher, contr.payload
+
+	if hst != nil {
+		reg.dispatcher, reg.goPayload = hst.dispatcher, hst.payload
+	}
+
+	return reg, nil
 }
 
 // source is a plugin a storage listed.
@@ -284,7 +299,7 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 		}
 	}
 
-	tree, err := goSourceTree(contr, files, src.desc.Entrypoint)
+	tree, err := goSourceTree(contr, reg.dispatcher, files, src.desc.Entrypoint)
 	if err != nil {
 		return nil, err
 	}
@@ -297,11 +312,12 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 	opts := engine.InstanceOptions{
 		Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
 		HTTP:   reg.http.Handler(key),
+		Host:   reg.host.handler(key, c.logger),
 	}
 	instances := newPool(poolConfig{
 		logger: c.logger,
 		spawn: func(ctx context.Context) (instance, error) {
-			return startGo(ctx, mod, opts, contr.payload)
+			return startGo(ctx, mod, opts, reg.goPayload)
 		},
 		budget:  &c.budget,
 		key:     key,

@@ -17,6 +17,10 @@ const (
 	// importHTTP is http_roundtrip(ptr, len u32) u32: the guest hands over an [httpabi] request; the host makes
 	// it (or refuses it), keeps the encoded answer as the instance's pending result and returns its length.
 	importHTTP = "http_roundtrip"
+	// importHost is host_call(method, ptr, len u32) u32: the guest calls the Host method with the given index
+	// with the wire-encoded arguments at ptr; the host keeps the status-prefixed answer as the pending result and
+	// returns its length.
+	importHost = "host_call"
 	// importTake is take_result(ptr, len u32): the guest has the pending result, exactly len bytes, copied to
 	// ptr. Any mismatch breaks the instance.
 	importTake = "take_result"
@@ -35,10 +39,19 @@ var ErrHTTPDisabled = errors.New("plg: HTTP is not enabled for this plugin")
 // instance created with it, so it must be safe for concurrent use.
 type HTTPFunc func(ctx context.Context, dst, req []byte, n int) []byte
 
+// HostFunc serves a guest's host_call: it calls the Host method with the given index with the wire-encoded
+// arguments args and appends the status-prefixed answer to dst (the encoded results for [wire.StatusOK],
+// otherwise a message). args aliases guest memory and is valid only until it returns. ctx is the context of the
+// plg_init or plg_call in progress. An error means the request itself is invalid (an unknown method, malformed
+// arguments): the guest broke the ABI and the instance breaks. One HostFunc serves every instance created with
+// it, so it must be safe for concurrent use.
+type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) ([]byte, error)
+
 // hostState is what the host imports know about one instance. Only the goroutine calling the instance touches
 // it: a guest calls its imports synchronously.
 type hostState struct {
 	http     HTTPFunc
+	host     HostFunc
 	pending  []byte // the result take_result hands over
 	requests int    // http_roundtrip calls in the current plg_init or plg_call
 	ready    bool   // pending holds a result not taken yet
@@ -57,6 +70,9 @@ func (r *Runtime) instantiateHostModule(ctx context.Context, rt wazero.Runtime) 
 		NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(r.httpRoundTrip), []api.ValueType{i32, i32}, []api.ValueType{i32}).
 		Export(importHTTP).
+		NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(r.hostCall), []api.ValueType{i32, i32, i32}, []api.ValueType{i32}).
+		Export(importHost).
 		NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(r.takeResult), []api.ValueType{i32, i32}, nil).
 		Export(importTake).
@@ -94,6 +110,29 @@ func (r *Runtime) httpRoundTrip(ctx context.Context, mod api.Module, stack []uin
 
 	state.ready = true
 	stack[0] = api.EncodeU32(uint32(len(state.pending))) //nolint:gosec // G115: answers are bounded far below 4 GiB
+}
+
+// hostCall serves host_call. As in httpRoundTrip, ABI violations panic, which traps the call and breaks the
+// instance; so does a host_call from an instance created without a [HostFunc], whose guest has no Host to call.
+func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) {
+	state := r.state(mod)
+
+	args, ok := mod.Memory().Read(api.DecodeU32(stack[1]), api.DecodeU32(stack[2]))
+	if !ok {
+		panic(fmt.Errorf("%w: %s arguments out of range", ErrABI, importHost))
+	}
+
+	if state.host == nil {
+		panic(fmt.Errorf("%w: %s from an instance without a host", ErrABI, importHost))
+	}
+
+	answer, err := state.host(ctx, state.pending[:0], api.DecodeU32(stack[0]), args)
+	if err != nil {
+		panic(fmt.Errorf("%w: %s: %w", ErrABI, importHost, err))
+	}
+
+	state.pending, state.ready = answer, true
+	stack[0] = api.EncodeU32(uint32(len(answer))) //nolint:gosec // G115: answers are bounded far below 4 GiB
 }
 
 // takeResult serves take_result.
