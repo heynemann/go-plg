@@ -1,0 +1,191 @@
+version: "2"
+
+run:
+  go: "1.27"
+  tests: true
+  relative-path-mode: gomod
+
+linters:
+  # Everything on; every disable below carries its reason.
+  default: all
+  disable:
+    - wsl # deprecated; replaced by wsl_v5
+    - exhaustruct # functional options and meaningful zero values are idiomatic here
+    - nlreturn # blank-line rules are owned by wsl_v5
+    - gomodguard # deprecated; replaced by gomodguard_v2 (enabled via default: all)
+
+  settings:
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+      default: all
+      disable:
+        - assign-exclusive # conflicts with gofumpt-formatted short declaration groups
+
+    depguard:
+      rules:
+        json:
+          files:
+            - "$all"
+            - "!**/guestsrc/**" # guest stdlib symbol tables must reference encoding/json for plugin authors
+          deny:
+            - pkg: encoding/json
+              desc: use github.com/bytedance/sonic (RULES.md §5)
+        concurrency:
+          files:
+            - "$all"
+          deny:
+            - pkg: github.com/puzpuzpuz/xsync/v3
+              desc: use github.com/puzpuzpuz/xsync/v4
+            - pkg: github.com/pkg/errors
+              desc: use the standard errors package
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^sync\.(Mutex|RWMutex)$
+          pkg: ^sync$
+          msg: mutexes are banned; use xsync/v4, sync/atomic or immutable snapshots (RULES.md §4)
+        - pattern: ^xsync\.RBMutex$
+          pkg: ^github.com/puzpuzpuz/xsync/v4$
+          msg: mutexes are banned, including xsync.RBMutex (RULES.md §4)
+        - pattern: ^sync\.Map$
+          pkg: ^sync$
+          msg: use xsync.Map (RULES.md §4)
+        - pattern: ^print(ln)?$
+          msg: no stray printing; use slog
+        - pattern: ^fmt\.Print.*$
+          msg: no stray printing; use slog
+
+    cyclop:
+      max-complexity: 10
+      package-average: 5
+    gocognit:
+      min-complexity: 15
+    gocyclo:
+      min-complexity: 10
+    nestif:
+      min-complexity: 3
+    funlen:
+      lines: 60
+      statements: 40
+      ignore-comments: true
+    maintidx:
+      under: 30
+    lll:
+      line-length: 120
+    dupl:
+      threshold: 100
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    mnd:
+      ignored-numbers: ["0", "1", "2"]
+    varnamelen:
+      max-distance: 8
+      ignore-decls:
+        - ctx context.Context
+        - t *testing.T
+        - b *testing.B
+        - f *testing.F
+        - tb testing.TB
+        - wg sync.WaitGroup
+        - ok bool
+      ignore-names: [err, id, fn, i, j, k, n, tc, rt, ok]
+    tagliatelle:
+      case:
+        rules:
+          json: camel # plugin.json uses camelCase keys
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+    staticcheck:
+      checks: ["all"]
+    gosec:
+      severity: low
+      confidence: low
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    godox:
+      keywords: [TODO, FIXME, HACK, XXX, BUG]
+    gocritic:
+      enable-all: true
+      disabled-checks:
+        - whyNoLint # nolintlint already requires explanations
+    revive:
+      enable-all-rules: true
+      rules:
+        # Duplicates of dedicated linters configured above.
+        - name: add-constant
+          disabled: true
+        - name: line-length-limit
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: function-length
+          disabled: true
+        - name: unhandled-error
+          disabled: true
+        # Not meaningful for this project.
+        - name: file-header
+          disabled: true
+        - name: banned-characters
+          disabled: true
+        - name: max-public-structs
+          disabled: true
+    testifylint:
+      enable-all: true
+    usetesting:
+      os-temp-dir: true
+    exhaustive:
+      default-signifies-exhaustive: false
+    paralleltest:
+      ignore-missing-subtests: false
+    sloglint:
+      no-mixed-args: true
+      kv-only: false
+      attr-only: true
+      context: scope
+      static-msg: true
+      key-naming-case: snake
+
+  exclusions:
+    generated: lax
+    warn-unused: true
+    rules:
+      # Table-driven tests are legitimately long and repetitive; correctness linters stay on.
+      - path: _test\.go
+        linters: [funlen, dupl, maintidx, gocognit, cyclop, mnd, goconst, lll]
+      # Guest packages register their embedded artifact from init(), by design (blank-import activation).
+      - path: guest/
+        linters: [gochecknoinits]
+
+formatters:
+  enable:
+    - gofumpt
+    - gci
+    - golines
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    golines:
+      max-len: 120
+  exclusions:
+    generated: lax
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

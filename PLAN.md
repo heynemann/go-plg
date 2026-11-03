@@ -1,0 +1,311 @@
+# plg — sandboxed plugin system for Go services
+
+Module `github.com/heynemann/go-plg`, package `plg`, Go ≥ 1.27.
+
+Plugins written in **Go, Lua and TypeScript** are loaded **as source** from pluggable storages and called through ordinary Go interfaces. Every plugin runs inside **WebAssembly** ([wazero](https://github.com/tetratelabs/wazero), pure Go, no cgo):
+
+| Plugin language | Interpreter inside WASM |
+|---|---|
+| Go | [yaegi](https://github.com/traefik/yaegi) compiled to wasip1 |
+| Lua | C Lua 5.4 built with wasi-sdk |
+| TypeScript | QuickJS-ng built with wasi-sdk; [esbuild](https://github.com/evanw/esbuild) transpiles on the host |
+
+Plugin authors never run a build step.
+
+**Stability is the top priority.** A plugin must never be able to take down the host process. Out-of-memory, panics, stack overflow, runaway CPU and data races inside a plugin all become errors on that plugin's call; the faulty instance is discarded.
+
+Engineering rules (strict linting, testing, benchmarks, concurrency, JSON) are in [RULES.md](RULES.md); every ticket must meet them.
+
+## Public API
+
+```go
+import (
+    "github.com/heynemann/go-plg"
+    _ "github.com/heynemann/go-plg/guest/golang"     // only the guests you use
+    _ "github.com/heynemann/go-plg/guest/lua"
+    _ "github.com/heynemann/go-plg/guest/typescript"
+)
+
+c := plg.New(
+    plg.WithLogger(logger),
+    plg.WithMeterProvider(mp),
+    plg.WithMemoryBudget(4 << 30),
+    plg.WithCompilationCacheDir("/var/cache/plg"), // default: os.UserCacheDir()/plg/<wazero version>
+)
+defer c.Close(ctx)
+
+err := plg.Register[contract.Fooer](ctx, c, "fooer",
+    plg.WithStorage(plg.NewFSStorage("/srv/plugins/fooer")),
+    plg.WithGolangPlugins(), plg.WithLuaPlugins(), plg.WithTypescriptPlugins(), // none = all
+    plg.WithPool(1, 64),
+    plg.WithMemoryLimit(64 << 20), // per instance
+    plg.WithPollInterval(30*time.Second),
+    plg.WithHost[contract.Host](hostImpl),
+    plg.WithHTTP(plg.HTTPPolicy{AllowedHosts: []string{"api.example.com"}}),
+)
+
+f, err := plg.Get[contract.Fooer](ctx, c, "fooer/my-own-fooer")
+bar, err := f.Foo(ctx)
+for key, f := range plg.All[contract.Fooer](ctx, c) { /* key order */ }
+
+err = c.Reload(ctx)                        // every registered interface
+err = plg.ReloadInterface(ctx, c, "fooer") // one interface
+```
+
+| Function | Semantics |
+|---|---|
+| `New(opts...)` | Container-wide options: `WithLogger` (slog; discard by default), `WithMeterProvider` (OTel metric API; global by default), `WithMemoryBudget`, `WithCompilationCacheDir`, `WithOnPanic`, `WithPanicHistory(n)` (default 64). |
+| `Register[T](ctx, c, name, opts...) error` | Loads synchronously and fails fast. Validates `T` (and `Host`), lists the storages, fetches, compiles, warms `min` instances, then publishes a new snapshot atomically. Registering the same `name` twice is an error. Fails with a message naming the import if a needed guest package isn't linked in. |
+| `Get[T](ctx, c, key) (T, error)` | `key` = `<name>/<descriptor key>`. Errors: `ErrNotFound`, or `ErrTypeMismatch` if the key belongs to another interface. 0 allocations, ≤ 50 ns. |
+| `All[T](ctx, c) iter.Seq2[string, T]` | Plugins implementing `T`, in key order, over a fixed snapshot. 0 allocations. |
+| `c.Reload`, `ReloadInterface` | Mirrors the storage catalogue (see Lifecycle). |
+| `c.Close(ctx)` | Stops pollers and refillers, drains in-flight calls, closes instances and runtimes. |
+
+### Interface contract (checked by reflection at Register, for both `T` and `Host`)
+
+- **Method shape:** every method is `M(ctx context.Context, args...) (results..., error)`. ctx first and error last are both required.
+- **Allowed types:** data only: bool, integers, floats, string, `[]byte`, slices, string-keyed maps, structs, struct pointers, `time.Time`, error. Funcs, channels and interfaces are rejected.
+- **Big integers:** values Lua/JS numbers can't represent exactly (|n| > 2^53) fail with an error rather than losing precision.
+- **Name mapping in Lua/TS:** method names stay exact. Struct fields use the `json` tag name, otherwise the Go field name.
+
+## Storage
+
+```go
+type Storage interface {
+    Name() string // used only in logs and metrics
+    List(ctx context.Context) ([]Descriptor, error)
+    Open(ctx context.Context, d Descriptor) (fs.FS, error)
+}
+
+type Descriptor struct {
+    Key        string   // unique within one Register call
+    Language   Language // LanguageGo | LanguageLua | LanguageTypeScript
+    Entrypoint string   // path inside the fs.FS returned by Open
+    Version    string   // change detection; empty → content hash
+}
+```
+
+- **Scope:** storages belong to one Register call. Every plugin they list implements that interface.
+- **Built-in storages:** memory, filesystem directory, and any `io/fs.FS`. S3 (aws-sdk-v2) and Postgres (pgx) are provided only as `examples/`.
+- **Built-in layout:** one directory per plugin containing `plugin.json` with `{"language", "entrypoint", "version"?, "memoryLimit"?}`. The key is the directory name. `memoryLimit` may only *lower* the Register limit.
+- **Multi-file plugins:** the plugin's fs.FS is mounted read-only into the guest at `/plugin`.
+  - yaegi compiles the package directory.
+  - Lua `require` resolves only inside `/plugin`.
+  - esbuild bundles TS imports from the fs.FS on the host.
+- **Duplicate keys** across a Register's storages: an error at Register; on Reload, keep the previous version and log.
+- **Languages not enabled:** a plugin in a language the Register didn't enable is skipped, logged and counted; not an error.
+
+## Codegen (service developer only)
+
+The host still needs one compiled adapter per interface, because Go can't create a type with methods at runtime. The service adds one line next to the interface:
+
+```go
+//go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
+```
+
+It generates:
+- **The adapter for `Fooer`:** `struct{ W<Method> func(...) }` plus forwarding methods, with a compile-time check (`var _ Fooer = ...`) so a changed interface fails the build until you regenerate. Its `init()` registers the adapter with plg.
+- **The contract package's source,** embedded with `go:embed` (non-test files, excluding the generated file). The generic Go guest interprets this source, so Go plugins can `import` the real contract package. The contract package may import only allowlisted packages; `plg gen` checks this.
+
+Not generated:
+- **Host dispatch:** the host calls `Host` methods by reflection.
+- **Go guest stubs for `Host`:** plg synthesizes this Go source at Register and the guest interprets it.
+
+Other commands:
+- **`plg warm`:** compiles every linked guest into the compilation cache. Run it in the Docker build so containers start warm. Cold compile: yaegi guest ≈ 11–15 s, QuickJS/Lua ≈ 0.1–0.5 s; from cache ≈ 0.02–0.3 s.
+- **`plg build-guest -pkg encoding/xml -o guest.wasm`:** builds a custom Go guest with extra packages, passed in via `WithGoGuest(embedded)`. The service takes on that build and its cold compile.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Caller -->|"f.Foo(ctx)"| Adapter["generated adapter<br/>(W funcs = generic binder)"]
+  Adapter --> Binder["binder: encode args,<br/>acquire instance, call, decode"]
+  Binder --> Pool["pool per plugin<br/>(min/max, background refill)"]
+  Pool --> Inst["wazero instance<br/>guest: yaegi | Lua | QuickJS<br/>+ plugin loaded + Create() done"]
+  Inst -->|"host_call"| Host["Host impl (reflection)"]
+  Inst -->|"http_roundtrip"| HTTP["HTTP policy + client"]
+  Inst -->|"log"| Slog["slog"]
+```
+
+**One guest ABI for all three languages,** so the host side is the same for every language:
+- **Guest exports:** `plg_alloc`, `plg_init` (load the entrypoint, run `Create`), `plg_call(method, ptr, len)`, `plg_close`.
+- **Host imports:** `plg.host_call`, `plg.http_roundtrip`, `plg.log`.
+
+**Codec:** our own length-prefixed little-endian binary format.
+- Host and Go guest use encoder/decoder plans built once per type.
+- The Lua and QuickJS glue (C) build tables and objects directly.
+
+**Plugin entry points:**
+
+| Language | Entry |
+|---|---|
+| Go | `func Create(host contract.Host) (contract.Fooer, error)`, or `func Create() (contract.Fooer, error)` when no Host is registered |
+| Lua | `function Create() return { Foo = function(self, ...) end } end`, with `host` and `http` as globals |
+| TS | `export function Create() { return { Foo(...) {} } }`; methods may be `async`; `host` and `fetch` are globals |
+
+ctx is never visible to scripts. The host uses it to enforce deadlines and passes it to Host and HTTP calls.
+
+**Guest capabilities:**
+- **WASI:** read-only `/plugin` mount, monotonic and wall clocks, random. No filesystem beyond `/plugin`, no env, no sockets.
+- **stdout/stderr** are captured per instance (bounded) and sent to slog with the plugin key.
+
+**Go guest stdlib allowlist** (fixed in the prebuilt guest):
+`bufio bytes context encoding/base64 encoding/hex encoding/json errors fmt io maps math math/* net/http (client only, via host transport) net/url regexp slices sort strconv strings sync sync/atomic time unicode/*`, plus the contract source and the synthesized `Host` stubs.
+
+**Goroutines are banned in Go plugins.** Plugin source is parsed with `go/parser` before loading, and any `go` statement is rejected. Reasons, observed in probes:
+- A WASM guest has no parallelism.
+- Guest goroutines are paused between calls (a background counter advanced 0 while the host was idle).
+- They freeze during host calls.
+
+Parallelism comes from the instance pool.
+
+**Lua/TS libraries:**
+- Lua: `base` (minus file loading), `string`, `table`, `math`, `utf8`, `coroutine`, plus a bundled in-guest `json` module (`json.encode`/`json.decode`).
+- QuickJS: ECMAScript built-ins only (no `std`/`os` modules), plus `console`, `host` and `fetch`.
+- TS async: when a method returns a Promise, the host runs QuickJS's pending jobs until it settles or ctx ends.
+
+## Resource limits
+
+- **Memory:**
+  - **Per instance:** `WithMemoryLimit` per Register. Defaults: Lua/TS 64 MiB, Go 128 MiB (yaegi's baseline is ≈ 29 MiB). The limit is enforced by wazero's `WithMemoryLimitPages`.
+  - **One runtime per limit:** one wazero runtime per distinct (Register, language, limit), all sharing the compilation cache.
+  - **Container budget:** `WithMemoryBudget(total)`. Register fails if the worst case (Σ plugins × pool max × limit) exceeds it, and pools stop growing once the budget is reached.
+- **CPU:** `WithCloseOnContextDone` is always on. Every call is stopped preemptively when its ctx ends; that instance is then closed and replaced. Cost ≈ 2 µs per call plus a 1.5–4× slowdown of guest code. This is accepted.
+- **Pool:** `WithPool(min, max)`.
+  - **Background refill:** a goroutine per plugin keeps `min` instances warm. Callers take an idle instance; they create one only while under `max` and the budget; otherwise they wait on ctx.
+  - **Failing `Create()`:** a `Create()` that fails during refill backs off exponentially and is reported.
+  - **Fresh instances:** each pool member is a separate instance with its own `Create()` result, so state is per instance.
+- **Instance discard:** an instance is discarded on a trap, deadline, panic, or codec/ABI failure. It's kept when the plugin returns an ordinary error.
+  - Reason: wazero leaves a trapped instance callable, and it then answers with `err=nil` (observed), so trapped instances must never be reused.
+- **Call depth:** Lua (`LUAI_MAXCCALLS`) and QuickJS (`JS_SetMaxStackSize`, linked with a larger wasm stack) turn deep recursion into ordinary errors. Go recursion hits the memory limit and traps.
+
+## HTTP (built in, off by default)
+
+`WithHTTP(plg.HTTPPolicy{...})` per Register. Default values once enabled:
+- `AllowedHosts` (required)
+- `BlockPrivateNetworks: true` (SSRF protection)
+- `Timeout: 10s` (and never later than the call's ctx deadline)
+- `MaxRequestBytes: 1 MiB`, `MaxResponseBytes: 4 MiB`
+- `MaxRequestsPerCall: 16`
+
+How each language reaches it:
+- **Go plugins** use the standard `net/http` client: the guest sets `http.DefaultTransport` to a transport that calls the host. Proven: `http.Get` from yaegi inside wazero → `200 OK`; a host not on the allowlist → `403 Forbidden host not allowlisted`.
+- **TS** uses `fetch()`; **Lua** uses `http.request{...}`.
+- **Every request** is logged and counted in metrics (status, latency, bytes) by plugin key.
+
+Requests block the instance for their duration (one call per instance), so size pools for I/O: Lua/TS instances are 0.2–0.5 MiB; Go instances are ≈ 29 MiB.
+
+**gRPC:** for now, expose gRPC-backed operations as typed `Host` methods implemented with your own grpc-go clients. A generic gRPC capability will be designed when it's needed.
+
+## Concurrency and performance
+
+- **Snapshot:** the catalogue is an immutable snapshot behind `atomic.Pointer`. Register and Reload publish with compare-and-swap. **No mutexes anywhere**; shared mutable state uses `sync/atomic`, `xsync/v4` or channels.
+- **Get/All:** `Get` is a map lookup plus a type assertion; `All` iterates a pre-sorted slice per type. Neither allocates.
+- **Measured per call (spike, wazero v1.12.0, go1.27.3, CPU cap on / off):**
+
+| Guest | Per call | Memory per instance | Instantiate |
+|---|---|---|---|
+| QuickJS-ng | 3.1 / 1.05 µs | 0.5 MiB | 1.7 ms |
+| C Lua 5.4 | 7.5 / 3.7 µs | 0.2 MiB | < 1 ms |
+| yaegi | 78 / 19 µs | ≈ 29 MiB | 38–59 ms |
+
+- **Budgets:** Get/All 0 allocations and Get ≤ 50 ns, enforced in CI. Call costs are tracked with benchstat but don't fail the build.
+
+## Lifecycle
+
+- **Register:** any failure returns an error. Nothing is published.
+- **Reload / polling** (`WithPollInterval` per Register; unchanged plugins are skipped by version or hash):
+  - Removed from the catalogue: removed from the snapshot.
+  - New but broken: skipped, logged, counted.
+  - Updated but broken: the last good version stays, logged, counted.
+  - Duplicate keys: the previous version stays, logged.
+- **Draining:** each plugin generation keeps an atomic count of calls in flight. When it reaches 0 after replacement or removal, `plg_close` runs (calling the plugin's optional `Close`) and the instances are freed.
+
+## Stability and panic containment
+
+**Inside the guest:**
+- **Traps:** out-of-memory, stack overflow, a Go runtime abort, or a deadline become errors on that call. The instance is discarded. Other instances and the host are unaffected (observed for every case in the spike).
+- **Go plugin panics** are recovered by the guest at the call boundary and returned as `*plg.PanicError`. That instance is discarded anyway.
+
+**On the host:** every host-side boundary runs behind `recover()`:
+- Storage `List`/`Open`
+- esbuild
+- the codec
+- Host method dispatch
+- HTTP policy/transport
+- pollers and refillers
+- user callbacks
+
+**Reporting:** every failure is a `*plg.PanicError` you can extract with `errors.As`:
+
+```go
+type PanicError struct {
+    Key      string
+    Language Language
+    Phase    Phase  // Load | Create | Call | Host | HTTP | Storage | Close | Poll | Refill | Callback
+    Method   string
+    Value    any    // recovered value or trap message
+    Stack    []byte // host Go stack (host-side failures)
+    Guest    string // guest traceback: Go runtime/yaegi, Lua traceback or JS stack, from captured stderr
+    Time     time.Time
+}
+```
+
+It is:
+- logged at Error level;
+- counted in the `plg.plugin.panics{key,phase}` metric;
+- passed to `WithOnPanic` (itself guarded by recover);
+- kept in a bounded, lock-free history (a ring of `atomic.Pointer`) available through `c.RecentPanics()`.
+
+**Residual risks:**
+- Host memory is ordinary Go heap: after a large guest closes, RSS stays high until the Go scavenger returns memory (observed).
+- Lua's error handling depends on wazero's *experimental* exception-handling feature. Pinned and covered by tests.
+- Untested: whether yaegi can interpret typical contract packages, and whether the reflection codec works on interpreted types. This is the first task in M5; if it fails, the fallback is a per-contract guest built by `plg gen`, which the spike proved works.
+
+## Observability
+
+- **slog:** loads, reloads, skips, failures, panics and traps, pool exhaustion, budget refusals, HTTP requests, guest stdout/stderr.
+- **OTel metrics** (`go.opentelemetry.io/otel/metric` API only), labelled by plugin key:
+  - calls, latency, errors, panics/traps;
+  - pool in-use, waits, refills;
+  - instance memory;
+  - loads and reload failures;
+  - HTTP requests, latency, bytes.
+
+## Package layout
+
+- **Core:** `github.com/heynemann/go-plg` (package `plg`, flat).
+- **Guests:** `github.com/heynemann/go-plg/guest/{golang,lua,typescript}`, each embedding its `.wasm` and registering itself with a blank import. The `.wasm` files are committed, built by `make guests` with pinned wasi-sdk/Go versions, and checked in CI for reproducible builds.
+- **Guest sources:** `guestsrc/` (C glue for Lua/QuickJS, Go sources for the yaegi guest).
+- **CLI:** `cmd/plg` (`gen`, `warm`, `build-guest`).
+- **Examples:** `examples/` (S3 storage, Postgres storage, an end-to-end service).
+
+## Milestones
+
+Each milestone is implemented, tested with `go test -race`, smoke-run against real plugins, and committed separately.
+
+1. **M1 Core:** Container, snapshot, `Register`/`Get`/`All`, interface and Host validation, `Storage`/`Descriptor`, memory/FS/fs.FS storages, `plugin.json`, errors, `PanicError` and the recover helpers on the host.
+2. **M2 WASM host:**
+   - Runtime management: memory limits, CPU cap, compilation cache.
+   - The guest ABI, codec, binder, pool with background refill, memory budget.
+   - Host interface dispatch and the HTTP capability on the host side.
+   - Instance discard rules and trap → `PanicError` mapping.
+3. **M3 TypeScript guest:** QuickJS-ng build plus glue, esbuild bundling from fs.FS, async methods (job loop), `fetch`, `console`, call depth limit.
+4. **M4 Lua guest:** C Lua 5.4 build (wasm exception handling), sandboxed `require`, `http.request`, call depth limit.
+5. **M5 Go guest:**
+   - First, prove that yaegi can interpret contract source.
+   - Generic yaegi guest with stdlib allowlist and host transport for net/http.
+   - `go` statement rejection, guest-side panic recovery, synthesized Host stubs.
+   - `plg gen` and `plg build-guest`.
+6. **M6 Lifecycle:** Reload, polling, last-good handling, draining, `plg_close`, `c.Close`.
+7. **M7 Observability:** slog/OTel wiring, panic history, `plg warm`, benchmarks with Get/All budgets enforced and call costs tracked.
+8. **M8 Fast paths:** generated codec plans and direct binders, kept only where benchmarks show the gain.
+9. **M9 Multiplexed async I/O:** TS and Lua instances serve other calls while a `fetch`/`http.request` is pending. Kept only if benchmarks of I/O-heavy plugins show the memory and density win.
+
+## Known risks
+
+- Go plugins are ≈ 80× slower per call and ≈ 60× heavier per instance than Lua/TS in this design. This was accepted for full isolation.
+- wazero's exception-handling feature (needed by Lua) is experimental.
+- The yaegi guest's cold compile (≈ 11–15 s) depends on the disk cache and `plg warm` for fast startups.
+- The guest `.wasm` artifacts must be rebuilt and re-verified whenever wazero, wasi-sdk, Lua, QuickJS, yaegi or Go are upgraded.
