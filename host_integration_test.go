@@ -123,7 +123,8 @@ func TestHostPanicReachesThePluginAsAnError(t *testing.T) {
 
 	seen, err := hosted.Relay(t.Context(), "panic")
 	require.NoError(t, err, "the plugin handled the error the panic became")
-	assert.Equal(t, "plg: host method panicked: testcontract.Host.Fail: host panicked on purpose", seen)
+	assert.Equal(t, "plg: hosted/ref: host testcontract.Host.Fail failed: host panicked on purpose", seen,
+		"the plugin received the PanicError's message")
 
 	origin, err := hosted.Origin(withHostValue(t.Context(), "later"))
 	require.NoError(t, err)
@@ -134,8 +135,8 @@ func TestHostPanicReachesThePluginAsAnError(t *testing.T) {
 	assert.Equal(t, "described Ada", user.Name)
 
 	logged := logs.String()
-	assert.Contains(t, logged, `"level":"ERROR","msg":"plg: host method panicked","key":"hosted/ref"`)
-	assert.Contains(t, logged, `"method":"testcontract.Host.Fail","panic":"host panicked on purpose"`)
+	assert.Contains(t, logged, `"level":"ERROR","msg":"plg: plugin failure","key":"hosted/ref","phase":"host",`+
+		`"value":"host panicked on purpose","language":"go","method":"testcontract.Host.Fail"`)
 	assert.Contains(t, logged, "(*testHost).Fail", "the host stack is logged")
 }
 

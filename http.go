@@ -1,6 +1,7 @@
 package plg
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -67,4 +68,12 @@ func httpClient(policy *HTTPPolicy, logger *slog.Logger) (*httpcap.Client, error
 	}
 
 	return client, nil
+}
+
+// httpPanicked returns the function the HTTP capability passes its panics to: they become reported
+// PanicErrors in [PhaseHTTP], and the plugin's request fails with an internal error.
+func (c *Container) httpPanicked(key string, lang Language) func(context.Context, any) {
+	return func(ctx context.Context, value any) {
+		c.panics.recovered(ctx, &PanicError{Key: key, Language: lang, Phase: PhaseHTTP}, value)
+	}
 }

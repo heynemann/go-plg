@@ -11,12 +11,14 @@ import (
 	"github.com/heynemann/go-plg/internal/engine"
 )
 
-// instance is a guest instance as a pool serves it: an *engine.Instance, or a fake in the pool's tests. One
+// instance is a guest instance as a pool serves it: a *goInstance, or a fake in the pool's tests. One
 // goroutine at a time owns it.
 type instance interface {
 	Call(ctx context.Context, method uint32, args []byte) (engine.Result, error)
 	Broken() bool
 	Close(ctx context.Context) error
+	// Guest returns what the guest wrote to stderr during its last call or close.
+	Guest() string
 }
 
 // slot is an instance taken from a pool, with its argument buffer. Whoever holds the slot owns both; slots
@@ -38,27 +40,30 @@ var (
 	errBudgetFull = fmt.Errorf("%w: no room for another instance", ErrMemoryBudget)
 )
 
-// poolConfig configures a pool.
+// poolConfig configures a pool. The pool logs through its panic reporter's logger.
 type poolConfig struct {
-	logger  *slog.Logger
+	panics  *panicReporter
 	spawn   func(context.Context) (instance, error) // starts an instance, running the plugin's Create
 	budget  *memoryBudget
 	key     string
+	lang    Language
 	limit   uint64 // memory limit of each instance, charged to the budget while it lives
-	minSize int
-	maxSize int
+	minSize int32
+	maxSize int32
 }
 
 // pool serves a plugin's calls from minSize to maxSize instances. A caller takes an idle instance; with none
 // idle it starts one while the pool is under maxSize and the budget allows, and otherwise waits on its context.
 // A background refiller keeps at least minSize instances alive (more while callers wait and the pool is under
-// maxSize), retrying a failing Create with exponential backoff. Broken instances are closed, never reused.
+// maxSize), retrying a failing Create with exponential backoff. Broken instances are closed, never reused. A
+// panic while starting or closing an instance, or in the refiller, is recovered and reported.
 //
 // size counts the places taken, by instances alive or being started; a place is reserved (size and budget)
 // before an instance starts and given back (retire) when it fails to start or is closed. The idle channel has
 // room for maxSize slots, so giving an instance back never blocks.
 type pool struct {
 	logger  *slog.Logger
+	panics  *panicReporter
 	spawn   func(context.Context) (instance, error)
 	budget  *memoryBudget
 	stop    context.CancelFunc // ends the refiller's context
@@ -67,6 +72,7 @@ type pool struct {
 	done    chan struct{} // closed by close
 	stopped chan struct{} // closed when the refiller returns
 	key     string
+	lang    Language
 	limit   uint64
 	ids     atomic.Uint64
 	refills atomic.Uint64 // instances the refiller started
@@ -80,13 +86,15 @@ type pool struct {
 
 func newPool(cfg poolConfig) *pool {
 	return &pool{
-		logger:  cfg.logger,
+		logger:  cfg.panics.logger,
+		panics:  cfg.panics,
 		spawn:   cfg.spawn,
 		budget:  cfg.budget,
 		key:     cfg.key,
+		lang:    cfg.lang,
 		limit:   cfg.limit,
-		minSize: int32(cfg.minSize), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
-		maxSize: int32(cfg.maxSize), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+		minSize: cfg.minSize,
+		maxSize: cfg.maxSize,
 		idle:    make(chan *slot, cfg.maxSize),
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
@@ -104,7 +112,7 @@ func (p *pool) warm(ctx context.Context) error {
 
 		err = p.reserve()
 		if err == nil {
-			held, err = p.start(ctx)
+			held, err = p.start(ctx, PhaseLoad)
 		}
 
 		if err != nil {
@@ -158,7 +166,7 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 	if p.reserve() == nil {
 		p.waiting.Add(-1)
 
-		held, err := p.start(ctx)
+		held, err := p.start(ctx, PhaseCall)
 		if err != nil {
 			return nil, fmt.Errorf("starting an instance: %w", err)
 		}
@@ -205,11 +213,20 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 	}
 }
 
-// closeInstance closes an instance and gives its place back.
-func (p *pool) closeInstance(ctx context.Context, held *slot) error {
+// closeInstance closes an instance and gives its place back. A panic meanwhile is reported as a [PanicError]
+// in [PhaseClose] and returned.
+func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	defer p.retire()
+	defer func() {
+		if v := recover(); v != nil {
+			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose}
+			p.panics.recovered(ctx, failure, v)
 
-	err := held.inst.Close(ctx)
+			err = failure
+		}
+	}()
+
+	err = held.inst.Close(ctx)
 	if err != nil {
 		return fmt.Errorf("closing instance %d: %w", held.id, err)
 	}
@@ -241,9 +258,10 @@ func (p *pool) reserve() error {
 	return nil
 }
 
-// start starts an instance in a reserved place, giving the place back if it fails.
-func (p *pool) start(ctx context.Context) (*slot, error) {
-	inst, err := p.spawn(ctx)
+// start starts an instance in a reserved place, giving the place back if it fails. A panic while starting it
+// is reported as a [PanicError] in the given phase and returned.
+func (p *pool) start(ctx context.Context, phase Phase) (*slot, error) {
+	inst, err := p.spawnGuarded(ctx, phase)
 	if err != nil {
 		p.retire()
 
@@ -251,6 +269,29 @@ func (p *pool) start(ctx context.Context) (*slot, error) {
 	}
 
 	return &slot{inst: inst, id: p.ids.Add(1)}, nil
+}
+
+//nolint:ireturn // it returns what spawn returns: the pool's instance interface
+func (p *pool) spawnGuarded(ctx context.Context, phase Phase) (instance, error) {
+	var (
+		inst instance
+		err  error
+	)
+
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase}
+				p.panics.recovered(ctx, failure, v)
+
+				inst, err = nil, failure
+			}
+		}()
+
+		inst, err = p.spawn(ctx)
+	}()
+
+	return inst, err
 }
 
 // retire gives back the place of an instance that was closed or failed to start.
@@ -275,40 +316,74 @@ func (p *pool) needsInstance() bool {
 	return n < p.minSize || (n < p.maxSize && p.waiting.Load() > 0)
 }
 
-// refill keeps the pool at its minimum until ctx ends. A failed start is logged and retried after an
-// exponentially growing delay; a success resets the delay.
+// refill keeps the pool at its minimum until ctx ends.
 func (p *pool) refill(ctx context.Context) {
 	defer close(p.stopped)
 
 	var delay time.Duration
 
-	for {
-		if !p.needsInstance() {
-			select {
-			case <-p.wake:
-				continue
-			case <-ctx.Done():
-				return
+	for p.refillStep(ctx, &delay) {
+	}
+}
+
+// refillStep waits until the pool needs an instance and starts one. A failed start is logged and followed by
+// an exponentially growing delay; a success resets the delay. A panic is reported as a [PanicError] in
+// [PhaseRefill] and treated as a failure. It reports whether the refiller goes on.
+func (p *pool) refillStep(ctx context.Context, delay *time.Duration) bool {
+	more, panicked := true, true
+
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				p.panics.recovered(ctx, &PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill}, v)
 			}
-		}
+		}()
 
-		err := p.refillOne(ctx)
+		more = p.refillOnce(ctx, delay)
+		panicked = false
+	}()
 
-		switch {
-		case err == nil:
-			delay = 0
-		case ctx.Err() != nil:
-			return
-		default:
-			delay = min(max(2*delay, refillBackoffMin), refillBackoffMax)
-			p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
-				slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", delay))
+	if panicked {
+		*delay = backoff(*delay)
 
-			if !sleep(ctx, delay) {
-				return
-			}
+		return sleep(ctx, *delay)
+	}
+
+	return more
+}
+
+// refillOnce is refillStep without its panic boundary.
+func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
+	if !p.needsInstance() {
+		select {
+		case <-p.wake:
+			return true
+		case <-ctx.Done():
+			return false
 		}
 	}
+
+	err := p.refillOne(ctx)
+
+	switch {
+	case err == nil:
+		*delay = 0
+
+		return true
+	case ctx.Err() != nil:
+		return false
+	default:
+		*delay = backoff(*delay)
+		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
+			slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
+
+		return sleep(ctx, *delay)
+	}
+}
+
+// backoff returns the delay after a failure that followed one delay.
+func backoff(delay time.Duration) time.Duration {
+	return min(max(2*delay, refillBackoffMin), refillBackoffMax)
 }
 
 // refillOne starts one instance and makes it idle.
@@ -321,7 +396,7 @@ func (p *pool) refillOne(ctx context.Context) error {
 	var held *slot
 
 	if err == nil {
-		held, err = p.start(ctx)
+		held, err = p.start(ctx, PhaseRefill)
 	}
 
 	if err != nil {

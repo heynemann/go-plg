@@ -52,10 +52,16 @@ var (
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not
 	// compile, or its Create failed.
 	ErrLoad = errors.New("plg: plugin failed to load")
+	// ErrGoStatement reports a Go plugin whose source contains go statements; the message names the file, line
+	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
+	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance
+	// pool instead.
+	ErrGoStatement = errors.New("plg: go statements are not allowed in plugins")
 	// ErrInvalidHTTPPolicy reports an [HTTPPolicy] Register cannot accept.
 	ErrInvalidHTTPPolicy = httpcap.ErrInvalidPolicy
 	// ErrCall reports a call that failed outside the plugin's own code: the guest trapped, panicked, was
-	// stopped by its context or broke the guest ABI. The instance that served it is discarded.
+	// stopped by its context or broke the guest ABI, or the host panicked serving it. The error is a
+	// [*PanicError] in [PhaseCall]; the instance that served it is discarded.
 	ErrCall = errors.New("plg: plugin call failed")
 	// ErrConversion reports an argument or result that cannot cross the plugin boundary, such as an integer
 	// beyond ±2^53 (which Lua and JavaScript numbers cannot represent exactly) or a pointer cycle. The message

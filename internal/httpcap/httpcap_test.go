@@ -95,13 +95,28 @@ type answer struct {
 	resp    httpabi.Response
 }
 
+// unexpectedPanic is the panicked function of handlers whose capability must not panic.
+func unexpectedPanic(tb testing.TB) func(context.Context, any) {
+	tb.Helper()
+
+	return func(_ context.Context, v any) { tb.Errorf("the capability panicked: %v", v) }
+}
+
 // serve runs one request through the client's handler for plugin "web/p", as the nth of its call, behind a
 // prefix that must survive, and decodes the answer.
 func serve(ctx context.Context, t *testing.T, client *httpcap.Client, req []byte, n int) answer {
 	t.Helper()
 
+	return serveWith(ctx, t, client.Handler("web/p", unexpectedPanic(t)), req, n)
+}
+
+func serveWith(ctx context.Context, t *testing.T, handler func(context.Context, []byte, []byte, int) []byte,
+	req []byte, n int,
+) answer {
+	t.Helper()
+
 	prefix := []byte("keep")
-	out := client.Handler("web/p")(ctx, bytes.Clone(prefix), req, n)
+	out := handler(ctx, bytes.Clone(prefix), req, n)
 	require.Equal(t, prefix, out[:len(prefix)], "the answer is appended")
 
 	resp, err := httpabi.DecodeResponse(bytes.Clone(out[len(prefix):]))
@@ -334,7 +349,7 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 	done := make(chan []byte)
 
 	go func() {
-		done <- client.Handler("web/p")(ctx, nil, request("GET", srv.URL, nil, ""), 1)
+		done <- client.Handler("web/p", unexpectedPanic(t))(ctx, nil, request("GET", srv.URL, nil, ""), 1)
 	}()
 
 	<-started
@@ -372,13 +387,16 @@ func (panickingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 func TestHandlerRecoversPanics(t *testing.T) {
 	t.Parallel()
 
-	client, logs := newClient(t, httpcap.Policy{AllowedHosts: []string{"a.example"}})
+	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{"a.example"}})
 	httpcap.SetTransport(client, panickingTransport{})
 
-	got := serve(t.Context(), t, client, request("GET", "http://a.example/", nil, ""), 1)
-	assert.Equal(t, httpcap.ErrInternal.Error(), got.refused)
-	assert.Contains(t, logs.String(), `"level":"ERROR","msg":"plg: http capability panicked","key":"web/p"`)
-	assert.Contains(t, logs.String(), `"panic":"transport bug","stack":"goroutine`)
+	var recovered []any
+
+	handler := client.Handler("web/p", func(_ context.Context, v any) { recovered = append(recovered, v) })
+
+	got := serveWith(t.Context(), t, handler, request("GET", "http://a.example/", nil, ""), 1)
+	assert.Equal(t, httpcap.ErrInternal.Error(), got.refused, "the plugin is told about an internal error")
+	assert.Equal(t, []any{"transport bug"}, recovered, "the panic went to the panicked function, once")
 }
 
 // benchTarget is a handler allowed to reach a loopback server answering "ok", and a GET for it.
@@ -403,7 +421,8 @@ func benchClient(b *testing.B) benchTarget {
 	require.NoError(b, err)
 	b.Cleanup(client.Close)
 
-	return benchTarget{handler: client.Handler("bench/p"), req: request(http.MethodGet, srv.URL, nil, "")}
+	return benchTarget{handler: client.Handler("bench/p", unexpectedPanic(b)), req: request(http.MethodGet, srv.URL,
+		nil, "")}
 }
 
 // BenchmarkRoundTrip is the host side of one plugin request (checks, request, response encoding) against a

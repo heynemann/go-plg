@@ -410,8 +410,9 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 
 	ctr := newContainer(t)
 
-	// Without a version, Register hashes the plugin's files first; with one, it copies them first.
-	for version, step := range map[string]string{"": "hashing", "v1": "copying sources"} {
+	// Without a version, Register hashes the plugin's files first; with one, it reads them first to check them
+	// for go statements.
+	for version, step := range map[string]string{"": "hashing", "v1": "reading the plugin source"} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
 

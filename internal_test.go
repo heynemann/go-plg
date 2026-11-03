@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"reflect"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"testing/synctest"
 	"time"
 
@@ -206,13 +208,17 @@ var (
 
 // fakeSpawner starts fake instances for pool tests.
 type fakeSpawner struct {
-	attempts chan time.Time // receives the time of every start, when non-nil
-	gate     chan struct{}  // when non-nil, every start waits for a value from it, or for its context
-	closeErr error          // returned by the instances' Close
-	failures atomic.Int32   // how many of the next starts fail
-	quota    int32          // when non-zero, starts beyond this many fail
+	attempts chan time.Time                // receives the time of every start, when non-nil
+	gate     chan struct{}                 // when non-nil, every start waits for a value from it, or for its context
+	call     func() (engine.Result, error) // the instances' Call, when non-nil
+	closeErr error                         // returned by the instances' Close
+	guest    string                        // the instances' Guest
+	failures atomic.Int32                  // how many of the next starts fail
+	panics   atomic.Int32                  // how many of the next starts panic
+	quota    int32                         // when non-zero, starts beyond this many fail
 	started  atomic.Int32
 	closed   atomic.Int32
+	closeBug atomic.Bool // the instances' Close panics
 }
 
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
@@ -227,6 +233,10 @@ func (s *fakeSpawner) spawn(ctx context.Context) (instance, error) {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("waiting at the gate: %w", context.Cause(ctx))
 		}
+	}
+
+	if s.panics.Add(-1) >= 0 {
+		panic("spawn bug")
 	}
 
 	if s.failures.Add(-1) >= 0 || (s.quota != 0 && s.started.Load() >= s.quota) {
@@ -244,7 +254,11 @@ type fakeInstance struct {
 	inUse atomic.Bool
 }
 
-func (*fakeInstance) Call(context.Context, uint32, []byte) (engine.Result, error) {
+func (f *fakeInstance) Call(context.Context, uint32, []byte) (engine.Result, error) {
+	if f.owner.call != nil {
+		return f.owner.call()
+	}
+
 	return engine.Result{}, nil
 }
 
@@ -253,8 +267,14 @@ func (*fakeInstance) Broken() bool { return false }
 func (f *fakeInstance) Close(context.Context) error {
 	f.owner.closed.Add(1)
 
+	if f.owner.closeBug.Load() {
+		panic("close bug")
+	}
+
 	return f.owner.closeErr
 }
+
+func (f *fakeInstance) Guest() string { return f.owner.guest }
 
 // recorder is a slog handler keeping every record, for tests to read once the logging goroutine is idle.
 type recorder struct {
@@ -305,21 +325,31 @@ func attr(rec *slog.Record, key string) slog.Value {
 	return found
 }
 
-// startPool warms a pool of sp's instances; cfg's spawn, key and limit are set, and its logger and budget
-// default to a discarding logger and no budget.
-func startPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
-	tb.Helper()
+// reporting returns a panic reporter keeping 16 entries, logging to handler.
+func reporting(handler slog.Handler) *panicReporter {
+	return newPanicReporter(slog.New(handler), nil, 16)
+}
 
-	cfg.spawn, cfg.key, cfg.limit = spawner.spawn, "test/k", testLimit
-	if cfg.logger == nil {
-		cfg.logger = slog.New(slog.DiscardHandler)
+// newTestPool returns a pool of sp's instances; cfg's spawn, key, language and limit are set, and its panic
+// reporter and budget default to a discarding one and no budget.
+func newTestPool(spawner *fakeSpawner, cfg poolConfig) *pool {
+	cfg.spawn, cfg.key, cfg.lang, cfg.limit = spawner.spawn, "test/k", LanguageGo, testLimit
+	if cfg.panics == nil {
+		cfg.panics = reporting(slog.DiscardHandler)
 	}
 
 	if cfg.budget == nil {
 		cfg.budget = &memoryBudget{}
 	}
 
-	instances := newPool(cfg)
+	return newPool(cfg)
+}
+
+// startPool warms a pool built by newTestPool.
+func startPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
+	tb.Helper()
+
+	instances := newTestPool(spawner, cfg)
 	require.NoError(tb, instances.warm(tb.Context()))
 
 	return instances
@@ -467,7 +497,7 @@ func TestPoolRefillBacksOffExponentially(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner, rec := &fakeSpawner{attempts: make(chan time.Time, 32)}, newRecorder()
-		instances := startPool(t, spawner, poolConfig{logger: slog.New(rec), minSize: 1, maxSize: 1})
+		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), minSize: 1, maxSize: 1})
 		<-spawner.attempts // warm's
 
 		spawner.failures.Store(10)
@@ -521,7 +551,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		spawner, rec := &fakeSpawner{}, newRecorder()
 		budget := &memoryBudget{total: 2 * testLimit}
-		instances := startPool(t, spawner, poolConfig{logger: slog.New(rec), budget: budget, minSize: 1, maxSize: 4})
+		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), budget: budget, minSize: 1, maxSize: 4})
 		held := acquireN(t, instances, 2)
 
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -540,7 +570,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 
 		// Another pool on the same budget cannot start until an instance is closed.
 		otherCfg := poolConfig{
-			logger: slog.New(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/other",
+			panics: reporting(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/other",
 			limit: testLimit, minSize: 1, maxSize: 1,
 		}
 		require.ErrorIs(t, newPool(otherCfg).warm(t.Context()), ErrMemoryBudget)
@@ -576,7 +606,7 @@ func TestPoolWarmFailureClosesWhatItStarted(t *testing.T) {
 
 			spawner, budget := &fakeSpawner{quota: tc.quota}, &memoryBudget{total: tc.budget}
 			instances := newPool(poolConfig{
-				logger: slog.New(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/k",
+				panics: reporting(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/k",
 				limit: testLimit, minSize: 3, maxSize: 3,
 			})
 
@@ -741,7 +771,7 @@ func TestPoolReportsInstancesFailingToClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rec := newRecorder()
 		spawner := &fakeSpawner{closeErr: errFake}
-		instances := startPool(t, spawner, poolConfig{logger: slog.New(rec), minSize: 2, maxSize: 2})
+		instances := startPool(t, spawner, poolConfig{panics: reporting(rec), minSize: 2, maxSize: 2})
 
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
 		synctest.Wait()
@@ -859,8 +889,8 @@ func BenchmarkPoolAcquireRelease(b *testing.B) {
 // BenchmarkPoolAcquireReleaseParallel is the pool overhead under contention: GOMAXPROCS goroutines share one
 // instance (they wait for each other) or as many instances as goroutines.
 func BenchmarkPoolAcquireReleaseParallel(b *testing.B) {
-	for _, size := range []int{1, runtime.GOMAXPROCS(0)} {
-		b.Run("pool="+strconv.Itoa(size), func(b *testing.B) {
+	for _, size := range []int32{1, int32(runtime.GOMAXPROCS(0))} { //nolint:gosec // G115: a handful of CPUs
+		b.Run("pool="+strconv.Itoa(int(size)), func(b *testing.B) {
 			instances := startPool(b, &fakeSpawner{}, poolConfig{minSize: size, maxSize: size})
 			b.Cleanup(func() { assert.NoError(b, instances.close(context.Background())) })
 
@@ -881,4 +911,535 @@ func BenchmarkPoolAcquireReleaseParallel(b *testing.B) {
 			})
 		})
 	}
+}
+
+// requirePanicError extracts the PanicError from err, checks its key, language and phase and returns a copy.
+func requirePanicError(t *testing.T, err error, phase Phase) PanicError {
+	t.Helper()
+
+	failure, ok := errors.AsType[*PanicError](err)
+	require.True(t, ok, "a PanicError: %v", err)
+	assert.Equal(t, "test/k", failure.Key)
+	assert.Equal(t, LanguageGo, failure.Language)
+	assert.Equal(t, phase, failure.Phase)
+	assert.False(t, failure.Time.IsZero())
+
+	return *failure
+}
+
+func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
+		spawner := &fakeSpawner{attempts: make(chan time.Time, 16)}
+		spawner.panics.Store(1)
+
+		cold := newTestPool(spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 2})
+		failure := requirePanicError(t, cold.warm(t.Context()), PhaseLoad)
+		assert.Equal(t, "spawn bug", failure.Value)
+		assert.Contains(t, string(failure.Stack), "(*fakeSpawner).spawn", "the stack where it panicked")
+		assert.Equal(t, PoolStats{}, cold.stats(), "the place was given back")
+		<-spawner.attempts
+
+		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 2})
+		<-spawner.attempts
+
+		held := acquireN(t, instances, 1)[0]
+
+		spawner.panics.Store(1)
+
+		_, err := instances.acquire(t.Context()) // nothing idle: the caller starts one
+		requirePanicError(t, err, PhaseCall)
+		<-spawner.attempts
+		synctest.Wait()
+		assert.Equal(t, 1, instances.stats().Size, "the caller's place was given back")
+
+		spawner.panics.Store(1)
+		instances.discard(t.Context(), held) // the refiller replaces it: a panic, then a success
+
+		first, second := <-spawner.attempts, <-spawner.attempts
+		assert.Equal(t, refillBackoffMin, second.Sub(first), "the panic was a failure: the refiller backed off")
+
+		synctest.Wait()
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 3)
+		assert.Equal(t, failure, *recent[0])
+		assert.Equal(t, PhaseCall, recent[1].Phase)
+		assert.Equal(t, PhaseRefill, recent[2].Phase)
+
+		require.NoError(t, instances.close(t.Context()))
+	})
+}
+
+// panickingHandler is a slog handler whose every record panics.
+type panickingHandler struct{}
+
+func (panickingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h panickingHandler) WithAttrs([]slog.Attr) slog.Handler     { return h }
+func (h panickingHandler) WithGroup(string) slog.Handler          { return h }
+
+func (panickingHandler) Handle(context.Context, slog.Record) error {
+	panic("log handler bug")
+}
+
+func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		reporter := reporting(panickingHandler{})
+		spawner := &fakeSpawner{attempts: make(chan time.Time, 4)}
+		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+		<-spawner.attempts
+
+		spawner.failures.Store(1)
+		instances.discard(t.Context(), acquireN(t, instances, 1)[0]) // the failure's Warn log panics
+
+		first, second := <-spawner.attempts, <-spawner.attempts
+		assert.GreaterOrEqual(t, second.Sub(first), refillBackoffMin, "the panic counted as a failure")
+
+		synctest.Wait()
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the refiller went on")
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 2, "the refiller's panic, then the logger's own when it was reported")
+		requirePanicError(t, recent[0], PhaseRefill)
+		assert.Equal(t, "log handler bug", recent[0].Value)
+		requirePanicError(t, recent[1], PhaseCallback)
+		assert.Equal(t, "slog.Handler.Handle", recent[1].Method)
+
+		require.NoError(t, instances.close(t.Context()))
+	})
+}
+
+func TestPoolReportsPanicsClosingInstances(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		rec := newRecorder()
+		reporter := reporting(rec)
+		spawner := &fakeSpawner{}
+		instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+
+		spawner.closeBug.Store(true)
+		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
+		synctest.Wait()
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 1)
+
+		failure := requirePanicError(t, recent[0], PhaseClose)
+		assert.Equal(t, "close bug", failure.Value)
+		assert.Contains(t, string(failure.Stack), "(*fakeInstance).Close")
+
+		records := rec.drain()
+		require.Len(t, records, 2)
+		assert.Equal(t, "plg: plugin failure", records[0].Message)
+		assert.Equal(t, "plg: closing a discarded instance failed", records[1].Message)
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the place was given back")
+
+		err := instances.close(t.Context())
+		requirePanicError(t, err, PhaseClose)
+		assert.Zero(t, instances.stats().Size, "every place given back")
+	})
+}
+
+var errTrap = errors.New("wasm error: unreachable")
+
+func TestCallFailuresArePanicErrors(t *testing.T) {
+	t.Parallel()
+
+	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
+	require.NoError(t, err)
+
+	tests := []struct {
+		call  func() (engine.Result, error)
+		value func(t *testing.T, pe *PanicError)
+		name  string
+		guest string // what the instance reports
+	}{
+		{
+			name: "trap", guest: "fatal error: out of memory",
+			call:  func() (engine.Result, error) { return engine.Result{}, errTrap },
+			value: func(t *testing.T, pe *PanicError) { t.Helper(); require.ErrorIs(t, pe, errTrap) },
+		},
+		{
+			name: "guest panic", guest: "plugin.go:3:1: panic",
+			call: func() (engine.Result, error) {
+				return engine.Result{Status: wire.StatusPanic, Message: "boom"}, nil
+			},
+			value: func(t *testing.T, pe *PanicError) { t.Helper(); assert.Equal(t, "boom", pe.Value) },
+		},
+		{
+			name: "guest ABI rejection",
+			call: func() (engine.Result, error) {
+				return engine.Result{Status: wire.StatusABI, Message: "unknown method"}, nil
+			},
+			value: func(t *testing.T, pe *PanicError) {
+				t.Helper()
+				require.ErrorIs(t, pe, errGuestStatus)
+				require.ErrorContains(t, pe, "guest status abi: unknown method")
+			},
+		},
+		{
+			name: "undecodable results",
+			call: func() (engine.Result, error) { return engine.Result{Status: wire.StatusOK}, nil },
+			value: func(t *testing.T, pe *PanicError) {
+				t.Helper()
+				require.ErrorIs(t, pe, engine.ErrABI)
+				require.ErrorIs(t, pe, wire.ErrTruncated)
+			},
+		},
+		{
+			name: "host panic",
+			call: func() (engine.Result, error) { panic("host bug") },
+			value: func(t *testing.T, pe *PanicError) {
+				t.Helper()
+				assert.Equal(t, "host bug", pe.Value)
+				assert.Contains(t, string(pe.Stack), "(*plugin).exchange", "recovered at the call boundary")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
+			spawner := &fakeSpawner{call: tc.call, guest: tc.guest}
+			instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+			plug := &plugin{key: "test/k", lang: LanguageGo, pool: instances}
+
+			_, err := plug.call(meth, []reflect.Value{reflect.ValueOf(t.Context())})
+
+			assert.Equal(t, PhaseCall, requirePanicError(t, err, PhaseCall).Phase)
+			require.ErrorIs(t, err, ErrCall)
+
+			failure, ok := errors.AsType[*PanicError](err)
+			require.True(t, ok)
+			assert.Equal(t, "M", failure.Method)
+			tc.value(t, failure)
+
+			if failure.Stack == nil {
+				assert.Equal(t, tc.guest, failure.Guest, "a guest failure carries the guest's output")
+			} else {
+				assert.Empty(t, failure.Guest, "a host panic is not the guest's")
+			}
+
+			assert.Equal(t, []*PanicError{failure}, reporter.history.recent(), "reported once")
+			assert.Equal(t, int32(1), spawner.closed.Load(), "the instance was discarded")
+			require.NoError(t, instances.close(t.Context()))
+		})
+	}
+}
+
+func TestPanicReporter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("logs, records and calls back", func(t *testing.T) {
+		t.Parallel()
+
+		rec := newRecorder()
+
+		var seen []*PanicError
+
+		reporter := newPanicReporter(slog.New(rec), func(_ context.Context, failure *PanicError) {
+			seen = append(seen, failure)
+		}, 4)
+		before := time.Now()
+		full := &PanicError{
+			Key: "n/k", Language: LanguageGo, Phase: PhaseCall, Method: "M", Value: "v", Guest: "g", Stack: []byte("s"),
+		}
+		bare := &PanicError{Key: "n", Phase: PhaseStorage, Value: errFake}
+
+		reporter.report(t.Context(), full)
+		reporter.report(t.Context(), bare)
+
+		assert.False(t, full.Time.Before(before), "stamped when reported")
+		assert.Equal(t, []*PanicError{full, bare}, seen, "the same values the callback got")
+		assert.Equal(t, []*PanicError{full, bare}, reporter.history.recent())
+
+		records := rec.drain()
+		require.Len(t, records, 2)
+
+		for _, record := range records {
+			assert.Equal(t, slog.LevelError, record.Level)
+			assert.Equal(t, "plg: plugin failure", record.Message)
+		}
+
+		for key, want := range map[string]string{
+			"key": "n/k", "language": "go", "phase": "call", "method": "M", "value": "v", "guest": "g", "stack": "s",
+		} {
+			assert.Equal(t, want, attr(&records[0], key).String(), key)
+		}
+
+		assert.Equal(t, 3, records[1].NumAttrs(), "only the fields set: key, phase and value")
+		assert.Equal(t, errFake.Error(), attr(&records[1], "value").String())
+	})
+
+	t.Run("a panicking callback is recorded, not called again", func(t *testing.T) {
+		t.Parallel()
+
+		rec := newRecorder()
+		calls := 0
+		reporter := newPanicReporter(slog.New(rec), func(context.Context, *PanicError) {
+			calls++
+
+			panic("callback bug")
+		}, 4)
+
+		failure := &PanicError{Key: "n/k", Language: LanguageGo, Phase: PhaseHTTP, Value: 1}
+		reporter.report(t.Context(), failure)
+
+		assert.Equal(t, 1, calls)
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 2)
+		assert.Same(t, failure, recent[0])
+		assert.Equal(t, PhaseCallback, recent[1].Phase)
+		assert.Equal(t, "n/k", recent[1].Key)
+		assert.Equal(t, LanguageGo, recent[1].Language)
+		assert.Equal(t, "OnPanic", recent[1].Method)
+		assert.Equal(t, "callback bug", recent[1].Value)
+		assert.Contains(t, string(recent[1].Stack), "TestPanicReporter")
+		assert.Len(t, rec.drain(), 2, "both logged")
+	})
+
+	t.Run("a panicking logger is recorded, not logged", func(t *testing.T) {
+		t.Parallel()
+
+		calls := 0
+		reporter := newPanicReporter(slog.New(panickingHandler{}), func(context.Context, *PanicError) { calls++ }, 4)
+		failure := &PanicError{Key: "n/k", Phase: PhaseCall, Value: 1}
+		reporter.report(t.Context(), failure)
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 2)
+		assert.Same(t, failure, recent[0])
+		assert.Equal(t, PhaseCallback, recent[1].Phase)
+		assert.Equal(t, "slog.Handler.Handle", recent[1].Method)
+		assert.Equal(t, "log handler bug", recent[1].Value)
+		assert.Equal(t, 1, calls, "the callback still ran")
+	})
+}
+
+func TestHTTPPanicsArePanicErrors(t *testing.T) {
+	t.Parallel()
+
+	ctr := New(WithPanicHistory(2))
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	ctr.httpPanicked("test/k", LanguageGo)(t.Context(), "transport bug")
+
+	recent := ctr.RecentPanics()
+	require.Len(t, recent, 1)
+
+	failure := requirePanicError(t, recent[0], PhaseHTTP)
+	assert.Equal(t, "transport bug", failure.Value)
+	assert.Contains(t, string(failure.Stack), "TestHTTPPanicsArePanicErrors")
+}
+
+func TestPanicHistoryKeepsTheNewest(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		want    []int
+		size    int
+		records int
+	}{
+		{size: 3, records: 0, want: nil},
+		{size: 3, records: 2, want: []int{0, 1}},
+		{size: 3, records: 3, want: []int{0, 1, 2}},
+		{size: 3, records: 7, want: []int{4, 5, 6}},
+		{size: 1, records: 2, want: []int{1}},
+		{size: 0, records: 2, want: nil},
+		{size: -1, records: 2, want: nil},
+	} {
+		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, tc.size)
+		for i := range tc.records {
+			reporter.history.record(&PanicError{Value: i})
+		}
+
+		recent := reporter.history.recent()
+		got := make([]int, 0, len(recent))
+
+		for _, failure := range recent {
+			v, ok := failure.Value.(int)
+			require.True(t, ok)
+
+			got = append(got, v)
+		}
+
+		if tc.want == nil {
+			assert.Nil(t, recent, "size %d, %d recorded", tc.size, tc.records)
+
+			continue
+		}
+
+		assert.Equal(t, tc.want, got, "size %d, %d recorded", tc.size, tc.records)
+	}
+}
+
+// historyMark is the value of the PanicErrors TestPanicHistoryUnderConcurrency records.
+type historyMark struct{ writer, round int }
+
+var errOutOfOrder = errors.New("history entries out of order")
+
+// historyInOrder checks a history read: at most size entries, each writer's in the order it recorded them.
+func historyInOrder(entries []*PanicError, size int) error {
+	if len(entries) > size {
+		return fmt.Errorf("%w: %d entries", errOverBound, len(entries))
+	}
+
+	last := map[int]int{}
+
+	for _, failure := range entries {
+		mark, ok := failure.Value.(historyMark)
+		if prev, seen := last[mark.writer]; !ok || (seen && mark.round <= prev) {
+			return fmt.Errorf("%w: %v after round %d", errOutOfOrder, mark, prev)
+		}
+
+		last[mark.writer] = mark.round
+	}
+
+	return nil
+}
+
+// TestPanicHistoryUnderConcurrency records from 8 goroutines while 4 read: every read returns at most the
+// history's size, with each writer's entries in the order it recorded them; once the writers are done, the
+// history is full.
+func TestPanicHistoryUnderConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		size    = 64
+		writers = 8
+		rounds  = 2000
+	)
+
+	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, size).history
+
+	var (
+		writing, reading sync.WaitGroup
+		done             atomic.Bool
+		readErr          atomic.Pointer[error]
+	)
+
+	for w := range writers {
+		writing.Go(func() {
+			for r := range rounds {
+				history.record(&PanicError{Value: historyMark{w, r}})
+			}
+		})
+	}
+
+	for range 4 {
+		reading.Go(func() {
+			for !done.Load() {
+				err := historyInOrder(history.recent(), size)
+				if err != nil {
+					readErr.CompareAndSwap(nil, &err)
+				}
+			}
+		})
+	}
+
+	writing.Wait()
+	done.Store(true)
+	reading.Wait()
+
+	if failed := readErr.Load(); failed != nil {
+		require.NoError(t, *failed, "a read while writing")
+	}
+
+	final := history.recent()
+	require.NoError(t, historyInOrder(final, size))
+	assert.Len(t, final, size, "quiescent: the ring is full")
+}
+
+// unreadable is a filesystem whose named file cannot be read.
+type unreadable struct {
+	fstest.MapFS
+
+	name string
+}
+
+func (u unreadable) ReadFile(name string) ([]byte, error) {
+	if name == u.name {
+		return nil, fs.ErrPermission
+	}
+
+	return u.MapFS.ReadFile(name) //nolint:wrapcheck // the test filesystem's own error
+}
+
+func TestCheckNoGoStatements(t *testing.T) {
+	t.Parallel()
+
+	src := func(body string) *fstest.MapFile { return &fstest.MapFile{Data: []byte("package p\n\n" + body)} }
+	clean := src("func f() { defer g() }\n")
+	spawns := src("func f() {\n\tgo g()\n}\n")
+
+	for _, tc := range []struct {
+		files fs.FS
+		want  error
+		name  string
+		dir   string
+		msg   string
+	}{
+		{name: "clean", files: fstest.MapFS{"p/a.go": clean, "p/notes.txt": {Data: []byte("go g()")}}, dir: "p"},
+		{
+			name: "every position, nested and in subdirectories", dir: "p", want: ErrGoStatement,
+			files: fstest.MapFS{
+				"p/a.go":     spawns,
+				"p/sub/b.go": src("var f = func() {\n\tfunc() { go g() }()\n}\n"),
+			},
+			msg: "p/a.go:4:2, p/sub/b.go:4:11",
+		},
+		{
+			name: "only below the package directory", dir: "p",
+			files: fstest.MapFS{"p/a.go": clean, "other/b.go": spawns},
+		},
+		{
+			name: "tests and links are not loaded", dir: ".",
+			files: fstest.MapFS{"a_test.go": spawns, "link.go": {Mode: fs.ModeSymlink, Data: []byte("x")}},
+		},
+		{
+			name: "syntax errors fail as the guest would", dir: ".", want: errGuestLoad,
+			files: fstest.MapFS{"a.go": {Data: []byte("package p\nfunc {")}}, msg: "a.go:2:6",
+		},
+		{
+			name: "unreadable file", dir: ".", want: fs.ErrPermission,
+			files: unreadable{fstest.MapFS{"a.go": clean}, "a.go"},
+		},
+		{name: "missing directory", dir: "nope", want: fs.ErrNotExist, files: fstest.MapFS{"a.go": clean}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := checkNoGoStatements(tc.files, tc.dir)
+			if tc.want == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.want)
+			assert.Contains(t, err.Error(), tc.msg)
+		})
+	}
+}
+
+func TestGuestFailureValues(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "boom", guestFailure(engine.Result{Status: wire.StatusPanic, Message: "boom"}),
+		"a panic's value is its message")
+
+	abi, ok := guestFailure(engine.Result{Status: wire.StatusABI, Message: "bad payload"}).(error)
+	require.True(t, ok, "any other status is an error naming it")
+	require.ErrorIs(t, abi, errGuestStatus)
+	assert.EqualError(t, abi, "guest status abi: bad payload")
 }

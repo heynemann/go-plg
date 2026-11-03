@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/testcontract"
 	"github.com/heynemann/go-plg/internal/wire"
 )
@@ -217,13 +218,25 @@ func message(status wire.Status, msg string) []byte {
 	return wire.AppendMessage([]byte{byte(status)}, msg)
 }
 
+// hostContainer returns a container logging as JSON to logs.
+func hostContainer(t *testing.T, logs *bytes.Buffer) *plg.Container {
+	t.Helper()
+
+	ctr := plg.New(plg.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	return ctr
+}
+
 func TestHostDispatch(t *testing.T) {
 	t.Parallel()
 
 	var logs bytes.Buffer
 
+	ctr := hostContainer(t, &logs)
 	handler, err := plg.HostHandler(reflect.TypeFor[testcontract.Hosted](),
-		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", slog.New(slog.NewJSONHandler(&logs, nil)))
+		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", ctr)
 	require.NoError(t, err)
 
 	ok := func(values ...any) []byte { return append([]byte{byte(wire.StatusOK)}, encodeAll(t, values...)...) }
@@ -243,7 +256,7 @@ func TestHostDispatch(t *testing.T) {
 		{t.Context(), "no variadic values", "Sum", encodeAll(t, 1, []int(nil)), ok(1)},
 		{
 			t.Context(), "panic", "Fail", encodeAll(t, "panic"), message(wire.StatusPanic,
-				"plg: host method panicked: testcontract.Host.Fail: host panicked on purpose"),
+				"plg: hosted/ref: host testcontract.Host.Fail failed: host panicked on purpose"),
 		},
 		{
 			t.Context(), "result that cannot cross", "Sum", encodeAll(t, 1<<53, []int{1}),
@@ -263,14 +276,22 @@ func TestHostDispatch(t *testing.T) {
 		})
 	}
 
-	t.Run("the panic is logged", func(t *testing.T) {
+	t.Run("the panic is reported", func(t *testing.T) {
 		_, err := handler(t.Context(), nil, hostMethod(t, "Fail"), encodeAll(t, "panic"))
 		require.NoError(t, err)
 
-		logged := logs.String()
-		assert.Contains(t, logged, `"level":"ERROR","msg":"plg: host method panicked","key":"hosted/ref",`+
-			`"method":"testcontract.Host.Fail","panic":"host panicked on purpose","stack":"goroutine `)
-		assert.Contains(t, logged, "(*testHost).Fail")
+		recent := ctr.RecentPanics()
+		require.Len(t, recent, 1, "the parallel cases have not run yet")
+
+		got := recent[0]
+		assert.Equal(t, "hosted/ref", got.Key)
+		assert.Equal(t, plg.LanguageGo, got.Language)
+		assert.Equal(t, plg.PhaseHost, got.Phase)
+		assert.Equal(t, "testcontract.Host.Fail", got.Method)
+		assert.Equal(t, "host panicked on purpose", got.Value)
+		assert.Contains(t, string(got.Stack), "(*testHost).Fail", "the host stack, where the panic happened")
+		assert.Contains(t, logs.String(), `"level":"ERROR","msg":"plg: plugin failure","key":"hosted/ref",`+
+			`"phase":"host","value":"host panicked on purpose"`)
 	})
 }
 
@@ -278,7 +299,7 @@ func TestHostDispatchRejectsInvalidRequests(t *testing.T) {
 	t.Parallel()
 
 	handler, err := plg.HostHandler(reflect.TypeFor[testcontract.Hosted](),
-		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", slog.New(slog.DiscardHandler))
+		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", hostContainer(t, new(bytes.Buffer)))
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -310,13 +331,14 @@ func TestHostDispatchRejectsInvalidRequests(t *testing.T) {
 // BenchmarkHostDispatch is the host side of one host call: decoding the arguments, calling the Host method by
 // reflection and encoding its struct result.
 func BenchmarkHostDispatch(b *testing.B) {
-	handler, err := plg.HostHandler(reflect.TypeFor[testcontract.Hosted](),
-		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", slog.New(slog.DiscardHandler))
-	require.NoError(b, err)
+	handler := benchHostHandler(b)
 
 	ctx, method, args := b.Context(), hostMethod(b, "Lookup"), encodeAll(b, "ada")
 
-	var dst []byte
+	var (
+		dst []byte
+		err error
+	)
 
 	b.ReportAllocs()
 
@@ -329,9 +351,7 @@ func BenchmarkHostDispatch(b *testing.B) {
 }
 
 func BenchmarkHostDispatchParallel(b *testing.B) {
-	handler, err := plg.HostHandler(reflect.TypeFor[testcontract.Hosted](),
-		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", slog.New(slog.DiscardHandler))
-	require.NoError(b, err)
+	handler := benchHostHandler(b)
 
 	ctx, method, args := b.Context(), hostMethod(b, "Lookup"), encodeAll(b, "ada")
 
@@ -350,4 +370,18 @@ func BenchmarkHostDispatchParallel(b *testing.B) {
 			}
 		}
 	})
+}
+
+func benchHostHandler(b *testing.B) engine.HostFunc {
+	b.Helper()
+
+	ctr := plg.New()
+
+	b.Cleanup(func() { assert.NoError(b, ctr.Close(context.Background())) })
+
+	handler, err := plg.HostHandler(reflect.TypeFor[testcontract.Hosted](),
+		plg.WithHost[testcontract.Host](newTestHost()), "hosted/ref", ctr)
+	require.NoError(b, err)
+
+	return handler
 }

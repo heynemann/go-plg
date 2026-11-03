@@ -1,6 +1,7 @@
 package plg
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -14,9 +15,14 @@ type Option func(*containerConfig)
 
 type containerConfig struct {
 	logger       *slog.Logger
+	onPanic      func(context.Context, *PanicError)
 	cacheDir     string
 	memoryBudget uint64
+	panicHistory int
 }
+
+// defaultPanicHistory is how many PanicErrors [Container.RecentPanics] keeps by default.
+const defaultPanicHistory = 64
 
 // WithLogger sets the logger for loads, cache warnings and plugin failures. The default discards everything.
 func WithLogger(logger *slog.Logger) Option {
@@ -41,6 +47,24 @@ func WithMemoryBudget(total uint64) Option {
 func WithCompilationCacheDir(dir string) Option {
 	return func(c *containerConfig) {
 		c.cacheDir = dir
+	}
+}
+
+// WithOnPanic calls fn with every [PanicError] the container reports, synchronously, on the goroutine that
+// met the failure (the caller's for a call). fn must be safe for concurrent use and must not block for long. A
+// panic in fn is recovered, logged and kept in [Container.RecentPanics] with [PhaseCallback]; it is not passed
+// to fn again.
+func WithOnPanic(fn func(ctx context.Context, pe *PanicError)) Option {
+	return func(c *containerConfig) {
+		c.onPanic = fn
+	}
+}
+
+// WithPanicHistory sets how many of the newest PanicErrors [Container.RecentPanics] returns; zero or less
+// keeps none. The default is 64.
+func WithPanicHistory(n int) Option {
+	return func(c *containerConfig) {
+		c.panicHistory = n
 	}
 }
 

@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"reflect"
-	"runtime/debug"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
@@ -148,52 +146,73 @@ func (h *host) renderGo(contr *contract) error {
 }
 
 var (
-	errHostPanic  = errors.New("plg: host method panicked")
 	errHostMethod = errors.New("unknown host method")
 	errHostArgs   = errors.New("malformed host call arguments")
 )
 
-// handler returns the function serving host_call for the instances of the plugin with the given key.
-func (h *host) handler(key string, logger *slog.Logger) engine.HostFunc {
+// handler returns the function serving host_call for the instances of the plugin with the given key and
+// language, reporting panics to panics.
+func (h *host) handler(key string, lang Language, panics *panicReporter) engine.HostFunc {
 	if h == nil {
 		return nil
 	}
 
-	return func(ctx context.Context, dst []byte, index uint32, args []byte) ([]byte, error) {
-		if int(index) >= len(h.methods) {
-			return dst, fmt.Errorf("%w %d of %s", errHostMethod, index, h.iface)
-		}
+	caller := &hostCaller{host: h, panics: panics, key: key, lang: lang}
 
-		meth := h.methods[index]
-
-		decoded, err := meth.decodeArgs(ctx, args)
-		if err != nil {
-			return dst, fmt.Errorf("%w: %s.%s: %w", errHostArgs, h.iface, meth.name, err)
-		}
-
-		return h.serve(ctx, dst, key, meth, decoded, logger), nil
-	}
+	return caller.serve
 }
 
-// serve calls the Host method and appends its status-prefixed answer to dst: the encoded results, the message
-// of the error it returned, of its results' conversion failure or of its panic.
-func (h *host) serve(ctx context.Context, dst []byte, key string, meth *method, args []reflect.Value,
-	logger *slog.Logger,
-) []byte {
-	var answer []byte
+// hostCaller serves one plugin's host calls.
+type hostCaller struct {
+	host   *host
+	panics *panicReporter
+	key    string
+	lang   Language
+}
+
+// serve decodes a host call's arguments, calls the Host method and appends its status-prefixed answer to dst:
+// the encoded results, the message of the error it returned, of its results' conversion failure or of its
+// panic. A panic (in the method, or in plg decoding or encoding its values) is reported as a [PanicError] in
+// [PhaseHost], whose message the plugin receives as the method's error; the instance keeps serving.
+func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw []byte) ([]byte, error) {
+	hst := hc.host
+	if int(index) >= len(hst.methods) {
+		return dst, fmt.Errorf("%w %d of %s", errHostMethod, index, hst.iface)
+	}
+
+	meth := hst.methods[index]
+
+	var (
+		answer []byte
+		err    error
+	)
 
 	func() {
 		defer func() {
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
-				err := hostPanic(ctx, logger, key, h.iface.String()+"."+meth.name, v, debug.Stack())
-				answer = wire.AppendMessage(append(dst, byte(wire.StatusPanic)), err.Error())
+				failure := &PanicError{
+					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.iface.String() + "." + meth.name,
+				}
+				hc.panics.recovered(ctx, failure, v)
+
+				answer, err = wire.AppendMessage(append(dst, byte(wire.StatusPanic)), failure.Error()), nil
 			}
 		}()
 
-		answer = h.invoke(dst, meth, args)
+		answer, err = hst.answer(ctx, dst, meth, raw)
 	}()
 
-	return answer
+	return answer, err
+}
+
+// answer decodes a host call's arguments and invokes its method.
+func (h *host) answer(ctx context.Context, dst []byte, meth *method, raw []byte) ([]byte, error) {
+	args, err := meth.decodeArgs(ctx, raw)
+	if err != nil {
+		return dst, fmt.Errorf("%w: %s.%s: %w", errHostArgs, h.iface, meth.name, err)
+	}
+
+	return h.invoke(dst, meth, args), nil
 }
 
 // invoke calls the Host method and appends its answer to dst, as serve does, except for panics.
@@ -220,14 +239,4 @@ func (h *host) invoke(dst []byte, meth *method, args []reflect.Value) []byte {
 	}
 
 	return answer
-}
-
-// hostPanic reports a panic recovered from a Host method and returns the error the plugin receives. It is the
-// one place that turns a Host panic into an error: ticket 07's *PanicError (Phase Host), with its reporting
-// (metrics, WithOnPanic, panic history), replaces the plain error built here.
-func hostPanic(ctx context.Context, logger *slog.Logger, key, method string, value any, stack []byte) error {
-	logger.LogAttrs(ctx, slog.LevelError, "plg: host method panicked", slog.String("key", key),
-		slog.String("method", method), slog.String("panic", fmt.Sprint(value)), slog.String("stack", string(stack)))
-
-	return fmt.Errorf("%w: %s: %v", errHostPanic, method, value)
 }

@@ -19,6 +19,7 @@ type plugin struct {
 	pool  *pool
 	http  *httpcap.Client // the Register call's, shared with its other plugins
 	key   string          // "<name>/<descriptor key>"
+	lang  Language
 }
 
 // snapshot is an immutable state of the catalogue. Register publishes a new one with compare-and-swap, so

@@ -67,7 +67,7 @@ var (
 	ErrBadRequest = errors.New("plg http: invalid request")
 	// ErrFailed reports a request that failed in transit (connection, TLS, protocol errors).
 	ErrFailed = errors.New("plg http: request failed")
-	// ErrInternal reports a panic in the HTTP capability itself; it is logged with its stack.
+	// ErrInternal reports a panic in the HTTP capability itself; the handler's panicked function receives it.
 	ErrInternal = errors.New("plg http: internal error")
 )
 

@@ -2,8 +2,8 @@ package plg
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -13,7 +13,6 @@ import (
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/internal/httpcap"
-	"github.com/heynemann/go-plg/internal/wire"
 )
 
 // Register loads, under name, every plugin its storages list for the interface T, and publishes them in one
@@ -117,27 +116,29 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 
 // source is a plugin a storage listed.
 type source struct {
-	storage Storage
-	guest   guestreg.Guest
-	desc    Descriptor
-	limit   uint64 // per-instance memory limit, whole pages
+	storage   Storage
+	guest     guestreg.Guest
+	storeName string // storage.Name(), asked once
+	desc      Descriptor
+	limit     uint64 // per-instance memory limit, whole pages
 }
 
 // listPlugins lists the storages and checks their descriptors: every key and entrypoint and that no key is
 // listed twice first, then it skips (and logs) the plugins in languages the Register did not enable and checks
 // that each remaining plugin's language guest is linked.
 func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) ([]source, error) {
-	listed, err := listStorages(ctx, cfg.storages)
+	listed, err := c.listStorages(ctx, name, cfg.storages)
 	if err != nil {
 		return nil, err
 	}
 
 	srcs := listed[:0]
 
-	for _, src := range listed {
+	for i := range listed {
+		src := &listed[i]
 		if !cfg.enabled(src.desc.Language) {
 			c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin skipped: its language is not enabled",
-				slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storage.Name()),
+				slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storeName),
 				slog.String("language", string(src.desc.Language)))
 
 			continue
@@ -145,11 +146,11 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 
 		src.guest, err = guestFor(src.desc.Language)
 		if err != nil {
-			return nil, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storage.Name(), err)
+			return nil, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
 		}
 
-		src.limit = c.instanceLimit(ctx, name, cfg, &src)
-		srcs = append(srcs, src)
+		src.limit = c.instanceLimit(ctx, name, cfg, src)
+		srcs = append(srcs, *src)
 	}
 
 	return srcs, nil
@@ -175,48 +176,82 @@ func (c *Container) instanceLimit(ctx context.Context, name string, cfg *registe
 }
 
 // listStorages lists every storage, checking that each descriptor has a key and an entrypoint and that no key
-// is listed twice, whatever its language.
-func listStorages(ctx context.Context, storages []Storage) ([]source, error) {
+// is listed twice, whatever its language. A panicking storage fails with a reported [PanicError].
+func (c *Container) listStorages(ctx context.Context, name string, storages []Storage) ([]source, error) {
 	var srcs []source
 
 	owner := map[string]string{} // key -> storage name
 
 	for _, store := range storages {
-		descs, err := store.List(ctx)
+		var (
+			storeName string
+			descs     []Descriptor
+		)
+
+		err := c.storageCall(ctx, name, "Name", func() error {
+			storeName = store.Name()
+
+			return nil
+		})
+		if err == nil {
+			err = c.storageCall(ctx, name, "List", func() error {
+				var listErr error
+
+				descs, listErr = store.List(ctx)
+
+				return listErr //nolint:wrapcheck // wrapped below, with the storage's name
+			})
+		}
+
 		if err != nil {
-			return nil, fmt.Errorf("%w: listing storage %s: %w", ErrLoad, store.Name(), err)
+			return nil, fmt.Errorf("%w: listing storage %s: %w", ErrLoad, storeName, err)
 		}
 
 		for _, desc := range descs {
-			err = checkDescriptor(store, &desc)
+			err = checkDescriptor(storeName, &desc)
 			if err != nil {
 				return nil, err
 			}
 
 			if prev, dup := owner[desc.Key]; dup {
 				return nil, fmt.Errorf("%w %q: listed by storages %s and %s", ErrDuplicateKey, desc.Key, prev,
-					store.Name())
+					storeName)
 			}
 
-			owner[desc.Key] = store.Name()
-			srcs = append(srcs, source{storage: store, desc: desc})
+			owner[desc.Key] = storeName
+			srcs = append(srcs, source{storage: store, storeName: storeName, desc: desc})
 		}
 	}
 
 	return srcs, nil
 }
 
+// storageCall runs a method of a user's [Storage], turning a panic into a reported [PanicError] in
+// [PhaseStorage] for the given key.
+func (c *Container) storageCall(ctx context.Context, key, method string, call func() error) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			failure := &PanicError{Key: key, Phase: PhaseStorage, Method: method}
+			c.panics.recovered(ctx, failure, v)
+
+			err = failure
+		}
+	}()
+
+	return call()
+}
+
 // checkDescriptor checks that a descriptor has a key and an entrypoint, and a memory limit from one page to
 // 4 GiB if any.
-func checkDescriptor(store Storage, desc *Descriptor) error {
+func checkDescriptor(storeName string, desc *Descriptor) error {
 	if desc.Key == "" || desc.Entrypoint == "" {
 		return fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint", ErrInvalidDescriptor,
-			store.Name(), *desc)
+			storeName, *desc)
 	}
 
 	if desc.MemoryLimit != 0 && (desc.MemoryLimit < engine.PageSize || desc.MemoryLimit > maxMemoryLimit) {
 		return fmt.Errorf("%w: storage %s lists %q with a memory limit of %d bytes, not from one %d-byte page "+
-			"to 4 GiB", ErrInvalidDescriptor, store.Name(), desc.Key, desc.MemoryLimit, engine.PageSize)
+			"to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, engine.PageSize)
 	}
 
 	return nil
@@ -245,7 +280,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 			c.closePlugins(ctx, plugins)
 			c.budget.unreserve(reserved)
 
-			return nil, fmt.Errorf("%w: %s (storage %s): %w", ErrLoad, key, srcs[i].storage.Name(), err)
+			return nil, fmt.Errorf("%w: %s (storage %s): %w", ErrLoad, key, srcs[i].storeName, err)
 		}
 
 		plugins = append(plugins, plug)
@@ -282,12 +317,43 @@ func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []sourc
 }
 
 // load opens a plugin, starts the minimum instances of its pool (running Create in each) and binds an adapter
-// to it.
+// to it. A panic on the host meanwhile (the plugin's fs.FS is the storage's code) fails with a reported
+// [PanicError] in [PhaseLoad].
 func (c *Container) load(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
-	start := time.Now()
-	contr := reg.contr
+	var (
+		plug *plugin
+		err  error
+	)
 
-	files, err := src.storage.Open(ctx, src.desc)
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad}
+				c.panics.recovered(ctx, failure, v)
+
+				plug, err = nil, failure
+			}
+		}()
+
+		plug, err = c.loadPlugin(ctx, reg, key, src)
+	}()
+
+	return plug, err
+}
+
+// loadPlugin is load without its panic boundary.
+func (c *Container) loadPlugin(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
+	start := time.Now()
+
+	var files fs.FS
+
+	err := c.storageCall(ctx, key, "Open", func() error {
+		var openErr error
+
+		files, openErr = src.storage.Open(ctx, src.desc)
+
+		return openErr //nolint:wrapcheck // wrapped below
+	})
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
 	}
@@ -299,7 +365,7 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 		}
 	}
 
-	tree, err := goSourceTree(contr, reg.dispatcher, files, src.desc.Entrypoint)
+	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, src.desc.Entrypoint)
 	if err != nil {
 		return nil, err
 	}
@@ -309,30 +375,15 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 		return nil, err
 	}
 
-	opts := engine.InstanceOptions{
-		Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
-		HTTP:   reg.http.Handler(key),
-		Host:   reg.host.handler(key, c.logger),
-	}
-	instances := newPool(poolConfig{
-		logger: c.logger,
-		spawn: func(ctx context.Context) (instance, error) {
-			return startGo(ctx, mod, opts, reg.goPayload)
-		},
-		budget:  &c.budget,
-		key:     key,
-		limit:   src.limit,
-		minSize: reg.cfg.poolMin,
-		maxSize: reg.cfg.poolMax,
-	})
+	instances := c.goPool(reg, key, src, tree, mod)
 
 	err = instances.warm(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	plug := &plugin{key: key, iface: contr.iface, http: reg.http, pool: instances}
-	plug.value = contr.bind(plug) //nolint:contextcheck // each adapter call takes the context it is passed
+	plug := &plugin{key: key, lang: src.desc.Language, iface: reg.contr.iface, http: reg.http, pool: instances}
+	plug.value = reg.contr.bind(plug) //nolint:contextcheck // each adapter call takes the context it is passed
 
 	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key),
 		slog.String("language", string(src.desc.Language)), slog.String("version", src.desc.Version),
@@ -342,45 +393,31 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 	return plug, nil
 }
 
-var (
-	errCreate     = errors.New("plugin Create failed")
-	errGuestLoad  = errors.New("plugin source failed to load")
-	errInitStatus = errors.New("guest failed to initialize")
-)
-
-// startGo starts a Go guest instance (mounting the plugin's source tree) and runs the plugin's Create.
-func startGo(ctx context.Context, mod *engine.Module, opts engine.InstanceOptions, payload []byte) (
-	*engine.Instance, error,
-) {
-	inst, err := mod.Instantiate(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("starting an instance: %w", err)
+// goPool returns the (not yet warm) pool of a Go plugin's instances, which mount tree.
+func (c *Container) goPool(reg *registration, key string, src *source, tree fs.FS, mod *engine.Module) *pool {
+	launcher := &goLauncher{
+		mod:     mod,
+		logger:  c.logger,
+		panics:  c.panics,
+		payload: reg.goPayload,
+		opts: engine.InstanceOptions{
+			Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
+			HTTP:   reg.http.Handler(key, c.httpPanicked(key, src.desc.Language)),
+			Host:   reg.host.handler(key, src.desc.Language, c.panics),
+		},
+		key: key,
 	}
 
-	res, err := inst.Init(ctx, payload)
-	if err == nil {
-		err = initError(res)
-	}
-
-	if err != nil {
-		return nil, errors.Join(err, inst.Close(context.WithoutCancel(ctx)))
-	}
-
-	return inst, nil
-}
-
-// initError maps a plg_init result to an error.
-func initError(res engine.Result) error {
-	switch res.Status { //nolint:exhaustive // panic and ABI statuses both mean the guest failed to initialize
-	case wire.StatusOK:
-		return nil
-	case wire.StatusError:
-		return fmt.Errorf("%w: %s", errCreate, res.Message)
-	case wire.StatusLoad:
-		return fmt.Errorf("%w: %s", errGuestLoad, res.Message)
-	default:
-		return fmt.Errorf("%w: status %s: %s", errInitStatus, res.Status, res.Message)
-	}
+	return newPool(poolConfig{
+		panics:  c.panics,
+		spawn:   launcher.start,
+		budget:  &c.budget,
+		key:     key,
+		lang:    src.desc.Language,
+		limit:   src.limit,
+		minSize: int32(reg.cfg.poolMin), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+		maxSize: int32(reg.cfg.poolMax), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+	})
 }
 
 // publish adds the plugins to the catalogue in one atomic step.

@@ -192,8 +192,35 @@ func (p *plugin) call(meth *method, args []reflect.Value) ([]reflect.Value, erro
 }
 
 // exchange encodes the arguments, calls the instance and decodes its answer. The boolean reports an instance
-// that must not serve another call.
+// that must not serve another call. A guest that traps, panics, is stopped by ctx or breaks the ABI, and a
+// panic on the host meanwhile, fail the call with a reported [PanicError] in [PhaseCall].
 func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []reflect.Value) (
+	[]reflect.Value, bool, error,
+) {
+	var (
+		out     []reflect.Value
+		discard bool
+		err     error
+	)
+
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseCall, Method: meth.name}
+				p.pool.panics.recovered(ctx, failure, v)
+
+				out, discard, err = nil, true, failure
+			}
+		}()
+
+		out, discard, err = p.roundTrip(ctx, held, meth, args)
+	}()
+
+	return out, discard, err
+}
+
+// roundTrip is exchange without its panic boundary.
+func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, args []reflect.Value) (
 	[]reflect.Value, bool, error,
 ) {
 	var err error
@@ -205,14 +232,14 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []
 
 	res, err := held.inst.Call(ctx, meth.index, held.buf)
 	if err != nil {
-		return nil, true, fmt.Errorf("%w: %s.%s: %w", ErrCall, p.key, meth.name, err)
+		return nil, true, p.failed(ctx, held, meth, err)
 	}
 
-	switch res.Status { //nolint:exhaustive // panic, load and ABI statuses all fail the call and break the instance
+	switch res.Status { //nolint:exhaustive // load and ABI statuses (or worse) fail the call and break the instance
 	case wire.StatusOK:
 		out, err := meth.decodeResults(res.Body)
 		if err != nil {
-			return nil, true, fmt.Errorf("%w: %s.%s: %w: %w", ErrCall, p.key, meth.name, engine.ErrABI, err)
+			return nil, true, p.failed(ctx, held, meth, fmt.Errorf("%w: %w", engine.ErrABI, err))
 		}
 
 		return out, false, nil
@@ -220,8 +247,19 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []
 		return nil, false, &PluginError{Key: p.key, Method: meth.name, Message: res.Message}
 	case wire.StatusConvert:
 		return nil, false, fmt.Errorf("%w: %s.%s: %s", ErrConversion, p.key, meth.name, res.Message)
+	case wire.StatusPanic:
+		return nil, true, p.failed(ctx, held, meth, res.Message)
 	default:
-		return nil, true, fmt.Errorf("%w: %s.%s: guest status %s: %s", ErrCall, p.key, meth.name, res.Status,
-			res.Message)
+		return nil, true, p.failed(ctx, held, meth, fmt.Errorf("%w %s: %s", errGuestStatus, res.Status, res.Message))
 	}
+}
+
+// failed reports a call the guest failed, with what the guest wrote to stderr meanwhile.
+func (p *plugin) failed(ctx context.Context, held *slot, meth *method, value any) *PanicError {
+	failure := &PanicError{
+		Key: p.key, Language: p.lang, Phase: PhaseCall, Method: meth.name, Value: value, Guest: held.inst.Guest(),
+	}
+	p.pool.panics.report(ctx, failure)
+
+	return failure
 }

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"time"
 
 	"github.com/heynemann/go-plg/internal/httpabi"
@@ -16,10 +15,13 @@ import (
 
 // Handler returns the function serving the http_roundtrip requests of the plugin with the given key (the
 // shape of engine.HTTPFunc). It appends the encoded answer to dst; req is the encoded request and n counts the
-// requests of the current call.
-func (c *Client) Handler(key string) func(ctx context.Context, dst, req []byte, n int) []byte {
+// requests of the current call. A panic in the capability (or net/http) is passed to panicked, from the
+// recovering goroutine (so it may record the panicking stack), and answered with [ErrInternal].
+func (c *Client) Handler(key string, panicked func(ctx context.Context, value any)) func(
+	ctx context.Context, dst, req []byte, n int,
+) []byte {
 	return func(ctx context.Context, dst, req []byte, n int) []byte {
-		return c.serve(ctx, key, dst, req, n)
+		return c.serve(ctx, key, panicked, dst, req, n)
 	}
 }
 
@@ -33,15 +35,16 @@ type exchange struct {
 	received int
 }
 
-// serve answers one request, turning a panic in the capability (or net/http) into a logged internal error.
-func (c *Client) serve(ctx context.Context, key string, dst, req []byte, n int) []byte {
+// serve answers one request, turning a panic in the capability (or net/http) into an internal error.
+func (c *Client) serve(ctx context.Context, key string, panicked func(context.Context, any), dst, req []byte,
+	n int,
+) []byte {
 	var out []byte
 
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				c.logger.LogAttrs(ctx, slog.LevelError, "plg: http capability panicked", slog.String("key", key),
-					slog.Any("panic", v), slog.String("stack", string(debug.Stack())))
+				panicked(ctx, v)
 
 				out = httpabi.AppendFailure(dst, ErrInternal.Error())
 			}

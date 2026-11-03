@@ -2,7 +2,6 @@ package plg
 
 import (
 	"context"
-	"log/slog"
 	"reflect"
 
 	"github.com/heynemann/go-plg/internal/engine"
@@ -64,9 +63,9 @@ func (p *pool) stats() PoolStats {
 	}
 }
 
-// HostHandler returns the host_call handler Register gives the instances of the plugin key when it registers
-// iface with the WithHost option opt, reporting panics to logger.
-func HostHandler(iface reflect.Type, opt RegisterOption, key string, logger *slog.Logger) (engine.HostFunc, error) {
+// HostHandler returns the host_call handler Register gives the instances of the Go plugin key when it registers
+// iface with the WithHost option opt in the container ctr, which reports its panics.
+func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Container) (engine.HostFunc, error) {
 	contr, err := lookupContract(iface)
 	if err != nil {
 		return nil, err
@@ -80,5 +79,5 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, logger *slo
 		return nil, err
 	}
 
-	return hst.handler(key, logger), nil
+	return hst.handler(key, LanguageGo, ctr.panics), nil
 }

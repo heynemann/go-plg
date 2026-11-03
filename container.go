@@ -41,6 +41,7 @@ const goMemoryLimit = 128 << 20
 type Container struct {
 	engine    *engine.Engine
 	logger    *slog.Logger
+	panics    *panicReporter
 	runtimes  *xsync.Map[uint64, *engine.Runtime] // by memory limit
 	modules   *xsync.Map[moduleKey, *compiledGuest]
 	names     *xsync.Map[string, bool] // registered (or registering) names
@@ -51,7 +52,7 @@ type Container struct {
 
 // New returns an empty container.
 func New(opts ...Option) *Container {
-	cfg := containerConfig{logger: slog.New(slog.DiscardHandler)}
+	cfg := containerConfig{logger: slog.New(slog.DiscardHandler), panicHistory: defaultPanicHistory}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -59,6 +60,7 @@ func New(opts ...Option) *Container {
 	ctr := &Container{
 		engine:   engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
 		logger:   cfg.logger,
+		panics:   newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory),
 		runtimes: xsync.NewMap[uint64, *engine.Runtime](),
 		modules:  xsync.NewMap[moduleKey, *compiledGuest](),
 		names:    xsync.NewMap[string, bool](),
