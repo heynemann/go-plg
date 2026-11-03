@@ -527,9 +527,14 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 func (c *Container) newLauncher(reg *registration, key string, src *source, spec launchSpec, mod *engine.Module,
 	meters *pluginMeters,
 ) *launcher {
+	output := c.panics.guardedLogger(c.logger, key, src.desc.Language)
+	if c.unguardedOutput.Load() {
+		output = c.logger
+	}
+
 	return &launcher{
 		mod:     mod,
-		logger:  c.logger,
+		output:  output,
 		panics:  c.panics,
 		payload: spec.payload,
 		opts: engine.InstanceOptions{

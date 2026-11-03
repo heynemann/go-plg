@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -204,6 +206,160 @@ func TestCreateRunningOutOfMemoryFailsRegister(t *testing.T) {
 	failure := requirePanic(t, err, "fooer/createoom", plg.PhaseCreate)
 	assert.Contains(t, failure.Guest, "out of memory")
 	assert.Equal(t, []*plg.PanicError{failure}, ctr.RecentPanics())
+}
+
+// printingPlugin is a Go plugin whose Create and Foo print {{PRINT}} (a statement of package fmt) before they
+// return.
+const printingPlugin = `package printing
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/heynemann/go-plg/internal/testcontract"
+)
+
+type plugin struct{ testcontract.Fooer }
+
+func Create() (testcontract.Fooer, error) {
+	{{PRINT}}
+
+	return plugin{}, nil
+}
+
+func (plugin) Foo(_ context.Context, name string) (string, error) {
+	{{PRINT}}
+
+	return "hello, " + name, nil
+}
+`
+
+// printingStorage holds the printing plugin under each key of statements, printing with the key's statement.
+func printingStorage(t *testing.T, statements map[string]string) *plg.MemoryStorage {
+	t.Helper()
+
+	store := plg.NewMemoryStorage("printing")
+
+	for key, statement := range statements {
+		desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v1"}
+		source := strings.ReplaceAll(printingPlugin, "{{PRINT}}", statement)
+		require.NoError(t, store.Put(desc, fstest.MapFS{"plugin.go": {Data: []byte(source)}}))
+	}
+
+	return store
+}
+
+// TestAPanickingLoggerNeverFailsAStepOnGuestOutput runs plugins that print in Create and in a call, with a logger
+// whose handler panics on every guest output record: a complete line (key "line"), logged while the guest writes
+// it, and a partial line (key "partial"), logged when the step ends. Each panic is a PanicError in PhaseCallback;
+// the starts succeed, the instances are the pools' (budget exact), the calls succeed on them without discarding
+// them, and they are closed with their versions: no instance is left open.
+func TestAPanickingLoggerNeverFailsAStepOnGuestOutput(t *testing.T) {
+	t.Parallel()
+
+	logger := panickingLogger{Handler: slog.DiscardHandler, msg: "plg: guest output"}
+	ctr := newContainer(t, plg.WithLogger(slog.New(logger)))
+	store := printingStorage(t, map[string]string{"partial": `fmt.Print("x")`, "line": `fmt.Println("a line")`})
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "printing", plg.WithStorage(store),
+		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
+	assert.Equal(t, 2, plg.Instances(ctr), "each plugin's pool instance")
+	assert.Equal(t, uint64(2*hostileLimit), plg.MemoryInUse(ctr), "two instances charged")
+	assert.Len(t, ctr.RecentPanics(), 2, "each Create's output")
+
+	for _, key := range []string{"printing/line", "printing/partial"} {
+		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, key), key)
+		assert.Equal(t, "hello, x", greet(t, getFooer(t, ctr, key), "x"), key)
+		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, key), "%s: the instance was kept", key)
+	}
+
+	panics := ctr.RecentPanics()
+	require.Len(t, panics, 4, "each Create's output, then each call's")
+
+	byKey := map[string]int{}
+
+	for _, pe := range panics {
+		assert.Equal(t, plg.PhaseCallback, pe.Phase)
+		assert.Equal(t, "slog.Handler.Handle", pe.Method)
+		assert.Equal(t, "logger exploded", pe.Value)
+		assert.Equal(t, plg.LanguageGo, pe.Language)
+
+		byKey[pe.Key]++
+	}
+
+	assert.Equal(t, map[string]int{"printing/line": 2, "printing/partial": 2}, byKey)
+
+	store.Delete("line")
+	store.Delete("partial")
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "printing"))
+	require.NoError(t, plg.AwaitRetired(t.Context(), ctr))
+	assert.Zero(t, plg.Instances(ctr), "closed with their versions")
+	assert.Zero(t, plg.MemoryInUse(ctr))
+	assert.Zero(t, plg.MemoryReserved(ctr))
+}
+
+// TestAFailedStartClosesItsInstance fails a plugin's start on every path between instantiating its instance and
+// handing it to the pool: the guest trapping in Create, Create returning an error, the source failing to load in
+// the guest, the guest panicking, and a panic on the host once Create returned (the logger's, on the partial line
+// Create printed, with guest output unguarded as it was before this was fixed). Register fails each time and
+// leaves no instance open, no memory charged and none reserved. The cases share one container, in order: the last
+// unguards its output.
+func TestAFailedStartClosesItsInstance(t *testing.T) {
+	t.Parallel()
+
+	logger := panickingLogger{Handler: slog.DiscardHandler, msg: "plg: guest output"}
+	ctr := newContainer(t, plg.WithLogger(slog.New(logger)))
+	testdata := func(dir string) plg.Storage { return goStorage(t, "testdata", map[string]string{"k": dir}) }
+	panicked := func(phase plg.Phase, says string) func(err error, name string) {
+		return func(err error, name string) {
+			failure, ok := errors.AsType[*plg.PanicError](err)
+			require.True(t, ok, "%s: a PanicError: %v", name, err)
+			assert.Equal(t, phase, failure.Phase, name)
+			assert.Contains(
+				t,
+				fmt.Sprint(failure.Value)+"\n"+failure.Guest,
+				says,
+				"%s: its value or the guest's stderr",
+				name,
+			)
+		}
+	}
+	failed := func(msg string) func(err error, name string) {
+		return func(err error, name string) {
+			require.ErrorContains(t, err, msg, name)
+			assert.NotErrorAs(t, err, new(*plg.PanicError), "%s: an ordinary error", name)
+		}
+	}
+
+	tests := []struct {
+		storage   plg.Storage
+		check     func(err error, name string)
+		name      string
+		unguarded bool
+	}{
+		{name: "trap", storage: corpus("createoom"), check: panicked(plg.PhaseCreate, "out of memory")},
+		{name: "create error", storage: testdata("createfails"), check: failed("plugin Create failed")},
+		{name: "load error", storage: testdata("forbidden"), check: failed("plugin source failed to load")},
+		{name: "guest panic", storage: testdata("createpanics"), check: panicked(plg.PhaseCreate, "on purpose")},
+		{
+			name: "host panic", storage: printingStorage(t, map[string]string{"k": `fmt.Print("x")`}),
+			check: panicked(plg.PhaseLoad, "logger exploded"), unguarded: true,
+		},
+	}
+
+	for _, tc := range tests {
+		if tc.unguarded {
+			plg.UnguardGuestOutput(ctr)
+		}
+
+		err := plg.Register[testcontract.Fooer](t.Context(), ctr, "failing", plg.WithStorage(tc.storage),
+			plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit))
+		require.ErrorIs(t, err, plg.ErrLoad, tc.name)
+		tc.check(err, tc.name)
+
+		assert.Zero(t, plg.Instances(ctr), "%s: the instance is closed", tc.name)
+		assert.Zero(t, plg.MemoryInUse(ctr), tc.name)
+		assert.Zero(t, plg.MemoryReserved(ctr), tc.name)
+	}
 }
 
 func TestGoPluginSleepShorterThanItsDeadlineCompletes(t *testing.T) {

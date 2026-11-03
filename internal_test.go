@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/guestout"
 	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
 	"github.com/heynemann/go-plg/internal/wire"
@@ -1137,6 +1138,130 @@ func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
 
 		require.NoError(t, instances.close(t.Context()))
 	})
+}
+
+// panickingEnabled is a slog handler that panics when asked whether it takes a level.
+type panickingEnabled struct {
+	panickingHandler
+}
+
+func (panickingEnabled) Enabled(context.Context, slog.Level) bool { panic("log handler bug") }
+
+func TestGuardedLoggerContainsItsHandlersPanics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		handler slog.Handler
+		log     func(logger *slog.Logger)
+		name    string
+	}{
+		{name: "Handle", handler: panickingHandler{}, log: func(l *slog.Logger) { l.Info("record") }},
+		{name: "Enabled", handler: panickingEnabled{}, log: func(l *slog.Logger) { l.Info("record") }},
+		{
+			name: "WithAttrs", handler: panickingHandler{},
+			log: func(l *slog.Logger) { l.With(slog.Int("a", 1)).Info("record") },
+		},
+		{name: "WithGroup", handler: panickingHandler{}, log: func(l *slog.Logger) { l.WithGroup("g").Info("record") }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reporter := reporting(slog.DiscardHandler)
+			logger := reporter.guardedLogger(slog.New(tc.handler), "test/k", LanguageGo)
+
+			assert.NotPanics(t, func() { tc.log(logger) })
+
+			recent := reporter.history.recent()
+			require.Len(t, recent, 1)
+
+			failure := requirePanicError(t, recent[0], PhaseCallback)
+			assert.Equal(t, "slog.Handler.Handle", failure.Method)
+			assert.Equal(t, "log handler bug", failure.Value)
+		})
+	}
+}
+
+// countingHandler is a slog handler counting the records it handles, allocating nothing and pooling nothing.
+type countingHandler struct {
+	handled int
+}
+
+func (*countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler     { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler          { return h }
+
+func (h *countingHandler) Handle(context.Context, slog.Record) error {
+	h.handled++
+
+	return nil
+}
+
+// TestGuestOutputGuardsDoNotAllocate: a line of guest output logged behind the callback boundary allocates what it
+// does logged straight to the logger (`make allocs` and `make repeat` run it under the race detector). Both log to a
+// handler allocating nothing itself: slog's own handlers take their buffers from a sync.Pool, and under the race
+// detector sync.Pool drops one Put in four at random, so their allocations vary from run to run.
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestGuestOutputGuardsDoNotAllocate(t *testing.T) {
+	if testing.CoverMode() != "" {
+		t.Skip("allocations are measured without coverage instrumentation, by make allocs")
+	}
+
+	line := []byte("a line of guest output\n")
+	failures := 0
+	allocs := func(logger *slog.Logger) float64 {
+		out := guestout.New(logger, "test/k")
+		stdout := out.Stdout()
+
+		return testing.AllocsPerRun(100, func() {
+			out.Begin()
+
+			_, err := stdout.Write(line)
+			if err != nil {
+				failures++
+			}
+		})
+	}
+
+	direct, guarded := &countingHandler{}, &countingHandler{}
+	unguardedAllocs := allocs(slog.New(direct))
+	guardedAllocs := allocs(reporting(slog.DiscardHandler).guardedLogger(slog.New(guarded), "test/k", LanguageGo))
+
+	assert.Zero(t, guardedAllocs-unguardedAllocs, "the guard's allocations per line")
+	assert.Equal(t, 101, direct.handled, "AllocsPerRun's warm-up run and its 100 measured ones")
+	assert.Equal(t, direct.handled, guarded.handled, "every line reached the handler behind the guard")
+	assert.Zero(t, failures)
+}
+
+// failingCloser is an instance whose Close fails, noting whether it closed under an ended context.
+type failingCloser struct {
+	ended bool
+}
+
+func (f *failingCloser) Close(ctx context.Context) error {
+	f.ended = ctx.Err() != nil
+
+	return errFake
+}
+
+func TestDiscardingAnUnstartedInstanceLogsItsCloseFailure(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecorder()
+	starting := &launcher{output: slog.New(rec), key: "test/k"}
+	inst := &failingCloser{}
+
+	starting.discardUnstarted(t.Context(), inst)
+	assert.True(t, inst.ended, "closed under an ended context, without the plugin's Close")
+
+	records := rec.drain()
+	require.Len(t, records, 1)
+	assert.Equal(t, slog.LevelWarn, records[0].Level)
+	assert.Equal(t, "plg: closing a discarded instance failed", records[0].Message)
+	assert.Equal(t, "test/k", attr(&records[0], "key").String())
+	assert.Equal(t, errFake.Error(), attr(&records[0], "error").String())
 }
 
 func TestPoolReportsPanicsClosingInstances(t *testing.T) {

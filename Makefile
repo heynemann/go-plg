@@ -96,11 +96,12 @@ lint:
 	golangci-lint run --build-tags integration ./...
 	GOOS=wasip1 GOARCH=wasm golangci-lint run ./guestsrc/...
 
-# Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
-# caps the parallel subtests (each holding wasm instances under the race detector): at GOMAXPROCS (32 here)
-# the root package's run outgrew this machine's free memory and was OOM-killed (PLAN.md, ticket 16).
+# Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 4
+# caps the parallel subtests (each holding wasm instances under the race detector): at GOMAXPROCS (32 here) the
+# root package's run outgrew this machine's free memory and was OOM-killed (PLAN.md, ticket 16), and so did it at
+# -parallel 8 once other workloads held about 17 GB of the machine's 30 (PLAN.md, adversarial fix 07).
 test:
-	go test -race -shuffle=on -tags integration -parallel 8 -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE) ./...
+	go test -race -shuffle=on -tags integration -parallel 4 -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 
 coverage:
 	scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)

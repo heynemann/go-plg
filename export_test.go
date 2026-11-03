@@ -80,6 +80,18 @@ func MemoryReserved(c *Container) uint64 {
 	return c.budget.reserved.Load()
 }
 
+// Instances returns how many plugin instances the container's runtimes hold open: instantiated and their
+// module not closed, whoever holds them (a pool, a start in progress, or nobody).
+func Instances(c *Container) int {
+	open := 0
+
+	for _, rt := range c.runtimes.All() {
+		open += rt.Instances()
+	}
+
+	return open
+}
+
 // InstanceMemory returns the linear memory of the live instances of the plugin with the given key, as last
 // sampled by its pool.
 func InstanceMemory(c *Container, key string) uint64 {
@@ -178,6 +190,12 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Contai
 // generated, so tests and benchmarks can hold both binders to the same behavior. Call it before Register.
 func UseGenericBinder(c *Container) {
 	c.genericBinder.Store(true)
+}
+
+// UnguardGuestOutput makes the instances c starts log their output straight to its logger, so that a panicking
+// handler escapes their start as it did before guest output was guarded. Call it before Register.
+func UnguardGuestOutput(c *Container) {
+	c.unguardedOutput.Store(true)
 }
 
 // FastAdapter returns the adapter plg gen generated for iface's registered contract, calling inv, or nil when

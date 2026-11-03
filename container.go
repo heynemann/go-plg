@@ -59,6 +59,9 @@ type Container struct {
 	// genericBinder makes bind ignore the adapters plg gen generated (Contract.Fast), so tests and benchmarks
 	// can hold the generic binder to the same suite.
 	genericBinder atomic.Bool
+	// unguardedOutput makes instances log their output straight to the logger, without the panic boundary, so
+	// that tests can prove a panic escaping an instance's start still closes the instance.
+	unguardedOutput atomic.Bool
 }
 
 // New returns an empty container.

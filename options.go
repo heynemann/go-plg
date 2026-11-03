@@ -31,7 +31,9 @@ type containerConfig struct {
 // defaultPanicHistory is how many PanicErrors [Container.RecentPanics] keeps by default.
 const defaultPanicHistory = 64
 
-// WithLogger sets the logger for loads, cache warnings and plugin failures. The default discards everything.
+// WithLogger sets the logger for loads, cache warnings, plugin failures and the plugins' own output (stdout at
+// Info, stderr at Warn). A panic in its handler is a [PanicError] in [PhaseCallback]; what was logging carries on.
+// The default discards everything.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *containerConfig) {
 		c.logger = logger

@@ -81,6 +81,19 @@ func (r *Runtime) Close(ctx context.Context) error {
 	return nil
 }
 
+// Instances returns how many of the runtime's instances are open: instantiated and their module not closed.
+func (r *Runtime) Instances() int {
+	open := 0
+
+	for name := range r.hosts.All() {
+		if mod := r.rt.Module(name); mod != nil && !mod.IsClosed() {
+			open++
+		}
+	}
+
+	return open
+}
+
 // Module is a compiled guest module.
 type Module struct {
 	rt   *Runtime

@@ -186,6 +186,48 @@ func (r *panicReporter) quietly(failed *PanicError, method string, fn func()) {
 	fn()
 }
 
+// guardedLogger returns logger with its handler behind the callback boundary, for records about the plugin key in
+// lang: a panic in the handler is reported as a PanicError in [PhaseCallback] (Method slog.Handler.Handle) and
+// the record is dropped. Instances log their output through it, inside the guest's steps: a complete line from the
+// host function serving the guest's write, whose panic wazero would make the guest's trap, and the partial line a
+// step leaves once it returned, before the pool owns a new instance.
+func (r *panicReporter) guardedLogger(logger *slog.Logger, key string, lang Language) *slog.Logger {
+	return slog.New(&guardedHandler{handler: logger.Handler(), panics: r, key: key, lang: lang})
+}
+
+// guardedHandler is a slog handler behind the callback boundary; see [panicReporter.guardedLogger].
+type guardedHandler struct {
+	handler slog.Handler
+	panics  *panicReporter
+	key     string
+	lang    Language
+}
+
+func (h *guardedHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	enabled := false
+
+	h.panics.callback(ctx, h.key, h.lang, logMethod, func() { enabled = h.handler.Enabled(ctx, level) })
+
+	return enabled
+}
+
+//nolint:gocritic // hugeParam: slog.Handler fixes the signature
+func (h *guardedHandler) Handle(ctx context.Context, rec slog.Record) error {
+	var err error
+
+	h.panics.callback(ctx, h.key, h.lang, logMethod, func() { err = h.handler.Handle(ctx, rec) })
+
+	return err //nolint:wrapcheck // the user's handler's own error, as slog returns it
+}
+
+func (h *guardedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &guardedHandler{handler: h.handler.WithAttrs(attrs), panics: h.panics, key: h.key, lang: h.lang}
+}
+
+func (h *guardedHandler) WithGroup(name string) slog.Handler {
+	return &guardedHandler{handler: h.handler.WithGroup(name), panics: h.panics, key: h.key, lang: h.lang}
+}
+
 // callbackFailure returns the PanicError of a panic, v, in the user's code named method serving the plugin key in
 // lang. Call it while the panic is being recovered, so that its Stack is where it happened.
 func callbackFailure(key string, lang Language, method string, v any) *PanicError {

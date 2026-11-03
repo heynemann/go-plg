@@ -77,8 +77,10 @@ var (
 
 // launcher starts the instances of one plugin version.
 type launcher struct {
-	mod     *engine.Module
-	logger  *slog.Logger
+	mod *engine.Module
+	// output logs the instances' output: the user's logger behind the callback boundary
+	// ([panicReporter.guardedLogger]), since its records are logged inside the guest's steps.
+	output  *slog.Logger
 	panics  *panicReporter
 	opts    engine.InstanceOptions
 	key     string
@@ -87,11 +89,12 @@ type launcher struct {
 }
 
 // start starts an instance, mounting the plugin's files, and runs the plugin's Create. A guest that panics,
-// traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate].
+// traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate]. Until start returns the
+// instance, it is start's to close: a failed Create closes it, and so does a panic on the way to the pool.
 //
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
 func (l *launcher) start(ctx context.Context) (instance, error) {
-	out := guestout.New(l.logger, l.key)
+	out := guestout.New(l.output, l.key)
 	opts := l.opts
 	opts.Stdout, opts.Stderr = out.Stdout(), out.Stderr()
 
@@ -104,23 +107,60 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 		return nil, fmt.Errorf("starting an instance: %w", err)
 	}
 
+	created := false
+
+	defer func() {
+		if !created { // a panic is unwinding start
+			l.discardUnstarted(ctx, inst)
+		}
+	}()
+
+	err = l.create(ctx, inst, out)
+	created = true
+
+	if err != nil {
+		return nil, errors.Join(err, inst.Close(context.WithoutCancel(ctx)))
+	}
+
+	return &guestInstance{Instance: inst, launcher: l, out: out}, nil
+}
+
+// create runs the plugin's Create in inst and ends out's step, returning why Create failed.
+func (l *launcher) create(ctx context.Context, inst *engine.Instance, out *guestout.Capture) error {
 	res, err := inst.Init(ctx, l.payload)
 	out.End(ctx)
 
 	switch {
 	case err != nil:
-		err = l.failed(ctx, PhaseCreate, err, out)
+		return l.failed(ctx, PhaseCreate, err, out)
 	case res.Status == wire.StatusOK:
-		return &guestInstance{Instance: inst, launcher: l, out: out}, nil
+		return nil
 	case res.Status == wire.StatusError:
-		err = fmt.Errorf("%w: %s", errCreate, res.Message)
+		return fmt.Errorf("%w: %s", errCreate, res.Message)
 	case res.Status == wire.StatusLoad:
-		err = fmt.Errorf("%w: %s", errGuestLoad, res.Message)
+		return fmt.Errorf("%w: %s", errGuestLoad, res.Message)
 	default:
-		err = l.failed(ctx, PhaseCreate, guestFailure(res), out)
+		return l.failed(ctx, PhaseCreate, guestFailure(res), out)
 	}
+}
 
-	return nil, errors.Join(err, inst.Close(context.WithoutCancel(ctx)))
+// closer is an instance as discardUnstarted closes it.
+type closer interface {
+	Close(ctx context.Context) error
+}
+
+// discardUnstarted closes an instance whose start a panic is unwinding, as the pool closes a discarded instance:
+// under an ended context, so without the plugin's Close, which whatever panicked may leave unable to end. The
+// panic's own report is the pool's; a failure closing is logged, as the pool logs it.
+func (l *launcher) discardUnstarted(ctx context.Context, inst closer) {
+	ended, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	cancel()
+
+	err := inst.Close(ended)
+	if err != nil {
+		l.output.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
+			slog.String("key", l.key), slog.String("error", err.Error()))
+	}
 }
 
 // failed reports a step (Create, Close) the guest failed, with what it wrote to stderr meanwhile.
