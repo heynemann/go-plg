@@ -106,7 +106,7 @@ func loadGoPlugin(t *testing.T, mod *engine.Module, plugin string) (*engine.Inst
 
 	var stderr bytes.Buffer
 
-	inst, err := mod.Instantiate(t.Context(), engine.InstanceOptions{
+	inst, err := mod.Instantiate(t.Context(), &engine.InstanceOptions{
 		Mounts: []engine.Mount{{GuestPath: goabi.GoPath, FS: overlay(t, plugin)}},
 		Stderr: &stderr,
 	})

@@ -5,11 +5,13 @@
 //   POST <url> <n>        one POST with an n-byte body
 //   REPEAT <n> <url>      n GETs in a row
 //   HOST <url> <host>     one GET with the Host header overridden
+//   FLOOD <n> <size> <url> n POSTs of one size-byte body, all started before awaiting any
 //   LOOP -                loops forever
 //   HOG -                 allocates until it runs out of memory
 //   HANG -                awaits a promise nothing settles
 //
-// and returns "<status code>|<X-Reply header>|<body>" of the last response.
+// and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
+// distinct sorted reasons of the failed requests, joined by ;>".
 async function get(url: string, host?: string): Promise<string> {
   const headers: Record<string, string> = { "X-Test": "fetcher" };
   if (host !== undefined) {
@@ -46,6 +48,23 @@ export function Create() {
             out = await get(args[2]);
           }
           return out;
+        }
+        case "FLOOD": {
+          const body = new Uint8Array(Number(args[2]));
+          const sent: Promise<Response>[] = [];
+          for (let i = 0; i < Number(args[1]); i++) {
+            sent.push(fetch(args[3], { method: "POST", body }));
+          }
+          let ok = 0;
+          const reasons = new Set<string>();
+          for (const got of await Promise.allSettled(sent)) {
+            if (got.status === "fulfilled") {
+              ok++;
+            } else {
+              reasons.add(String(got.reason.message));
+            }
+          }
+          return `${ok}|${[...reasons].sort().join(";")}`;
         }
         case "LOOP":
           for (;;) {

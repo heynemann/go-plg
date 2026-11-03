@@ -115,6 +115,10 @@ type InstanceOptions struct {
 	Stdout, Stderr io.Writer
 	// HTTP serves the instance's HTTP requests; nil refuses them all.
 	HTTP HTTPFunc
+	// HTTPRefuses reports whether HTTP refuses a call's n-th request of size bytes whatever it holds (HTTP
+	// disabled, a limit), without making it; nil means it refuses none so. During a multiplexed step, such a
+	// request is refused at once (by HTTP, as during a call), without being copied: see [Request].
+	HTTPRefuses func(n, size int) bool
 	// Host serves the instance's calls to its Host; nil means the plugin has no Host.
 	Host HostFunc
 	// Mounts are the instance's only file system access.
@@ -125,7 +129,7 @@ type InstanceOptions struct {
 // clocks, sleeps that end with the context of the call in progress (see [pollOneoff]), a cryptographic random
 // source, the given mounts, the argument list ["plugin"] and HTTP only through opts.HTTP; no environment and no
 // sockets.
-func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instance, error) {
+func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Instance, error) {
 	fsCfg := wazero.NewFSConfig()
 	for _, mnt := range opts.Mounts {
 		fsCfg = fsCfg.WithFSMount(mnt.FS, mnt.GuestPath)
@@ -133,7 +137,7 @@ func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instan
 
 	// The host imports find the instance's state by its module name, unique within the runtime.
 	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := &hostState{http: opts.HTTP, host: opts.Host}
+	state := &hostState{http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host}
 	m.rt.hosts.Store(name, state)
 
 	cfg := wazero.NewModuleConfig().

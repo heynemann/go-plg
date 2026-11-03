@@ -58,10 +58,10 @@ func newRuntime(t *testing.T, e *engine.Engine) *engine.Runtime {
 func instantiate(t *testing.T, g fakeGuest) (*engine.Instance, error) {
 	t.Helper()
 
-	return instantiateWith(t, g, engine.InstanceOptions{})
+	return instantiateWith(t, g, &engine.InstanceOptions{})
 }
 
-func instantiateWith(t *testing.T, g fakeGuest, opts engine.InstanceOptions) (*engine.Instance, error) {
+func instantiateWith(t *testing.T, g fakeGuest, opts *engine.InstanceOptions) (*engine.Instance, error) {
 	t.Helper()
 
 	rt := newRuntime(t, newEngine(t, engine.Options{CacheDir: t.TempDir()}))

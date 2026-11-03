@@ -245,7 +245,7 @@ func TestPollOneoffEndsWithTheCall(t *testing.T) {
 			t.Parallel()
 
 			ctx, end := tc.ctx(t)
-			opts := engine.InstanceOptions{
+			opts := &engine.InstanceOptions{
 				Host: func(_ context.Context, dst []byte, _ uint32, _ []byte) ([]byte, error) {
 					end()
 

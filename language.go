@@ -97,7 +97,7 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 
 	out.Begin()
 
-	inst, err := l.mod.Instantiate(ctx, opts)
+	inst, err := l.mod.Instantiate(ctx, &opts)
 	if err != nil {
 		out.End(ctx)
 

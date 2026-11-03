@@ -1,7 +1,9 @@
 package engine_test
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -65,7 +68,9 @@ func TestStepsReportFinishedCallsAndStartedRequests(t *testing.T) {
 		finished{call: 9, result: []byte{byte(wire.StatusOK), 42}},
 		finished{call: 3, result: statusMessage(wire.StatusError, "x")},
 	)
-	inst := mustInstantiate(t, stepGuest(result, startRequest()))
+	g := stepGuest(result, startRequest())
+	inst, err := instantiateWith(t, g, &engine.InstanceOptions{HTTP: refuseAll})
+	require.NoError(t, err)
 	require.True(t, inst.Multiplexes())
 
 	step, err := inst.Start(t.Context(), 9, 2, []byte("args"))
@@ -75,20 +80,99 @@ func TestStepsReportFinishedCallsAndStartedRequests(t *testing.T) {
 			{Call: 9, Result: engine.Result{Status: wire.StatusOK, Body: []byte{42}}},
 			{Call: 3, Result: engine.Result{Status: wire.StatusError, Message: "x"}},
 		},
-		Requests: []engine.Request{{Call: 9, ID: 1, Body: []byte("REQ1")}},
+		Requests: []engine.Request{{Call: 9, ID: 1, N: 1, Body: []byte("REQ1")}},
 	}, step)
 
 	step, err = inst.Start(t.Context(), 10, 0, nil)
 	require.NoError(t, err)
-	assert.Equal(t, []engine.Request{{Call: 9, ID: 2, Body: []byte("REQ1")}}, step.Requests,
-		"requests are numbered across steps")
+	assert.Equal(t, []engine.Request{{Call: 9, ID: 2, N: 2, Body: []byte("REQ1")}}, step.Requests,
+		"requests are numbered across steps, and counted per call")
+
+	previous := step.Requests
 
 	step, err = inst.Resume(t.Context(), 1, []byte("answer"))
 	require.NoError(t, err)
 	assert.Empty(t, step.Done)
 	assert.Empty(t, step.Requests, "a step reports only the requests it started")
+	assert.Equal(t, engine.Request{}, previous[0], "nor keeps those of the previous step")
 	assert.False(t, inst.Broken())
 	require.NoError(t, inst.Close(t.Context()))
+}
+
+// refuseAll is an HTTPFunc refusing every request with a message naming its size and number in its call.
+func refuseAll(_ context.Context, dst, req []byte, n int) []byte {
+	return httpabi.AppendFailure(dst, fmt.Sprintf("refused %d bytes, request %d", len(req), n))
+}
+
+func TestHTTPStartRefusesAtOnceWhatHTTPRefuses(t *testing.T) {
+	t.Parallel()
+
+	twice := slices.Concat(startRequest(), startRequest())
+	tests := []struct {
+		refuses func(n, size int) bool
+		http    engine.HTTPFunc
+		name    string
+		want    []engine.Request
+	}{
+		{
+			name: "HTTP disabled",
+			want: []engine.Request{
+				{Call: 9, ID: 1, N: 1, Answer: httpabi.AppendFailure(nil, engine.ErrHTTPDisabled.Error())},
+				{Call: 9, ID: 2, N: 2, Answer: httpabi.AppendFailure(nil, engine.ErrHTTPDisabled.Error())},
+			},
+		},
+		{
+			name: "past a count", http: refuseAll, refuses: func(n, _ int) bool { return n > 1 },
+			want: []engine.Request{
+				{Call: 9, ID: 1, N: 1, Body: []byte("REQ1")},
+				{Call: 9, ID: 2, N: 2, Answer: httpabi.AppendFailure(nil, "refused 4 bytes, request 2")},
+			},
+		},
+		{
+			name: "over a size", http: refuseAll, refuses: func(_, size int) bool { return size > 3 },
+			want: []engine.Request{
+				{Call: 9, ID: 1, N: 1, Answer: httpabi.AppendFailure(nil, "refused 4 bytes, request 1")},
+				{Call: 9, ID: 2, N: 2, Answer: httpabi.AppendFailure(nil, "refused 4 bytes, request 2")},
+			},
+		},
+		{
+			name: "nothing refused", http: refuseAll, refuses: func(int, int) bool { return false },
+			want: []engine.Request{
+				{Call: 9, ID: 1, N: 1, Body: []byte("REQ1")},
+				{Call: 9, ID: 2, N: 2, Body: []byte("REQ1")},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			inst, err := instantiateWith(t, stepGuest(stepResult(), twice),
+				&engine.InstanceOptions{HTTP: tc.http, HTTPRefuses: tc.refuses})
+			require.NoError(t, err)
+
+			step, err := inst.Start(t.Context(), 9, 0, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, step.Requests)
+		})
+	}
+}
+
+func TestHTTPStartOnlyForCallsInFlight(t *testing.T) {
+	t.Parallel()
+
+	inst := mustInstantiate(t, stepGuest(stepResult(), startRequest()))
+
+	_, err := inst.Start(t.Context(), 9, 0, nil)
+	require.NoError(t, err)
+
+	inst.EndCall(9)
+
+	_, err = inst.Start(t.Context(), 10, 0, nil) // its step starts a request of call 9, ended
+	require.ErrorIs(t, err, engine.ErrABI)
+	require.ErrorContains(t, err, "http_start for call 9, not in flight")
+	assert.True(t, inst.Broken())
 }
 
 func TestGuestsWithoutStepsDoNotMultiplex(t *testing.T) {

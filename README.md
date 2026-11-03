@@ -481,7 +481,9 @@ plg.Register[pricing.Rule](ctx, c, "pricing",
 
 Calls on one instance share it as concurrent requests share a Node.js process:
 
-- They never see each other's arguments or results, and each keeps its own `MaxRequestsPerCall`.
+- They never see each other's arguments or results, and each keeps its own `MaxRequestsPerCall`. A request the
+  policy refuses whatever it holds (HTTP disabled, over `MaxRequestBytes`, past `MaxRequestsPerCall`) is refused
+  at once with the same error as without `WithConcurrentCalls`, never copied into host memory.
 - They **do share the plugin's global state** (module-level variables in TypeScript, globals and upvalues in Lua,
   whatever `Create` built), which may change while a call waits, and the instance's memory limit.
 - Each call keeps its own `ctx`: one that ends while the call waits for a response fails alone with the

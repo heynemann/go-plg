@@ -63,7 +63,7 @@ func TestHTTPRoundTripReachesTheHandler(t *testing.T) {
 	// Two requests in one call: the first answer is never taken, the second is.
 	body := slices.Concat(i32Const(0), i32Const(4), call(importHTTP), drop(), exchangeAndReturn(3))
 
-	inst, err := instantiateWith(t, hostGuest(body), engine.InstanceOptions{HTTP: handler})
+	inst, err := instantiateWith(t, hostGuest(body), &engine.InstanceOptions{HTTP: handler})
 	require.NoError(t, err)
 
 	ctx := context.WithValue(t.Context(), ctxKey{}, "call ctx")
@@ -125,7 +125,7 @@ func TestHostImportViolationsBreakTheInstance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			inst, err := instantiateWith(t, hostGuest(tc.body), engine.InstanceOptions{HTTP: answer})
+			inst, err := instantiateWith(t, hostGuest(tc.body), &engine.InstanceOptions{HTTP: answer})
 			require.NoError(t, err)
 
 			_, err = inst.Call(t.Context(), 0, nil)
@@ -142,7 +142,7 @@ func TestPendingAnswersDoNotOutliveTheirCall(t *testing.T) {
 	g := hostGuest(slices.Concat(i32Const(answerAt), i32Const(3), call(importTake), packed(0, 1)))
 	g.bodies["plg_init"] = slices.Concat(i32Const(0), i32Const(4), call(importHTTP), drop(), packed(0, 1))
 
-	inst, err := instantiateWith(t, g, engine.InstanceOptions{HTTP: answer})
+	inst, err := instantiateWith(t, g, &engine.InstanceOptions{HTTP: answer})
 	require.NoError(t, err)
 
 	_, err = inst.Init(t.Context(), nil)
@@ -183,7 +183,7 @@ func TestHostCallReachesTheHostFunc(t *testing.T) {
 	// Push take_result's destination, call the host, take its answer and return it as the call's result.
 	body := slices.Concat(i32Const(answerAt), hostCall(), call(1), packed(answerAt, 3))
 
-	inst, err := instantiateWith(t, hostCallGuest(body), engine.InstanceOptions{Host: host})
+	inst, err := instantiateWith(t, hostCallGuest(body), &engine.InstanceOptions{Host: host})
 	require.NoError(t, err)
 
 	ctx := context.WithValue(t.Context(), ctxKey{}, "call ctx")
@@ -229,7 +229,7 @@ func TestHostCallViolationsBreakTheInstance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			inst, err := instantiateWith(t, hostCallGuest(tc.body), engine.InstanceOptions{Host: tc.host})
+			inst, err := instantiateWith(t, hostCallGuest(tc.body), &engine.InstanceOptions{Host: tc.host})
 			require.NoError(t, err)
 
 			_, err = inst.Call(t.Context(), 0, nil)

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -382,6 +383,76 @@ func TestGoPluginsServeOneCallPerInstance(t *testing.T) {
 
 	assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, "go/ref"))
 	assert.Equal(t, plg.PoolStats{Size: 1, Idle: 8}, plg.Stats(ctr, "lua/ref"))
+}
+
+// The FLOOD of TestMultiplexedRefusalsAreNotCopied: floodRequests POSTs of floodBytes each.
+const (
+	floodRequests = 512
+	floodBytes    = 512 << 10
+)
+
+// TestMultiplexedRefusalsAreNotCopied floods the host with large requests the policy refuses (HTTP disabled,
+// too large, past MaxRequestsPerCall), all started at once by TypeScript, one after the other by Lua: each is
+// refused with the error the blocking path gives, without ever being copied into host memory, so the host
+// allocates well under half the requests' total size (256 MiB; about 40 MiB) where it used to allocate more.
+//
+//nolint:paralleltest // it measures the host's allocations, so no other test may allocate meanwhile
+func TestMultiplexedRefusalsAreNotCopied(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, err := io.Copy(io.Discard, r.Body)
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(srv.Close)
+
+	tooLarge := openPolicy(hostOf(t, srv.URL))
+	tooLarge.MaxRequestBytes = 64 << 10
+	tooLarge.MaxRequestsPerCall = floodRequests
+
+	tests := []struct {
+		name string
+		want string // the FLOOD's result, up to a request size
+		opts []plg.RegisterOption
+	}{
+		{name: "disabled", want: "0|" + httpcap.ErrDisabled.Error()},
+		{name: "too large", want: "0|" + httpcap.ErrRequestTooLarge.Error(), opts: []plg.RegisterOption{
+			plg.WithHTTP(tooLarge),
+		}},
+		{
+			name: "too many",
+			want: fmt.Sprintf("%d|%s: limit %[1]d", httpcap.DefaultMaxRequestsPerCall, httpcap.ErrTooManyRequests),
+			opts: []plg.RegisterOption{plg.WithHTTP(openPolicy(hostOf(t, srv.URL)))},
+		},
+	}
+
+	for _, lang := range scriptLanguages() {
+		for _, tc := range tests {
+			t.Run(lang.name()+"/"+tc.name, func(t *testing.T) {
+				ctr := httpContainer(t, io.Discard)
+				flood := fmt.Sprintf("FLOOD %d %d %s", floodRequests, floodBytes, srv.URL)
+				plug := fetcherIn(t, lang, ctr, "flood",
+					append([]plg.RegisterOption{plg.WithPool(1, 1), plg.WithConcurrentCalls(2)}, tc.opts...)...)
+
+				var before, after runtime.MemStats
+
+				runtime.ReadMemStats(&before)
+
+				out, err := plug.Foo(t.Context(), flood)
+
+				runtime.ReadMemStats(&after)
+				require.NoError(t, err)
+				assert.True(t, strings.HasPrefix(out, tc.want), "%q starts with %q", out, tc.want)
+
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("%s: the host allocated %d bytes", out, allocated)
+				assert.Less(t, allocated, uint64(floodRequests*floodBytes/2),
+					"refused requests are never copied into host memory")
+
+				blocking, err := fetcherIn(t, lang, ctr, "blocking", tc.opts...).Foo(t.Context(), flood)
+				require.NoError(t, err)
+				assert.Equal(t, blocking, out, "the refusals of the blocking path")
+			})
+		}
+	}
 }
 
 // The I/O-bound workload of BenchmarkHTTPLatency: latencyCallers callers each make one plugin call at a time,

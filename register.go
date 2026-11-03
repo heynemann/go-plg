@@ -526,9 +526,10 @@ func (c *Container) newLauncher(reg *registration, key string, src *source, spec
 		panics:  c.panics,
 		payload: spec.payload,
 		opts: engine.InstanceOptions{
-			Mounts: spec.mounts,
-			HTTP:   c.httpHandler(reg, key, src.desc.Language, meters),
-			Host:   reg.host.handler(key, src.desc.Language, c.panics),
+			Mounts:      spec.mounts,
+			HTTP:        c.httpHandler(reg, key, src.desc.Language, meters),
+			HTTPRefuses: reg.http.Refuses,
+			Host:        reg.host.handler(key, src.desc.Language, c.panics),
 		},
 		key:  key,
 		lang: src.desc.Language,

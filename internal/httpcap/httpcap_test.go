@@ -277,6 +277,10 @@ func TestHandlerRefusals(t *testing.T) {
 			t.Parallel()
 
 			client, logs := newClient(t, policy)
+			assert.Equal(t,
+				errors.Is(tc.want, httpcap.ErrTooManyRequests) || errors.Is(tc.want, httpcap.ErrRequestTooLarge),
+				client.Refuses(tc.n, len(tc.req)), "Refuses tells the refusals of the limits in advance")
+			assert.False(t, client.Refuses(policy.MaxRequestsPerCall, policy.MaxRequestBytes), "the limits are allowed")
 
 			got := serve(t.Context(), t, client, tc.req, tc.n)
 			assert.True(t, strings.HasPrefix(got.refused, tc.want.Error()), "%q", got.refused)
@@ -301,6 +305,7 @@ func TestDisabledRefusesEverything(t *testing.T) {
 
 	client := httpcap.Disabled(slog.New(slog.NewJSONHandler(&logs, nil)))
 	client.Close()
+	assert.True(t, client.Refuses(1, 0))
 
 	got := serve(t.Context(), t, client, request("GET", srv.URL, nil, ""), 1)
 	assert.Equal(t, httpcap.ErrDisabled.Error(), got.refused)

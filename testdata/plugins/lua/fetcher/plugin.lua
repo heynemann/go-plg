@@ -5,11 +5,13 @@
 --   REPEAT <n> <url>      n GETs in a row
 --   HOST <url> <host>     one GET with the Host header overridden
 --   SORTGET <url>         one GET from inside table.sort's comparator, where the call cannot yield
+--   FLOOD <n> <size> <url> n POSTs of one size-byte body, one after the other
 --   LOOP -                loops forever
 --   HOG -                 allocates until it runs out of memory
 --   YIELD -               yields from the method itself
 --
--- and returns "<status code>|<X-Reply header>|<body>" of the last response.
+-- and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
+-- distinct sorted reasons of the failed requests, joined by ;>".
 local function get(url, hostname)
   local headers = { ["X-Test"] = "fetcher" }
   if hostname then
@@ -67,6 +69,20 @@ function Fetcher:Foo(cmd)
       return a < b
     end)
     return describe(resp, err)
+  elseif verb == "FLOOD" then
+    local body = string.rep("x", tonumber(args[3]))
+    local ok, seen, reasons = 0, {}, {}
+    for _ = 1, tonumber(args[2]) do
+      local resp, err = http.request { method = "POST", url = args[4], body = body }
+      if resp then
+        ok = ok + 1
+      elseif not seen[err] then
+        seen[err] = true
+        reasons[#reasons + 1] = err
+      end
+    end
+    table.sort(reasons)
+    return ok .. "|" .. table.concat(reasons, ";")
   elseif verb == "LOOP" then
     while true do
     end

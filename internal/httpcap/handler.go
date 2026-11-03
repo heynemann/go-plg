@@ -125,16 +125,9 @@ func outcome(err error) Outcome {
 
 // do checks and makes one request, appending the encoded response to dst.
 func (c *Client) do(ctx context.Context, xch *exchange, dst, raw []byte, n int) ([]byte, error) {
-	if !c.enabled {
-		return dst, ErrDisabled
-	}
-
-	if n > c.policy.MaxRequestsPerCall {
-		return dst, fmt.Errorf("%w: limit %d", ErrTooManyRequests, c.policy.MaxRequestsPerCall)
-	}
-
-	if len(raw) > c.policy.MaxRequestBytes {
-		return dst, fmt.Errorf("%w: %d bytes, limit %d", ErrRequestTooLarge, len(raw), c.policy.MaxRequestBytes)
+	err := c.refusal(n, len(raw))
+	if err != nil {
+		return dst, err
 	}
 
 	hreq, cancel, err := c.request(ctx, xch, raw)
@@ -161,6 +154,27 @@ func (c *Client) do(ctx context.Context, xch *exchange, dst, raw []byte, n int) 
 		return dst, failure(ctx, hreq.Context(), c.policy.Timeout, err)
 	default:
 		return out, nil
+	}
+}
+
+// Refuses reports whether the policy refuses a call's n-th request of size bytes whatever it holds: HTTP is not
+// enabled, the request is past MaxRequestsPerCall or over MaxRequestBytes. A handler refuses such a request
+// without making it, so a caller may refuse it at once through the handler, instead of keeping a copy for later.
+func (c *Client) Refuses(n, size int) bool {
+	return !c.enabled || n > c.policy.MaxRequestsPerCall || size > c.policy.MaxRequestBytes
+}
+
+// refusal returns the error refusing a call's n-th request of size bytes whatever it holds (see Refuses), or nil.
+func (c *Client) refusal(n, size int) error {
+	switch {
+	case !c.enabled:
+		return ErrDisabled
+	case n > c.policy.MaxRequestsPerCall:
+		return fmt.Errorf("%w: limit %d", ErrTooManyRequests, c.policy.MaxRequestsPerCall)
+	case size > c.policy.MaxRequestBytes:
+		return fmt.Errorf("%w: %d bytes, limit %d", ErrRequestTooLarge, size, c.policy.MaxRequestBytes)
+	default:
+		return nil
 	}
 }
 

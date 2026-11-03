@@ -31,6 +31,8 @@ type stepper interface {
 	Multiplexes() bool
 	Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error)
 	Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error)
+	// EndCall ends a call no longer in flight: its number may be started again.
+	EndCall(call uint32)
 }
 
 // muxError fails a call on a multiplexed instance without a guest failure of its own: another call broke the
@@ -47,7 +49,9 @@ func (e *muxError) Unwrap() error { return e.err }
 
 // muxInstance serves up to len(lanes) calls at once on one guest instance. While a call waits for an HTTP
 // request, the instance runs others: the guest starts the request with http_start, the host makes it on a
-// goroutine of its own and a later step delivers the answer.
+// goroutine of its own and a later step delivers the answer. A request the policy refuses whatever it holds
+// (HTTP disabled, a limit) is refused by http_start itself, never copied: its answer waits in refused for a
+// later step, with no goroutine.
 //
 // One goroutine, the owner (run), drives the instance: callers and request goroutines send it operations (ops),
 // which it runs one at a time, so the instance and every callState are only ever touched by it. Callers take a
@@ -62,13 +66,22 @@ type muxInstance struct {
 	discarded  chan struct{} // closed when the pool discards a lane of a healthy instance
 	stop       chan struct{} // closed by the Close of the last lane
 	exited     chan struct{} // closed when run returns
+	ready      chan struct{} // closed: what run selects on while refusals wait
 	flight     map[uint32]*callState
+	refused    []refusal      // owner-only: the refusals to deliver, oldest first
 	fetches    sync.WaitGroup // request goroutines
 	memory     atomic.Uint64  // the instance's linear memory after its last step
 	live       atomic.Int32   // lanes not closed
 	broken     atomic.Bool
 	discarding atomic.Bool
 	last       uint32 // the number of the last call started
+}
+
+// refusal is a request http_start refused at once, waiting for the owner to deliver its answer.
+type refusal struct {
+	state  *callState
+	answer []byte
+	id     uint32
 }
 
 // callState is one call in flight on a multiplexed instance, owned by its owner goroutine.
@@ -79,7 +92,6 @@ type callState struct {
 	ctx      context.Context //nolint:containedctx // the context of one call in flight, see above
 	cancel   context.CancelFunc
 	mailbox  *muxCall // the waiting caller; nil once answered
-	requests int      // HTTP requests started
 	pending  int      // HTTP requests not answered yet
 	id       uint32
 	finished bool // the guest ended the call
@@ -113,7 +125,9 @@ func newMux(p *pool, inst stepper, lanes int) []*muxLane {
 		stop:      make(chan struct{}),
 		exited:    make(chan struct{}),
 		flight:    make(map[uint32]*callState),
+		ready:     make(chan struct{}),
 	}
+	close(mux.ready)
 	mux.memory.Store(inst.Memory())
 	mux.live.Store(int32(lanes)) //nolint:gosec // G115: lanes are validated to at most maxConcurrentCalls
 
@@ -127,16 +141,25 @@ func newMux(p *pool, inst stepper, lanes int) []*muxLane {
 	return out
 }
 
-// run is the owner goroutine: it runs operations until the last lane is closed.
+// run is the owner goroutine: it runs operations, and delivers the refusals waiting one at a time among them,
+// until the last lane is closed.
 func (m *muxInstance) run() {
 	defer close(m.exited)
 
 	discarded := m.discarded
 
 	for {
+		var refusals chan struct{}
+
+		if len(m.refused) > 0 {
+			refusals = m.ready
+		}
+
 		select {
 		case operation := <-m.ops:
 			m.do(operation)
+		case <-refusals:
+			m.do(m.deliver)
 		case <-discarded:
 			discarded = nil
 
@@ -151,6 +174,15 @@ func (m *muxInstance) run() {
 			return
 		}
 	}
+}
+
+// deliver delivers the oldest refusal waiting.
+func (m *muxInstance) deliver() {
+	next := m.refused[0]
+	m.refused[0] = refusal{}
+	m.refused = m.refused[1:]
+
+	m.resume(next.state, next.id, next.answer)
 }
 
 // do runs an operation behind a panic boundary: a host panic breaks the instance, failing its calls.
@@ -256,16 +288,8 @@ func (m *muxInstance) after(culprit *callState, step *engine.Step, err error) {
 		return
 	}
 
-	for _, req := range step.Requests {
-		state := m.flight[req.Call]
-		if state == nil {
-			m.fail(culprit, engine.Result{},
-				fmt.Errorf("%w: a request of call %d, not in flight", engine.ErrABI, req.Call))
-
-			return
-		}
-
-		m.launch(state, req)
+	if !m.take(culprit, step.Requests) {
+		return
 	}
 
 	for _, done := range step.Done {
@@ -289,19 +313,46 @@ func (m *muxInstance) after(culprit *callState, step *engine.Step, err error) {
 	m.memory.Store(m.inst.Memory())
 }
 
+// take takes the requests a step started for culprit: it launches those to make and queues the refusals. Then it
+// clears requests: the request goroutines own the bodies, so the instance keeps none until its next step. A
+// request of a call not in flight breaks the instance, as after does; take then reports false.
+func (m *muxInstance) take(culprit *callState, requests []engine.Request) bool {
+	defer clear(requests)
+
+	for _, req := range requests {
+		state := m.flight[req.Call]
+		if state == nil {
+			m.fail(culprit, engine.Result{},
+				fmt.Errorf("%w: a request of call %d, not in flight", engine.ErrABI, req.Call))
+
+			return false
+		}
+
+		state.pending++
+
+		if req.Answer != nil {
+			m.refused = append(m.refused, refusal{state: state, answer: req.Answer, id: req.ID})
+
+			continue
+		}
+
+		m.launch(state, req)
+	}
+
+	return true
+}
+
 // launch makes a request a step started on a goroutine of its own, under its call's context; the answer comes
 // back to the owner as a resume operation.
 func (m *muxInstance) launch(state *callState, req engine.Request) {
-	state.requests++
-	state.pending++
-
-	ctx, n := state.ctx, state.requests
+	ctx, id, body, n := state.ctx, req.ID, req.Body, req.N
 
 	m.fetches.Go(func() {
-		answer := m.roundTrip(ctx, req.Body, n)
+		answer := m.roundTrip(ctx, body, n)
+		body = nil // the request is made: while its answer waits for the owner, its body need not
 
 		select {
-		case m.ops <- func() { m.resume(state, req.ID, answer) }: //nolint:contextcheck // runs under its call's context
+		case m.ops <- func() { m.resume(state, id, answer) }: //nolint:contextcheck // runs under its call's context
 		case <-m.stop:
 		}
 	})
@@ -332,8 +383,8 @@ func (m *muxInstance) finish(state *callState, res engine.Result) {
 	m.forget(state)
 }
 
-// forget drops a call the guest ended once none of its requests is in flight; until then its context stays
-// alive for them (they end with it).
+// forget drops a call the guest ended once none of its requests is in flight (or waits refused); until then its
+// context stays alive for them (they end with it).
 func (m *muxInstance) forget(state *callState) {
 	if !state.finished {
 		return
@@ -341,14 +392,15 @@ func (m *muxInstance) forget(state *callState) {
 
 	state.cancel()
 
-	if state.pending == 0 {
+	if state.pending == 0 && m.flight[state.id] == state {
 		delete(m.flight, state.id)
+		m.inst.EndCall(state.id)
 	}
 }
 
 // fail breaks the instance: culprit, the call whose step failed (nil when no call is to blame), gets res and
-// err, and every other call in flight [ErrInstanceLost]. Their requests end. A culprit nobody waits for any more
-// (abandoned at its deadline) is reported here, since no caller will.
+// err, and every other call in flight [ErrInstanceLost]. Their requests end; the refusals waiting are dropped. A
+// culprit nobody waits for any more (abandoned at its deadline) is reported here, since no caller will.
 func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	m.broken.Store(true)
 
@@ -387,6 +439,8 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	}
 
 	clear(m.flight)
+
+	m.refused = nil
 }
 
 // answer answers the call and signals its caller.

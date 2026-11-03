@@ -2168,7 +2168,8 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 // guestStep and waits for its reply.
 type scriptedGuest struct {
 	steps  chan *guestStep
-	output string // what Guest returns
+	ended  chan uint32 // the calls the owner ended, while there is room
+	output string      // what Guest returns
 	closed atomic.Int32
 }
 
@@ -2193,7 +2194,7 @@ type stepReply struct {
 const scriptedMemory = 3 * engine.PageSize
 
 func newScriptedGuest() *scriptedGuest {
-	return &scriptedGuest{steps: make(chan *guestStep)}
+	return &scriptedGuest{steps: make(chan *guestStep), ended: make(chan uint32, 16)}
 }
 
 func (g *scriptedGuest) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
@@ -2222,6 +2223,13 @@ func (g *scriptedGuest) Guest() string { return g.output }
 
 func (*scriptedGuest) Memory() uint64 { return scriptedMemory }
 
+func (g *scriptedGuest) EndCall(call uint32) {
+	select {
+	case g.ended <- call:
+	default:
+	}
+}
+
 func (g *scriptedGuest) play(ctx context.Context, s *guestStep) (engine.Step, error) {
 	s.done, s.reply = ctx.Done(), make(chan stepReply, 1)
 	s.deadline, _ = ctx.Deadline()
@@ -2241,9 +2249,9 @@ func (g *scriptedGuest) next() *guestStep {
 	return <-g.steps
 }
 
-// wait ends a Start by making the call wait for a request numbered id.
+// wait ends a Start by making the call wait for its first request, numbered id.
 func (s *guestStep) wait(id uint32) {
-	s.reply <- stepReply{step: engine.Step{Requests: []engine.Request{{Call: s.call, ID: id, Body: s.args}}}}
+	s.reply <- stepReply{step: engine.Step{Requests: []engine.Request{{Call: s.call, ID: id, N: 1, Body: s.args}}}}
 }
 
 // finish ends a step by finishing call with an OK result of body.
@@ -2687,6 +2695,45 @@ func TestMuxWithoutHTTPRefusesRequests(t *testing.T) {
 	assert.Equal(t, httpabi.AppendFailure(nil, engine.ErrHTTPDisabled.Error()), s.args)
 	s.finish(1, "refused")
 	require.NoError(t, (<-result).err)
+	instances.release(t.Context(), held[0])
+}
+
+// TestMuxDeliversRefusalsWithoutMakingThem: a request http_start refused at once (with its answer) is never
+// made, by no goroutine: its answer reaches the guest in a later step, the call ends once it has, and the
+// owner keeps none of the step's requests.
+func TestMuxDeliversRefusalsWithoutMakingThem(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	instances := muxPool(t, guest, 2, web.serve, nil)
+	held := acquireN(t, instances, 1)
+
+	result := callLane(t.Context(), held[0], "fetch")
+
+	start := guest.next()
+	requests := []engine.Request{
+		{Call: start.call, ID: 1, N: 1, Answer: []byte("refused 1")},
+		{Call: start.call, ID: 2, N: 2, Answer: []byte("refused 2")},
+	}
+
+	start.reply <- stepReply{step: engine.Step{Requests: requests}}
+
+	first := guest.next()
+
+	assert.Equal(t, engine.Request{}, requests[0], "the owner keeps no request once it took them")
+	assert.Equal(t, []any{uint32(1), "refused 1"}, []any{first.request, string(first.args)}, "oldest first")
+
+	first.reply <- stepReply{}
+
+	second := guest.next()
+	assert.Equal(t, []any{uint32(2), "refused 2"}, []any{second.request, string(second.args)})
+	second.finish(start.call, "done")
+
+	got := <-result
+	require.NoError(t, got.err)
+	assert.Equal(t, "done", string(got.res.Body))
+	assert.Equal(t, start.call, <-guest.ended, "the call ends with its requests answered")
+	assert.Empty(t, web.requests, "no refused request is made")
 	instances.release(t.Context(), held[0])
 }
 

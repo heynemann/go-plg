@@ -51,13 +51,15 @@ type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) 
 // it: a guest calls its imports synchronously.
 type hostState struct {
 	http        HTTPFunc
+	refuses     func(n, size int) bool // see InstanceOptions.HTTPRefuses
 	host        HostFunc
-	pending     []byte    // the result take_result hands over
-	started     []Request // the requests http_start took during the current step
-	requests    int       // http_roundtrip calls in the current plg_init, plg_call or step
-	lastRequest uint32    // the number of the last request http_start took
-	ready       bool      // pending holds a result not taken yet
-	stepping    bool      // a multiplexed step is running: http_start is allowed
+	calls       map[uint32]int // the multiplexed calls in flight: the requests each started with http_start
+	pending     []byte         // the result take_result hands over
+	started     []Request      // the requests http_start took during the current step
+	requests    int            // http_roundtrip calls in the current plg_init, plg_call or step
+	lastRequest uint32         // the number of the last request http_start took
+	ready       bool           // pending holds a result not taken yet
+	stepping    bool           // a multiplexed step is running: http_start is allowed
 }
 
 // begin resets the per-call state before a plg_init or plg_call.

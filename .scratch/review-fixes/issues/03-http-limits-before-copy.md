@@ -6,12 +6,12 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test (TS plugin issuing many large fetches under `WithConcurrentCalls`) showing bounded host heap reproduces the bug (fails on the current code) and passes with the fix
-- [ ] Oversized, over-count and HTTP-disabled requests are refused with the same errors as the blocking path, without a body copy or goroutine (assert via allocation/goroutine counts or test hooks)
-- [ ] Lua's non-blocking `http.request` path gets the same limits
-- [ ] Old request bodies are not retained after a step
-- [ ] Blocking-mode HTTP behaviour unchanged (existing HTTP tests pass)
-- [ ] PLAN.md decision log updated
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test (TS plugin issuing many large fetches under `WithConcurrentCalls`) showing bounded host heap reproduces the bug (fails on the current code) and passes with the fix
+- [x] Oversized, over-count and HTTP-disabled requests are refused with the same errors as the blocking path, without a body copy or goroutine (assert via allocation/goroutine counts or test hooks)
+- [x] Lua's non-blocking `http.request` path gets the same limits
+- [x] Old request bodies are not retained after a step
+- [x] Blocking-mode HTTP behaviour unchanged (existing HTTP tests pass)
+- [x] PLAN.md decision log updated
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
