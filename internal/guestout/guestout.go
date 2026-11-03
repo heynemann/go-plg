@@ -17,6 +17,8 @@ const (
 	// MaxLine is the longest line logged in one record; longer lines are logged in pieces.
 	MaxLine = 4 << 10
 	// StepBudget is how many bytes of each stream are logged per step; the rest is dropped, with one notice.
+	// Every record costs its line's length plus one (its newline, or its cut), so a step also logs at most
+	// StepBudget records per stream, however many empty lines the guest writes.
 	StepBudget = 64 << 10
 	// TailSize is how many of the last bytes of stderr [Capture.Guest] can return.
 	TailSize = 32 << 10
@@ -171,7 +173,7 @@ func (s *stream) emit(ctx context.Context) {
 		return
 	}
 
-	s.logged += len(line)
+	s.logged += len(line) + 1
 	s.capture.logger.LogAttrs(ctx, s.level, "plg: guest output",
 		slog.String("key", s.capture.key), slog.String("stream", s.name), slog.String("line", string(line)))
 }

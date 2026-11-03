@@ -142,8 +142,8 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	line := strings.Repeat("x", 1023) + "\n"
-	perStep := guestout.StepBudget / 1023
+	line := strings.Repeat("x", 1000) + "\n"
+	perStep := guestout.StepBudget / len(line)
 
 	capture.Begin()
 
@@ -175,6 +175,20 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	capture.Begin()
 	write(t, capture.Stderr(), "next step\n")
 	assert.Equal(t, "next step", logs.texts("stderr")[perStep+1], "Begin renews the budget")
+}
+
+func TestEmptyLinesCountAgainstTheBudget(t *testing.T) {
+	t.Parallel()
+
+	capture, logs := newCapture()
+	capture.Begin()
+
+	write(t, capture.Stdout(), strings.Repeat("\n", 4_000_000))
+	capture.End(t.Context())
+
+	assert.Len(t, logs.texts("stdout"), guestout.StepBudget, "each record costs its newline")
+	assert.Len(t, logs.records, guestout.StepBudget+1, "the records, then one truncation notice")
+	assert.Equal(t, "plg: guest output truncated", logs.records[len(logs.records)-1].msg)
 }
 
 func TestGuestReturnsTheStepsStderr(t *testing.T) {

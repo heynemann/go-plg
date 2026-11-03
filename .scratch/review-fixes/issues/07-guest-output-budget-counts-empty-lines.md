@@ -6,9 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test emitting millions of empty lines reproduces the bug (fails on the current code) and passes with the fix
-- [ ] The number of log records per step is bounded by the documented budget, and the truncation is reported once like other budget overruns
-- [ ] Normal output logging unchanged (existing guestout tests pass)
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test emitting millions of empty lines reproduces the bug (fails on the current code) and passes with the fix
+- [x] The number of log records per step is bounded by the documented budget, and the truncation is reported once like other budget overruns
+- [x] Normal output logging unchanged (existing guestout tests pass)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
