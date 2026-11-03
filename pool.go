@@ -63,7 +63,9 @@ type poolConfig struct {
 // idle it starts one while the pool is under maxSize and the budget allows, and otherwise waits on its context.
 // A background refiller keeps at least minSize instances alive (more while callers wait and the pool is under
 // maxSize), retrying a failing Create with exponential backoff. Broken instances are closed, never reused. A
-// panic while starting or closing an instance, or in the refiller, is recovered and reported.
+// panic while starting or closing an instance, or in the refiller, is recovered and reported; so is a panic in
+// the logger's handler or the meter provider's instruments, which the pool measures and logs through after its
+// own state is settled.
 //
 // An instance that multiplexes (lanes > 1, a script guest) serves up to lanes calls at once: it is handed out as
 // that many slots, its lanes, which move through the pool like instances. Closing a lane closes the instance only
@@ -98,6 +100,7 @@ type pool struct {
 	lanes        int32
 	size         atomic.Int32
 	busy         atomic.Int32 // slots handed out to callers: calls in flight
+	inUse        atomic.Int32 // instances with a slot handed out: serving at least one call
 	waiting      atomic.Int32 // callers blocked on the idle channel
 	closed       atomic.Bool
 	abandoned    atomic.Bool // close gave up waiting: slots given back are closed at once
@@ -220,7 +223,7 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 
 	defer p.waiting.Add(-1)
 
-	p.meters.inst.waits.Add(ctx, 1, p.meters.key...)
+	p.count(ctx, p.meters.inst.waits, p.meters.key)
 
 	select {
 	case held := <-p.idle:
@@ -243,7 +246,7 @@ func (p *pool) open(ctx context.Context, held *slot) (*slot, error) {
 		return nil, ErrClosed
 	}
 
-	p.busy.Add(1)
+	p.engage(held)
 
 	return held, nil
 }
@@ -257,7 +260,7 @@ func (p *pool) release(ctx context.Context, held *slot) {
 		held.mem = mem
 	}
 
-	p.busy.Add(-1)
+	p.disengage(held)
 
 	p.idle <- held
 
@@ -269,7 +272,7 @@ func (p *pool) release(ctx context.Context, held *slot) {
 // instance closes under an ended context, so without the plugin's Close: whatever broke it (a trap, running out
 // of memory, a result the host could not decode) may leave Close unable to end.
 func (p *pool) discard(ctx context.Context, held *slot) {
-	p.busy.Add(-1)
+	p.disengage(held)
 
 	if lane, ok := held.inst.(*muxLane); ok && !lane.Broken() {
 		lane.discard()
@@ -280,8 +283,10 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 
 	err := p.closeInstance(ended, held)
 	if err != nil {
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
-			slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+		p.guard(ctx, logMethod, func() {
+			p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
+				slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+		})
 	}
 }
 
@@ -319,8 +324,10 @@ func (p *pool) closeIdle(ctx context.Context) {
 		case held := <-p.idle:
 			err := p.closeInstance(ctx, held)
 			if err != nil {
-				p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
-					slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+				p.guard(ctx, logMethod, func() {
+					p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
+						slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+				})
 			}
 		default:
 			return
@@ -338,6 +345,30 @@ func (p *pool) closeAbandoned(ctx context.Context) {
 	ended, cancel := context.WithCancel(ctx)
 	cancel()
 	p.closeIdle(ended)
+}
+
+// engage counts held as handed out to a caller, and its instance as in use unless another of its lanes is.
+func (p *pool) engage(held *slot) {
+	p.busy.Add(1)
+
+	if lane, ok := held.inst.(*muxLane); !ok || lane.m.busy.Add(1) == 1 {
+		p.inUse.Add(1)
+	}
+}
+
+// disengage counts held as given back, and its instance as no longer in use unless another of its lanes is.
+func (p *pool) disengage(held *slot) {
+	p.busy.Add(-1)
+
+	if lane, ok := held.inst.(*muxLane); !ok || lane.m.busy.Add(-1) == 0 {
+		p.inUse.Add(-1)
+	}
+}
+
+// guard runs fn, the user's code (named method) the pool calls: the logger's handler or the meter provider's
+// instruments. A panic in it is reported as a [PanicError] in [PhaseCallback].
+func (p *pool) guard(ctx context.Context, method string, fn func()) {
+	p.panics.callback(ctx, p.key, p.lang, method, fn)
 }
 
 // reserve takes a place for a new instance: [errPoolFull] at the pool's maximum, [errBudgetFull] when the
@@ -491,11 +522,14 @@ func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
 	case ctx.Err() != nil:
 		return false
 	default:
-		p.meters.inst.refills.Add(ctx, 1, p.meters.refillFailed...)
+		p.count(ctx, p.meters.inst.refills, p.meters.refillFailed)
 
 		*delay = backoff(*delay)
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
-			slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
+
+		p.guard(ctx, logMethod, func() {
+			p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
+				slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
+		})
 
 		return sleep(ctx, *delay)
 	}
@@ -524,9 +558,10 @@ func (p *pool) refillOne(ctx context.Context) error {
 	}
 
 	p.refills.Add(1)
-	p.meters.inst.refills.Add(ctx, 1, p.meters.refillOK...)
 
 	p.idle <- held // if the pool closed meanwhile, close collects it
+
+	p.count(ctx, p.meters.inst.refills, p.meters.refillOK) // once idle: a panicking instrument cannot keep it
 
 	return nil
 }

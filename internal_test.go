@@ -1124,17 +1124,16 @@ func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0]) // the failure's Warn log panics
 
 		first, second := <-spawner.attempts, <-spawner.attempts
-		assert.GreaterOrEqual(t, second.Sub(first), refillBackoffMin, "the panic counted as a failure")
+		assert.Equal(t, refillBackoffMin, second.Sub(first), "the failure backed off, once")
 
 		synctest.Wait()
 		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the refiller went on")
 
 		recent := reporter.history.recent()
-		require.Len(t, recent, 2, "the refiller's panic, then the logger's own when it was reported")
-		requirePanicError(t, recent[0], PhaseRefill)
+		require.Len(t, recent, 1, "the logger's panic, contained")
+		requirePanicError(t, recent[0], PhaseCallback)
+		assert.Equal(t, "slog.Handler.Handle", recent[0].Method)
 		assert.Equal(t, "log handler bug", recent[0].Value)
-		requirePanicError(t, recent[1], PhaseCallback)
-		assert.Equal(t, "slog.Handler.Handle", recent[1].Method)
 
 		require.NoError(t, instances.close(t.Context()))
 	})
@@ -1169,6 +1168,194 @@ func TestPoolReportsPanicsClosingInstances(t *testing.T) {
 		err := instances.close(t.Context())
 		requirePanicError(t, err, PhaseClose)
 		assert.Zero(t, instances.stats().Size, "every place given back")
+	})
+}
+
+// panickingProvider is a meter provider whose counters and histograms panic on every measurement.
+type panickingProvider struct {
+	noop.MeterProvider
+}
+
+//nolint:ireturn // the provider returns the API's Meter interface
+func (panickingProvider) Meter(string, ...metric.MeterOption) metric.Meter { return panickingMeter{} }
+
+type panickingMeter struct {
+	noop.Meter
+}
+
+//nolint:ireturn // the meter returns the API's instrument interface
+func (panickingMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	return panickingCounter{}, nil
+}
+
+//nolint:ireturn // the meter returns the API's instrument interface
+func (panickingMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return panickingHistogram{}, nil
+}
+
+type panickingCounter struct {
+	noop.Int64Counter
+}
+
+func (panickingCounter) Add(context.Context, int64, ...metric.AddOption) { panic("meter bug") }
+
+type panickingHistogram struct {
+	noop.Float64Histogram
+}
+
+func (panickingHistogram) Record(context.Context, float64, ...metric.RecordOption) {
+	panic("meter bug")
+}
+
+// panickingInstruments returns instruments of a panickingProvider.
+func panickingInstruments(t *testing.T) *instruments {
+	t.Helper()
+
+	inst, err := newInstruments(panickingProvider{})
+	require.NoError(t, err)
+
+	return inst
+}
+
+// requireMeterPanic checks that failure is a panicking meter provider's, contained in PhaseCallback.
+func requireMeterPanic(t *testing.T, failure *PanicError) {
+	t.Helper()
+
+	requirePanicError(t, failure, PhaseCallback)
+	assert.Equal(t, "metric.MeterProvider", failure.Method)
+	assert.Equal(t, "meter bug", failure.Value)
+}
+
+func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		reporter := reporting(slog.DiscardHandler)
+		budget := &memoryBudget{}
+		meters := newPluginMeters(panickingInstruments(t), "test/k", LanguageGo, reflect.TypeFor[testIface]())
+		instances := startPool(t, &fakeSpawner{}, &poolConfig{
+			panics: reporter, budget: budget, meters: meters, minSize: 1, maxSize: 1,
+		})
+
+		instances.discard(t.Context(), acquireN(t, instances, 1)[0]) // the refiller's count of it panics
+		synctest.Wait()
+
+		require.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the instance is idle")
+		assert.Equal(t, uint64(testLimit), budget.used.Load(), "one instance charged")
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 1)
+		requireMeterPanic(t, recent[0])
+
+		require.NoError(t, instances.close(t.Context()))
+		assert.Equal(t, PoolStats{Refills: 1}, instances.stats(), "every place given back")
+		assert.Zero(t, budget.used.Load())
+	})
+}
+
+func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		inst := panickingInstruments(t)
+		reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16, inst) // so does counting panics
+		budget := &memoryBudget{}
+		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
+		instances := startPool(t, spawner, &poolConfig{
+			panics: reporter, budget: budget, minSize: 1, maxSize: 1,
+			meters: newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]()),
+		})
+		<-spawner.attempts // warm's
+
+		held := acquireN(t, instances, 1)[0]
+		waiting, cancel := context.WithTimeout(t.Context(), time.Second)
+
+		defer cancel()
+
+		assert.NotPanics(t, func() {
+			_, err := instances.acquire(waiting) // the pool is full: counting the wait panics
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+		})
+
+		instances.discard(t.Context(), held) // counting the refill panics
+		<-spawner.attempts
+		synctest.Wait()
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
+
+		spawner.panics.Store(1) // the refill panics: counting that panic, then the failure, panic too
+		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
+
+		failed, retried := <-spawner.attempts, <-spawner.attempts
+		assert.Equal(t, refillBackoffMin, retried.Sub(failed), "the refiller backed off once")
+		synctest.Wait()
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 2}, instances.stats())
+		assert.Equal(t, uint64(testLimit), budget.used.Load(), "one instance charged")
+
+		assert.NotPanics(t, func() { instances.called(t.Context(), 0, time.Millisecond, nil) })
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 7)
+		requireMeterPanic(t, recent[0]) // the wait
+		requireMeterPanic(t, recent[1]) // the first refill
+		requirePanicError(t, recent[2], PhaseRefill)
+		assert.Equal(t, "spawn bug", recent[2].Value)
+
+		for _, failure := range recent[3:] { // counting the spawn panic, the failed refill, the retry, the call
+			requireMeterPanic(t, failure)
+		}
+
+		require.NoError(t, instances.close(t.Context()))
+		assert.Equal(t, PoolStats{Refills: 2}, instances.stats(), "every place given back")
+		assert.Zero(t, budget.used.Load())
+	})
+}
+
+func TestAPanickingMeterProviderNeverFailsAnHTTPRequest(t *testing.T) {
+	t.Parallel()
+
+	inst := panickingInstruments(t)
+	reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 4, inst)
+	meters := newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]())
+	done := (&Container{panics: reporter}).httpDone("test/k", LanguageGo, meters)
+
+	assert.NotPanics(t, func() { done(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200}) })
+
+	recent := reporter.history.recent()
+	require.Len(t, recent, 1, "counting the request panicked; that failure is not counted again")
+	requireMeterPanic(t, recent[0])
+}
+
+func TestPoolContainsAPanickingLogger(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		reporter := reporting(panickingHandler{})
+		budget := &memoryBudget{}
+		spawner := &fakeSpawner{closeErr: errFake} // every close fails, and is logged
+		instances := startPool(t, spawner, &poolConfig{panics: reporter, budget: budget, minSize: 1, maxSize: 1})
+
+		assert.NotPanics(t, func() { instances.discard(t.Context(), acquireN(t, instances, 1)[0]) })
+		synctest.Wait()
+		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the place was given back")
+		assert.Equal(t, uint64(testLimit), budget.used.Load())
+
+		held := acquireN(t, instances, 1)[0]
+		ended, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, instances.close(ended), context.Canceled, "close gave up waiting for the held instance")
+
+		assert.NotPanics(t, func() { instances.release(t.Context(), held) }, "given back, it closes at once")
+		assert.Equal(t, PoolStats{Refills: 1}, instances.stats())
+		assert.Zero(t, budget.used.Load())
+
+		recent := reporter.history.recent()
+		require.Len(t, recent, 2, "the discarded instance's warning, then the abandoned one's")
+
+		for _, failure := range recent {
+			requirePanicError(t, failure, PhaseCallback)
+			assert.Equal(t, "slog.Handler.Handle", failure.Method)
+			assert.Equal(t, "log handler bug", failure.Value)
+		}
 	})
 }
 
@@ -1974,7 +2161,7 @@ func observing(t *testing.T, provider *sdkmetric.MeterProvider, inst *instrument
 		instances.observe(obs)
 
 		return nil
-	}, inst.instances, inst.inUse, inst.memory)
+	}, inst.instances, inst.inUse, inst.inFlight, inst.memory)
 	require.NoError(t, err)
 
 	t.Cleanup(func() { assert.NoError(t, reg.Unregister()) })
@@ -1994,10 +2181,12 @@ func TestPoolMeasurements(t *testing.T) {
 
 		gauges := func() map[string]int64 {
 			got := collect(t, reader)
+			inUse := got.sums["plg.pool.instances.in_use"]["key=test/k"]
+			assert.Equal(t, inUse, got.sums["plg.pool.calls.in_flight"]["key=test/k"], "one call per instance in use")
 
 			return map[string]int64{
 				"instances": got.sums["plg.pool.instances"]["key=test/k"],
-				"in_use":    got.sums["plg.pool.instances.in_use"]["key=test/k"],
+				"in_use":    inUse,
 				"memory":    got.sums["plg.plugin.memory"]["key=test/k"],
 			}
 		}
@@ -2044,6 +2233,50 @@ func TestPoolMeasurements(t *testing.T) {
 		require.NoError(t, instances.close(t.Context()))
 		assert.Equal(t, map[string]int64{"instances": 0, "in_use": 0, "memory": 0}, gauges())
 	})
+}
+
+func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
+	inst, reader, provider := sdkInstruments(t)
+	guest := newScriptedGuest()
+	cfg := &poolConfig{
+		spawn: func(context.Context) (instance, error) { return guest, nil }, panics: reporting(slog.DiscardHandler),
+		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1, lanes: 3,
+		meters: newPluginMeters(inst, "test/k", LanguageLua, reflect.TypeFor[testIface]()),
+	}
+	instances := newPool(cfg)
+	require.NoError(t, instances.warm(t.Context()))
+	t.Cleanup(func() { assert.NoError(t, instances.close(context.Background())) })
+	observing(t, provider, inst, instances)
+
+	gauges := func() map[string]int64 {
+		got := collect(t, reader)
+
+		return map[string]int64{
+			"instances": got.sums["plg.pool.instances"]["key=test/k"],
+			"in_use":    got.sums["plg.pool.instances.in_use"]["key=test/k"],
+			"in_flight": got.sums["plg.pool.calls.in_flight"]["key=test/k"],
+		}
+	}
+	want := func(inUse, inFlight int64) map[string]int64 {
+		return map[string]int64{"instances": 1, "in_use": inUse, "in_flight": inFlight}
+	}
+
+	held := acquireN(t, instances, 2)
+	assert.Equal(t, want(1, 2), gauges(), "one instance serves both calls")
+
+	held = append(held, acquireN(t, instances, 1)...)
+	assert.Equal(t, want(1, 3), gauges(), "every lane of it")
+
+	instances.release(t.Context(), held[0])
+	assert.Equal(t, want(1, 2), gauges(), "in use until its last call ends")
+
+	instances.discard(t.Context(), held[1]) // breaks the instance, which closes with its last lane
+	assert.Equal(t, want(1, 1), gauges())
+
+	instances.release(t.Context(), held[2])
+	assert.Equal(t, want(0, 0), gauges(), "its last call ended")
 }
 
 func TestPanicsAreCountedByKeyAndPhase(t *testing.T) {
@@ -2148,9 +2381,9 @@ func TestMetersDefaultToTheGlobalProvider(t *testing.T) {
 	assert.Equal(t, int64(2), collect(t, reader).sums["plg.plugin.panics"]["key=global/k,phase=load"])
 }
 
-// TestMetricsDoNotAllocate: measuring a call, its pool and an HTTP request allocates nothing beyond what the
-// OpenTelemetry SDK does, which is nothing for measurements on attribute sets it has seen (`make allocs`, part of
-// `make check`, runs it uninstrumented).
+// TestMetricsDoNotAllocate: measuring a call, its pool and an HTTP request, each behind its panic boundary,
+// allocates nothing beyond what the OpenTelemetry SDK does, which is nothing for measurements on attribute sets it
+// has seen (`make allocs`, part of `make check`, runs it uninstrumented).
 //
 //nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
 func TestMetricsDoNotAllocate(t *testing.T) {
@@ -2165,6 +2398,7 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 	pluginErr := &PluginError{Key: "n/k", Method: "Do", Message: "no"}
 	ok := httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Sent: 10, Received: 20, Duration: time.Millisecond}
 	refused := httpcap.Report{Outcome: httpcap.OutcomeRefused, Sent: 10, Duration: time.Millisecond}
+	requested := (&Container{panics: instances.panics}).httpDone("n/k", LanguageGo, meters)
 
 	var failures int
 
@@ -2177,10 +2411,11 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 		}
 
 		instances.release(ctx, held)
-		meters.called(ctx, 0, time.Millisecond, nil)
-		meters.called(ctx, 0, time.Millisecond, pluginErr)
-		meters.requested(ctx, ok)
-		meters.requested(ctx, refused)
+		instances.count(ctx, inst.waits, meters.key)
+		instances.called(ctx, 0, time.Millisecond, nil)
+		instances.called(ctx, 0, time.Millisecond, pluginErr)
+		requested(ctx, ok)
+		requested(ctx, refused)
 	})
 	assert.Zero(t, allocs)
 	assert.Zero(t, failures)

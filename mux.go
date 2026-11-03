@@ -78,6 +78,7 @@ type muxInstance struct {
 	fetches    sync.WaitGroup // request goroutines
 	memory     atomic.Uint64  // the instance's linear memory after its last step
 	live       atomic.Int32   // lanes not closed
+	busy       atomic.Int32   // lanes handed out to callers (the pool's count)
 	broken     atomic.Bool
 	discarding atomic.Bool
 	last       uint32 // the number of the last call started

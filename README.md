@@ -575,7 +575,9 @@ type PanicError struct {
   it. `errors.Is(err, plg.ErrCall)` holds for every failed call, and `errors.Is(err, context.DeadlineExceeded)`
   for a deadline stop.
 - **On the host:** every boundary where plg runs code it does not control is behind `recover`: storages, esbuild,
-  the codec, Host methods, the HTTP transport, pollers and refillers, your callbacks.
+  the codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler and
+  your meter provider's instruments (a panic there is a `PanicError` in phase `callback`; the call, the pool and
+  its instances carry on).
 - **Reporting:** each `PanicError` is logged at Error level, counted (`plg.plugin.panics`), passed to
   `plg.WithOnPanic(fn)` and kept in `c.RecentPanics()` (the last 64, `plg.WithPanicHistory(n)`).
 
@@ -594,9 +596,10 @@ if errors.As(err, &pe) {
   skips, failures, panics, pool backoffs, HTTP requests and the plugins' own output (stdout at Info, stderr at
   Warn, with the plugin key).
 - **Metrics:** OpenTelemetry, through `plg.WithMeterProvider(mp)` (default: the global provider): calls, latency
-  and errors by key, method and outcome; panics by phase; pool instances, busy instances, waits and refills;
-  instance memory; loads, skips and reload failures; HTTP requests, latency and sizes. Names and attributes are
-  listed on `plg.WithMeterProvider`. Recording on the call path does not allocate.
+  and errors by key, method and outcome; panics by phase; pool instances, instances in use (serving at least one
+  call), calls in flight (more than instances in use only with `WithConcurrentCalls`), waits and refills; instance
+  memory; loads, skips and reload failures; HTTP requests, latency and sizes. Names and attributes are listed on
+  `plg.WithMeterProvider`. Recording on the call path does not allocate.
 
 ## Deployment: `plg warm` and `plg build-guest`
 

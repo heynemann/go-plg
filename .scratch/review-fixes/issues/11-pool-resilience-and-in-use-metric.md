@@ -9,9 +9,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Regression tests for each of the three defects fail on current code and pass after
-- [ ] Pool size, idle count and budget accounting are unchanged after a panicking meter or log handler (asserted via test hooks); host survives
-- [ ] Metrics test asserts `in_use` reports instances under `WithConcurrentCalls`; README/PLAN metric catalogue updated
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Regression tests for each of the three defects fail on current code and pass after
+- [x] Pool size, idle count and budget accounting are unchanged after a panicking meter or log handler (asserted via test hooks); host survives
+- [x] Metrics test asserts `in_use` reports instances under `WithConcurrentCalls`; README/PLAN metric catalogue updated
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -33,7 +33,9 @@ const meterName = "github.com/heynemann/go-plg"
 //   - plg.plugin.call.errors {key, language, method, outcome}: the calls whose outcome is not ok;
 //   - plg.plugin.panics {key, phase}: every [PanicError] reported (guest panics and traps included);
 //   - plg.pool.instances and plg.pool.instances.in_use {key}: a plugin's instances alive (or starting) and those
-//     serving a call;
+//     serving at least one call;
+//   - plg.pool.calls.in_flight {key}: the calls its instances serve; more than in use only with
+//     [WithConcurrentCalls], where an instance serves several calls at once;
 //   - plg.pool.waits {key}: calls that found every instance busy and the pool at its maximum, and waited;
 //   - plg.pool.refills {key, outcome}: instances the background refiller started (ok) or failed to (failed);
 //   - plg.plugin.memory {key}: the linear memory of a plugin's live instances, in bytes;
@@ -49,9 +51,10 @@ const meterName = "github.com/heynemann/go-plg"
 //   - plg.http.request.size and plg.http.response.size {key}: the bytes of the encoded requests the plugins
 //     sent and of the encoded responses they received.
 //
-// The gauges (instances, in use, memory) cover the plugin versions the container serves; a version replaced by
-// a reload is no longer observed while it drains. Measurements on the call path use attribute sets built once
-// per plugin version, so recording them does not allocate beyond what the provider's SDK does.
+// The gauges (instances, in use, calls in flight, memory) cover the plugin versions the container serves; a
+// version replaced by a reload is no longer observed while it drains. Measurements on the call path use attribute
+// sets built once per plugin version, so recording them does not allocate beyond what the provider's SDK does. A
+// panic in the provider's instruments is reported as a [PanicError] in [PhaseCallback] and never fails a call.
 func WithMeterProvider(provider metric.MeterProvider) Option {
 	return func(c *containerConfig) {
 		c.meterProvider = provider
@@ -63,7 +66,7 @@ type instruments struct {
 	calls, callErrors, panics, waits, refills, loads, reloadFailures, skipped metric.Int64Counter
 	httpRequests, httpSent, httpReceived                                      metric.Int64Counter
 	callDuration, httpDuration                                                metric.Float64Histogram
-	instances, inUse, memory                                                  metric.Int64ObservableUpDownCounter
+	instances, inUse, inFlight, memory                                        metric.Int64ObservableUpDownCounter
 }
 
 // durationBounds are the histogram boundaries of call and HTTP latencies, in seconds: from 10 µs (a Lua or
@@ -115,6 +118,7 @@ func newInstruments(provider metric.MeterProvider) (*instruments, error) {
 	inst.httpDuration = histogram("plg.http.duration", "Latency of HTTP requests made by plugins.")
 	inst.instances = gauge("plg.pool.instances", "{instance}", "Instances of a plugin alive or starting.")
 	inst.inUse = gauge("plg.pool.instances.in_use", "{instance}", "Instances of a plugin serving a call.")
+	inst.inFlight = gauge("plg.pool.calls.in_flight", "{call}", "Calls a plugin's instances are serving.")
 	inst.memory = gauge("plg.plugin.memory", "By", "Linear memory of a plugin's live instances.")
 
 	return inst, errors.Join(errs...)
@@ -146,7 +150,7 @@ func (c *Container) instrument(cfg *containerConfig) {
 	c.meters, err = newInstruments(provider)
 
 	c.observation, regErr = provider.Meter(meterName).RegisterCallback(c.observe, c.meters.instances,
-		c.meters.inUse, c.meters.memory)
+		c.meters.inUse, c.meters.inFlight, c.meters.memory)
 	if regErr != nil {
 		c.observation = noop.Registration{}
 	}
@@ -167,13 +171,26 @@ func (c *Container) observe(_ context.Context, obs metric.Observer) error {
 	return nil
 }
 
-// observe reports the pool's gauges: its instances, those in use and their memory.
+// observe reports the pool's gauges: its instances, those in use, the calls they serve and their memory.
 func (p *pool) observe(obs metric.Observer) {
 	inst, opts := p.meters.inst, p.meters.observe
 
 	obs.ObserveInt64(inst.instances, int64(p.size.Load()), opts...)
-	obs.ObserveInt64(inst.inUse, int64(p.busy.Load()), opts...)
+	obs.ObserveInt64(inst.inUse, int64(p.inUse.Load()), opts...)
+	obs.ObserveInt64(inst.inFlight, int64(p.busy.Load()), opts...)
 	obs.ObserveInt64(inst.memory, p.memory.Load(), opts...)
+}
+
+// count adds one to counter with opts. A panic in the instrument is reported as a [PanicError] in
+// [PhaseCallback].
+func (p *pool) count(ctx context.Context, counter metric.Int64Counter, opts []metric.AddOption) {
+	p.guard(ctx, meterMethod, func() { counter.Add(ctx, 1, opts...) })
+}
+
+// called records a call in the plugin's call metrics, as [pluginMeters.called] does; a panic in the instruments
+// is reported as a [PanicError] in [PhaseCallback].
+func (p *pool) called(ctx context.Context, index uint32, elapsed time.Duration, err error) {
+	p.guard(ctx, meterMethod, func() { p.meters.called(ctx, index, elapsed, err) })
 }
 
 // countPanic counts a reported PanicError.

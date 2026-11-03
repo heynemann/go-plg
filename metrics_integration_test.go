@@ -187,6 +187,7 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 
 	busy := reader.collect(t)
 	assert.Equal(t, int64(1), busy.int64Value(t, "plg.pool.instances.in_use", attribute.String("key", "m/ref")))
+	assert.Equal(t, int64(1), busy.int64Value(t, "plg.pool.calls.in_flight", attribute.String("key", "m/ref")))
 
 	canceled, cancel := context.WithCancel(ctx)
 	waiter := watch(canceled)
@@ -229,7 +230,8 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 		"plg.http.duration", "plg.http.request.size", "plg.http.requests", "plg.http.response.size",
 		"plg.plugin.call.duration", "plg.plugin.call.errors", "plg.plugin.calls", "plg.plugin.loads",
 		"plg.plugin.memory", "plg.plugin.panics", "plg.plugin.reload.failures", "plg.plugin.skipped",
-		"plg.pool.instances", "plg.pool.instances.in_use", "plg.pool.refills", "plg.pool.waits",
+		"plg.pool.calls.in_flight", "plg.pool.instances", "plg.pool.instances.in_use", "plg.pool.refills",
+		"plg.pool.waits",
 	}, keys, "every instrument")
 
 	key := func(k string) attribute.KeyValue { return attribute.String("key", k) }
@@ -261,6 +263,7 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	assert.Equal(t, int64(1), got.int64Value(t, "plg.pool.refills", key("m/ref"), outcome("ok")))
 	assert.Equal(t, int64(1), got.int64Value(t, "plg.pool.instances", key("m/ref")))
 	assert.Zero(t, got.int64Value(t, "plg.pool.instances.in_use", key("m/ref")))
+	assert.Zero(t, got.int64Value(t, "plg.pool.calls.in_flight", key("m/ref")))
 
 	memory := got.int64Value(t, "plg.plugin.memory", key("m/ref"))
 	assert.Positive(t, memory)

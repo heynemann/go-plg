@@ -239,7 +239,7 @@ func (c *Container) call(ctx context.Context, key string, meth *method, call plg
 func (p *plugin) call(ctx context.Context, meth *method, call plgimpl.Call) error {
 	start := time.Now()
 	err := p.callInstance(ctx, meth, call)
-	p.pool.meters.called(ctx, meth.index, time.Since(start), err)
+	p.pool.called(ctx, meth.index, time.Since(start), err)
 
 	return err
 }

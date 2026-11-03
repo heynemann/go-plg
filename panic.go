@@ -36,7 +36,9 @@ const (
 	PhasePoll Phase = "poll"
 	// PhaseRefill is the background goroutine keeping a plugin's pool at its minimum.
 	PhaseRefill Phase = "refill"
-	// PhaseCallback is a user callback such as the [WithOnPanic] function.
+	// PhaseCallback is the user's code plg calls: the [WithOnPanic] function, the logger's handler or an
+	// instrument of the [WithMeterProvider] provider (Method "OnPanic", "slog.Handler.Handle" or
+	// "metric.MeterProvider").
 	PhaseCallback Phase = "callback"
 )
 
@@ -136,32 +138,35 @@ func (r *panicReporter) recovered(ctx context.Context, failure *PanicError, valu
 	r.report(ctx, failure)
 }
 
-// report stamps failure with the current time, records and logs it and passes it to the WithOnPanic function.
+// report stamps failure with the current time, records, counts and logs it and passes it to the WithOnPanic
+// function. The meter provider and the logger's handler are the user's code too.
 func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	failure.Time = time.Now()
 	r.history.record(failure)
-	r.meters.countPanic(ctx, failure)
-	r.log(ctx, failure)
+	r.callback(ctx, failure.Key, failure.Language, meterMethod, func() { r.meters.countPanic(ctx, failure) })
+	r.callback(ctx, failure.Key, failure.Language, logMethod, func() { r.log(ctx, failure) })
 
 	if r.onPanic != nil {
-		r.callback(ctx, failure, "OnPanic", func() { r.onPanic(ctx, failure) })
+		r.callback(ctx, failure.Key, failure.Language, "OnPanic", func() { r.onPanic(ctx, failure) })
 	}
 }
 
-// callback runs fn, the user's code serving failure (named method): a panic in it is recorded as a
-// PanicError in [PhaseCallback] for failure's plugin and logged, but not passed to the WithOnPanic function.
-func (r *panicReporter) callback(ctx context.Context, failure *PanicError, method string, fn func()) {
+// callback runs fn, the user's code (named method) serving the plugin key in lang: a panic in it is recorded,
+// counted and logged as a PanicError in [PhaseCallback], but not passed to the WithOnPanic function. A meter
+// provider or a logger that panics cannot report its own failure, which the other still reports; a panic while
+// reporting it is only recorded, so that a meter provider and a logger that both panic end there.
+func (r *panicReporter) callback(ctx context.Context, key string, lang Language, method string, fn func()) {
 	defer func() {
 		if v := recover(); v != nil {
-			failed := &PanicError{
-				Key: failure.Key, Language: failure.Language, Phase: PhaseCallback, Method: method, Value: v,
-				Stack: debug.Stack(), Time: time.Now(),
-			}
+			failed := callbackFailure(key, lang, method, v)
 			r.history.record(failed)
-			r.meters.countPanic(ctx, failed)
+
+			if method != meterMethod {
+				r.quietly(failed, meterMethod, func() { r.meters.countPanic(ctx, failed) })
+			}
 
 			if method != logMethod {
-				r.log(ctx, failed)
+				r.quietly(failed, logMethod, func() { r.log(ctx, failed) })
 			}
 		}
 	}()
@@ -169,11 +174,33 @@ func (r *panicReporter) callback(ctx context.Context, failure *PanicError, metho
 	fn()
 }
 
-// logMethod names the logger's handler in the PanicError recorded when it panics: that logger cannot log its
-// own failure, which is only recorded.
-const logMethod = "slog.Handler.Handle"
+// quietly runs fn, the user's code (named method) reporting failed: a panic in it is only recorded.
+func (r *panicReporter) quietly(failed *PanicError, method string, fn func()) {
+	defer func() {
+		if v := recover(); v != nil {
+			r.history.record(callbackFailure(failed.Key, failed.Language, method, v))
+		}
+	}()
 
-// log logs failure at Error level. The logger's handler is the user's code too.
+	fn()
+}
+
+// callbackFailure returns the PanicError of a panic, v, in the user's code named method serving the plugin key in
+// lang. Call it while the panic is being recovered, so that its Stack is where it happened.
+func callbackFailure(key string, lang Language, method string, v any) *PanicError {
+	return &PanicError{
+		Key: key, Language: lang, Phase: PhaseCallback, Method: method, Value: v, Stack: debug.Stack(),
+		Time: time.Now(),
+	}
+}
+
+// Methods of the user's code that plg reports by name in the PanicError recorded when it panics.
+const (
+	logMethod   = "slog.Handler.Handle"  // the logger's handler
+	meterMethod = "metric.MeterProvider" // an instrument of the meter provider
+)
+
+// log logs failure at Error level.
 func (r *panicReporter) log(ctx context.Context, failure *PanicError) {
 	attrs := []slog.Attr{
 		slog.String("key", failure.Key), slog.String("phase", string(failure.Phase)),
@@ -196,9 +223,7 @@ func (r *panicReporter) log(ctx context.Context, failure *PanicError) {
 		attrs = append(attrs, slog.String("stack", string(failure.Stack)))
 	}
 
-	r.callback(ctx, failure, logMethod, func() {
-		r.logger.LogAttrs(ctx, slog.LevelError, "plg: plugin failure", attrs...)
-	})
+	r.logger.LogAttrs(ctx, slog.LevelError, "plg: plugin failure", attrs...)
 }
 
 // panicHistory keeps the newest PanicErrors in a ring, without locks: a writer takes the next sequence number

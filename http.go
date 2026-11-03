@@ -75,7 +75,18 @@ func httpClient(policy *HTTPPolicy, logger *slog.Logger) (*httpcap.Client, error
 // httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
 // Register call's policy, its panics reported and its requests counted in meters.
 func (c *Container) httpHandler(reg *registration, key string, lang Language, meters *pluginMeters) engine.HTTPFunc {
-	return reg.http.Handler(key, httpcap.Hooks{Panicked: c.httpPanicked(key, lang), Done: meters.requested})
+	return reg.http.Handler(
+		key,
+		httpcap.Hooks{Panicked: c.httpPanicked(key, lang), Done: c.httpDone(key, lang, meters)},
+	)
+}
+
+// httpDone returns the function the HTTP capability reports each request to: it counts the request in meters, a
+// panic in their instruments reported as a PanicError in [PhaseCallback] (the request goes on as it ended).
+func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) func(context.Context, httpcap.Report) {
+	return func(ctx context.Context, report httpcap.Report) {
+		c.panics.callback(ctx, key, lang, meterMethod, func() { meters.requested(ctx, report) })
+	}
 }
 
 // httpPanicked returns the function the HTTP capability passes its panics to: they become reported
