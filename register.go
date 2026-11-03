@@ -547,17 +547,18 @@ func (c *Container) pluginPool(reg *registration, key string, src *source, meter
 	}
 
 	return newPool(&poolConfig{
-		panics:  c.panics,
-		spawn:   spawn,
-		http:    httpFn,
-		budget:  &c.budget,
-		meters:  meters,
-		key:     key,
-		lang:    src.desc.Language,
-		limit:   src.limit,
-		minSize: int32(reg.cfg.poolMin), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
-		maxSize: int32(reg.cfg.poolMax), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
-		lanes:   int32(lanes),
+		panics:       c.panics,
+		spawn:        spawn,
+		http:         httpFn,
+		budget:       &c.budget,
+		meters:       meters,
+		key:          key,
+		lang:         src.desc.Language,
+		limit:        src.limit,
+		minSize:      int32(reg.cfg.poolMin), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+		maxSize:      int32(reg.cfg.poolMax), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+		lanes:        int32(lanes),
+		closeTimeout: c.closeTimeout,
 	})
 }
 

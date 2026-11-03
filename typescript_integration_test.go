@@ -5,6 +5,7 @@ package plg_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -682,4 +683,44 @@ func BenchmarkHTTPRoundTripTypeScript(b *testing.B) {
 
 func BenchmarkHTTPRoundTripTypeScriptParallel(b *testing.B) {
 	benchHTTPParallel(b, typescript())
+}
+
+// TestABrokenMultiplexedInstanceSkipsItsHangingClose runs a call out of memory on a multiplexed TypeScript
+// instance whose Close never returns, while the step running it succeeds: the broken instance is discarded
+// without running Close, so the failing call returns and a new instance serves the next call by its deadline.
+// The healthy instance left runs Close when the container closes, stopped at the close timeout.
+func TestABrokenMultiplexedInstanceSkipsItsHangingClose(t *testing.T) {
+	t.Parallel()
+
+	ctr := plg.New()
+	plg.SetCloseTimeout(ctr, 100*time.Millisecond)
+
+	plug := tsFooer(t, ctr, `Close() { for (;;) {} },
+Fail(msg: string) { const hoard = []; for (;;) { hoard.push(new Array(1 << 16).fill(msg)); } }`,
+		plg.WithPool(1, 1), plg.WithConcurrentCalls(2), plg.WithMemoryLimit(16<<20))
+
+	failed := make(chan error, 1)
+
+	go func() { failed <- plug.Fail(t.Context(), "oom") }()
+
+	select {
+	case err := <-failed:
+		culprit, ok := errors.AsType[*plg.PanicError](err)
+		require.True(t, ok, "out of memory is the call's panic: %v", err)
+		assert.Equal(t, plg.PhaseCall, culprit.Phase)
+	case <-time.After(30 * time.Second):
+		require.FailNow(t, "discarding the broken instance ran its hanging Close")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	out, err := plug.Foo(ctx, "next")
+	require.NoError(t, err, "a new instance serves the next call")
+	assert.Equal(t, "next", out)
+	assert.Equal(t, 1, plg.Stats(ctr, "ts/p").Size, "the broken instance's place is back")
+	assert.Equal(t, uint64(16<<20), plg.MemoryInUse(ctr), "and its budget charge")
+
+	require.ErrorIs(t, ctr.Close(t.Context()), context.DeadlineExceeded, "a healthy instance's Close is bounded")
+	assert.Zero(t, plg.MemoryInUse(ctr))
 }

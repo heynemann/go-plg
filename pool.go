@@ -45,17 +45,18 @@ var (
 
 // poolConfig configures a pool. The pool logs through its panic reporter's logger.
 type poolConfig struct {
-	panics  *panicReporter
-	spawn   func(context.Context) (instance, error) // starts an instance, running the plugin's Create
-	http    engine.HTTPFunc                         // makes the requests of multiplexed instances
-	budget  *memoryBudget
-	meters  *pluginMeters
-	key     string
-	lang    Language
-	limit   uint64 // memory limit of each instance, charged to the budget while it lives
-	minSize int32
-	maxSize int32
-	lanes   int32 // calls each instance serves at once (see mux.go); 1 for instances that do not multiplex
+	panics       *panicReporter
+	spawn        func(context.Context) (instance, error) // starts an instance, running the plugin's Create
+	http         engine.HTTPFunc                         // makes the requests of multiplexed instances
+	budget       *memoryBudget
+	meters       *pluginMeters
+	key          string
+	lang         Language
+	limit        uint64 // memory limit of each instance, charged to the budget while it lives
+	minSize      int32
+	maxSize      int32
+	lanes        int32         // calls each instance serves at once (see mux.go); 1 for instances that do not multiplex
+	closeTimeout time.Duration // bounds the plugin's Close of each instance a failed warm started
 }
 
 // pool serves a plugin's calls from minSize to maxSize instances. A caller takes an idle instance; with none
@@ -73,59 +74,62 @@ type poolConfig struct {
 // before an instance starts and given back (retire) when it fails to start or is closed. The idle channel has
 // room for maxSize × lanes slots, so giving an instance back never blocks.
 type pool struct {
-	logger    *slog.Logger
-	panics    *panicReporter
-	spawn     func(context.Context) (instance, error)
-	http      engine.HTTPFunc
-	budget    *memoryBudget
-	meters    *pluginMeters
-	stop      context.CancelFunc // ends the refiller's context
-	idle      chan *slot
-	wake      chan struct{} // one pending signal for the refiller (and close): an instance retired
-	done      chan struct{} // closed by close
-	stopped   chan struct{} // closed when the refiller returns
-	key       string
-	lang      Language
-	limit     uint64
-	ids       atomic.Uint64
-	refills   atomic.Uint64 // instances the refiller started
-	grows     atomic.Uint64 // instances callers started
-	memory    atomic.Int64  // linear memory of the live instances, as last sampled: at start and on each release
-	minSize   int32
-	maxSize   int32
-	lanes     int32
-	size      atomic.Int32
-	busy      atomic.Int32 // slots handed out to callers: calls in flight
-	waiting   atomic.Int32 // callers blocked on the idle channel
-	closed    atomic.Bool
-	abandoned atomic.Bool // close gave up waiting: slots given back are closed at once
+	logger       *slog.Logger
+	panics       *panicReporter
+	spawn        func(context.Context) (instance, error)
+	http         engine.HTTPFunc
+	budget       *memoryBudget
+	meters       *pluginMeters
+	stop         context.CancelFunc // ends the refiller's context
+	idle         chan *slot
+	wake         chan struct{} // one pending signal for the refiller (and close): an instance retired
+	done         chan struct{} // closed by close
+	stopped      chan struct{} // closed when the refiller returns
+	key          string
+	lang         Language
+	limit        uint64
+	closeTimeout time.Duration // bounds the plugin's Close of each instance a failed warm started
+	ids          atomic.Uint64
+	refills      atomic.Uint64 // instances the refiller started
+	grows        atomic.Uint64 // instances callers started
+	memory       atomic.Int64  // linear memory of the live instances, as last sampled: at start and on each release
+	minSize      int32
+	maxSize      int32
+	lanes        int32
+	size         atomic.Int32
+	busy         atomic.Int32 // slots handed out to callers: calls in flight
+	waiting      atomic.Int32 // callers blocked on the idle channel
+	closed       atomic.Bool
+	abandoned    atomic.Bool // close gave up waiting: slots given back are closed at once
 }
 
 func newPool(cfg *poolConfig) *pool {
 	lanes := max(cfg.lanes, 1)
 
 	return &pool{
-		logger:  cfg.panics.logger,
-		panics:  cfg.panics,
-		spawn:   cfg.spawn,
-		http:    cfg.http,
-		budget:  cfg.budget,
-		meters:  cfg.meters,
-		key:     cfg.key,
-		lang:    cfg.lang,
-		limit:   cfg.limit,
-		minSize: cfg.minSize,
-		maxSize: cfg.maxSize,
-		lanes:   lanes,
-		idle:    make(chan *slot, cfg.maxSize*lanes),
-		wake:    make(chan struct{}, 1),
-		done:    make(chan struct{}),
-		stopped: make(chan struct{}),
+		logger:       cfg.panics.logger,
+		panics:       cfg.panics,
+		spawn:        cfg.spawn,
+		http:         cfg.http,
+		budget:       cfg.budget,
+		meters:       cfg.meters,
+		key:          cfg.key,
+		lang:         cfg.lang,
+		limit:        cfg.limit,
+		minSize:      cfg.minSize,
+		maxSize:      cfg.maxSize,
+		closeTimeout: cfg.closeTimeout,
+		lanes:        lanes,
+		idle:         make(chan *slot, cfg.maxSize*lanes),
+		wake:         make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		stopped:      make(chan struct{}),
 	}
 }
 
-// warm starts the pool's minimum instances, then its refiller. On failure it closes the instances it started
-// and returns the error; the pool must not be used afterwards.
+// warm starts the pool's minimum instances, then its refiller. On failure it closes the instances it started,
+// each running the plugin's Close under the close timeout, and returns the error; the pool must not be used
+// afterwards.
 func (p *pool) warm(ctx context.Context) error {
 	var err error
 
@@ -146,7 +150,10 @@ func (p *pool) warm(ctx context.Context) error {
 
 	if err != nil {
 		for p.size.Load() > 0 {
-			err = errors.Join(err, p.closeInstance(context.WithoutCancel(ctx), <-p.idle))
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.closeTimeout)
+			err = errors.Join(err, p.closeInstance(closeCtx, <-p.idle))
+
+			cancel()
 		}
 
 		return err
@@ -258,7 +265,9 @@ func (p *pool) release(ctx context.Context, held *slot) {
 }
 
 // discard closes a broken instance and gives its place back; the refiller replaces it. A lane of a multiplexed
-// instance breaks the instance, failing the other calls on it; the instance closes with its last lane.
+// instance breaks the instance, failing the other calls on it; the instance closes with its last lane. A broken
+// instance closes under an ended context, so without the plugin's Close: whatever broke it (a trap, running out
+// of memory, a result the host could not decode) may leave Close unable to end.
 func (p *pool) discard(ctx context.Context, held *slot) {
 	p.busy.Add(-1)
 
@@ -266,7 +275,10 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 		lane.discard()
 	}
 
-	err := p.closeInstance(context.WithoutCancel(ctx), held)
+	ended, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	cancel()
+
+	err := p.closeInstance(ended, held)
 	if err != nil {
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
 			slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))

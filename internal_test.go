@@ -228,6 +228,8 @@ type fakeSpawner struct {
 	started  atomic.Int32
 	closed   atomic.Int32
 	closeBug atomic.Bool   // the instances' Close panics
+	hangs    atomic.Bool   // the instances' Close, given a live context, runs until it ends (the plugin's Close hangs)
+	ranClose atomic.Int32  // Closes given a live context: those that ran the plugin's Close
 	memory   atomic.Uint64 // the instances' Memory
 }
 
@@ -274,8 +276,18 @@ func (f *fakeInstance) Call(context.Context, uint32, []byte) (engine.Result, err
 
 func (*fakeInstance) Broken() bool { return false }
 
-func (f *fakeInstance) Close(context.Context) error {
+func (f *fakeInstance) Close(ctx context.Context) error {
 	f.owner.closed.Add(1)
+
+	if ctx.Err() == nil {
+		f.owner.ranClose.Add(1)
+
+		if f.owner.hangs.Load() {
+			<-ctx.Done()
+
+			return fmt.Errorf("closing: %w", context.Cause(ctx))
+		}
+	}
 
 	if f.owner.closeBug.Load() {
 		panic("close bug")
@@ -659,6 +671,52 @@ func TestPoolWarmFailureClosesWhatItStarted(t *testing.T) {
 			assert.Zero(t, budget.used.Load())
 		})
 	}
+}
+
+// TestPoolWarmFailureBoundsAHangingClose fails warming a pool whose instances' Close hangs: the instances it
+// started run Close under the close timeout, so warm returns, their places and budget given back.
+func TestPoolWarmFailureBoundsAHangingClose(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		spawner, budget := &fakeSpawner{quota: 2}, &memoryBudget{}
+		spawner.hangs.Store(true)
+
+		instances := newTestPool(
+			spawner,
+			&poolConfig{budget: budget, minSize: 3, maxSize: 3, closeTimeout: time.Second},
+		)
+
+		start := time.Now()
+		err := instances.warm(t.Context())
+		require.ErrorIs(t, err, errFake)
+		require.ErrorIs(t, err, context.DeadlineExceeded, "Close stopped at the close timeout")
+		assert.Equal(t, 2*time.Second, time.Since(start), "each instance got the close timeout")
+		assert.Equal(t, int32(2), spawner.ranClose.Load(), "healthy instances run Close")
+		assert.Zero(t, instances.size.Load())
+		assert.Zero(t, budget.used.Load())
+	})
+}
+
+// TestPoolDiscardSkipsClose discards an instance whose Close would hang: a discarded instance is broken, so it
+// closes without the plugin's Close, and its place and budget are given back at once.
+func TestPoolDiscardSkipsClose(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		spawner, budget := &fakeSpawner{}, &memoryBudget{}
+		spawner.hangs.Store(true)
+
+		instances := startPool(t, spawner, &poolConfig{budget: budget, maxSize: 1})
+
+		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
+		assert.Equal(t, int32(1), spawner.closed.Load())
+		assert.Zero(t, spawner.ranClose.Load(), "the plugin's Close is skipped")
+		assert.Zero(t, instances.size.Load())
+		assert.Zero(t, budget.used.Load())
+
+		require.NoError(t, instances.close(t.Context()))
+	})
 }
 
 // closeLater starts closing instances and returns where the result arrives, once close is waiting.
@@ -1716,7 +1774,7 @@ func TestReloaderStops(t *testing.T) {
 		go reloads.run(ctx, 0, func(ctx context.Context) error {
 			<-ctx.Done()
 
-			return context.Cause(ctx)
+			return fmt.Errorf("closing: %w", context.Cause(ctx))
 		})
 
 		running := reloads.request()

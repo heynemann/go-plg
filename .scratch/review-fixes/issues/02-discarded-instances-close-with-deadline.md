@@ -8,11 +8,11 @@ Rule to implement everywhere: an instance discarded because it is broken skips t
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test (the review's TS `Close(){for(;;){}}` + OOM-in-multiplexed-call scenario) reproduces the bug (fails on the current code) and passes with the fix
-- [ ] Every discard/close path (multiplexed lane failure, warm-up failure, binder discard, pool discard, retire) is covered by a test showing Close is skipped or bounded
-- [ ] The pool slot and memory-budget reservation are returned after such a discard (asserted via the test hooks)
-- [ ] Warm-up failure with a hanging Close cannot make `Register` hang
-- [ ] PLAN.md decision log updated
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test (the review's TS `Close(){for(;;){}}` + OOM-in-multiplexed-call scenario) reproduces the bug (fails on the current code) and passes with the fix
+- [x] Every discard/close path (multiplexed lane failure, warm-up failure, binder discard, pool discard, retire) is covered by a test showing Close is skipped or bounded
+- [x] The pool slot and memory-budget reservation are returned after such a discard (asserted via the test hooks)
+- [x] Warm-up failure with a hanging Close cannot make `Register` hang
+- [x] PLAN.md decision log updated
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
