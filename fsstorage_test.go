@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 
@@ -229,6 +230,60 @@ func TestFSStorageRequiresAManifestPerPluginDirectory(t *testing.T) {
 
 	_, err := plg.NewFSStorageFromFS("mapfs", tests["missing"]).List(t.Context())
 	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+// TestFSStorageBoundsManifestReads lists plugin directories whose plugin.json is a FIFO (opening it would wait
+// for a writer forever), a link to /dev/zero (an endless read) or a regular file over MaxManifestSize: each fails
+// at once with ErrInvalidManifest naming the directory, through an os.Root and through an os.DirFS alike.
+func TestFSStorageBoundsManifestReads(t *testing.T) {
+	t.Parallel()
+
+	valid := `{"language":"go","entrypoint":"."}`
+	oversized := valid + strings.Repeat(" ", plg.MaxManifestSize+1-len(valid))
+
+	tests := map[string]struct {
+		make func(t *testing.T, name string)
+		want string
+	}{
+		"fifo": {
+			make: func(t *testing.T, name string) { t.Helper(); require.NoError(t, syscall.Mkfifo(name, 0o600)) },
+			want: "not a regular file",
+		},
+		"link to /dev/zero": {
+			make: func(t *testing.T, name string) { t.Helper(); require.NoError(t, os.Symlink("/dev/zero", name)) },
+		},
+		"oversized": {
+			make: func(t *testing.T, name string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(name, []byte(oversized), 0o600))
+			},
+			want: "over 65536 bytes",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(dir, "p"), 0o700))
+			tc.make(t, filepath.Join(dir, "p", "plugin.json"))
+
+			for _, store := range []*plg.FSStorage{plg.NewFSStorage(dir), plg.NewFSStorageFromFS("dirfs", os.DirFS(dir))} {
+				_, err := store.List(t.Context())
+				require.ErrorIs(t, err, plg.ErrInvalidManifest, store.Name())
+				require.ErrorContains(t, err, "plugin directory p", store.Name())
+				require.ErrorContains(t, err, tc.want, store.Name())
+			}
+		})
+	}
+
+	_, err := plg.ParseManifest([]byte(oversized))
+	require.ErrorIs(t, err, plg.ErrInvalidManifest)
+	require.ErrorContains(t, err, "over 65536 bytes", "ParseManifest shares the cap")
+
+	_, err = plg.ParseManifest([]byte(oversized[:plg.MaxManifestSize]))
+	require.NoError(t, err, "a manifest of exactly MaxManifestSize bytes is accepted")
 }
 
 func TestFSStorageListAndOpenErrors(t *testing.T) {

@@ -21,6 +21,10 @@ import (
 // manifestName is the file describing a plugin directory of an [FSStorage].
 const manifestName = "plugin.json"
 
+// MaxManifestSize is the largest plugin.json, in bytes: [FSStorage] and [ParseManifest] reject a bigger one with
+// [ErrInvalidManifest], and a storage reading manifests from elsewhere should read at most this much plus one.
+const MaxManifestSize = 64 << 10
+
 // maxMemoryLimit is the most memory a wasm32 instance can address: 65536 pages of 64 KiB.
 const maxMemoryLimit = 1 << 32
 
@@ -42,9 +46,10 @@ const contentVersionPrefix = "sha256:"
 //   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 1 to 4 GiB. It can only
 //     lower the Register limit.
 //
-// Keys are case sensitive and unknown keys are errors, so a misspelt key is not silently ignored. Top-level
-// entries that are not directories (symbolic links to directories included), and entries whose names start
-// with a dot, are not plugins and are ignored.
+// A plugin.json must be a regular file (a link to one is followed only where the tree allows it) of at most
+// [MaxManifestSize] bytes. Keys are case sensitive and unknown keys are errors, so a misspelt key is not
+// silently ignored. Top-level entries that are not directories (symbolic links to directories included), and
+// entries whose names start with a dot, are not plugins and are ignored.
 //
 // Open copies the plugin directory into memory, as Register copies every storage's files (see [Storage]):
 // symbolic links are never followed; a link that stays inside the plugin directory is skipped, and one whose
@@ -183,7 +188,7 @@ func (s *FSStorage) withTree(use func(fsys fs.FS) error) error {
 // describe reads the plugin directory dir of fsys. A plugin.json without a version leaves Version empty:
 // Register hashes the files it loads.
 func describe(fsys fs.FS, dir string) (Descriptor, error) {
-	data, err := fs.ReadFile(fsys, path.Join(dir, manifestName))
+	data, err := readManifest(fsys, path.Join(dir, manifestName))
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("%w: plugin directory %s: %w", ErrInvalidManifest, dir, err)
 	}
@@ -196,6 +201,62 @@ func describe(fsys fs.FS, dir string) (Descriptor, error) {
 	desc.Key = dir
 
 	return desc, nil
+}
+
+var (
+	errManifestFile = errors.New("plugin.json is not a regular file")
+	errManifestSize = fmt.Errorf("plugin.json is over %d bytes", MaxManifestSize)
+)
+
+// readManifest reads the plugin.json name of fsys: a regular file (followed through links the tree allows) of at
+// most [MaxManifestSize] bytes. It checks the type before opening, since opening a FIFO waits for a writer, and
+// again on the opened file, and reads at most one byte past the cap.
+func readManifest(fsys fs.FS, name string) ([]byte, error) {
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // describe names the plugin directory
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil, errManifestFile
+	}
+
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // describe names the plugin directory
+	}
+
+	data, err := readRegular(file)
+
+	closeErr := file.Close()
+	if err == nil && closeErr != nil {
+		err = fmt.Errorf("closing: %w", closeErr)
+	}
+
+	return data, err
+}
+
+// readRegular reads file, which must still be a regular file, up to one byte past [MaxManifestSize].
+func readRegular(file fs.File) ([]byte, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat: %w", err)
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil, errManifestFile
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, MaxManifestSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading: %w", err)
+	}
+
+	if len(data) > MaxManifestSize {
+		return nil, errManifestSize
+	}
+
+	return data, nil
 }
 
 // manifest is the content of a plugin.json.
@@ -215,7 +276,7 @@ var (
 // ParseManifest parses and checks a plugin.json exactly as [FSStorage] does, for storages keeping the same
 // manifest in another place (an object store, a database). The returned Descriptor has no Key, and an empty
 // Version when the manifest gives none: the storage then picks one (Register falls back to a content hash).
-// A malformed manifest fails with [ErrInvalidManifest].
+// A malformed manifest, or one over [MaxManifestSize] bytes, fails with [ErrInvalidManifest].
 func ParseManifest(data []byte) (Descriptor, error) {
 	desc, err := decodeManifest(data)
 	if err != nil {
@@ -227,6 +288,10 @@ func ParseManifest(data []byte) (Descriptor, error) {
 
 // decodeManifest parses and checks a plugin.json; the returned descriptor has no key.
 func decodeManifest(data []byte) (Descriptor, error) {
+	if len(data) > MaxManifestSize {
+		return Descriptor{}, errManifestSize
+	}
+
 	strict := sonic.Config{
 		CaseSensitive:         true,
 		DisallowUnknownFields: true,

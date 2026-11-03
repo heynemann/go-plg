@@ -406,13 +406,14 @@ Built in:
   `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
   `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes) may only lower
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
-  drops a limit. Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an
+  drops a limit. A `plugin.json` must be a regular file of at most `plg.MaxManifestSize` (64 KiB) bytes, else
+  it is `plg.ErrInvalidManifest` too (a FIFO or a link to a device is never read). Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an
   `os.Root`, so no path or link leads it out of `dir`, not even a file swapped for a link mid-read.
 - `plg.NewMemoryStorage(name)` with `Put(desc, files)` and `Delete(key)`: plugins a program builds itself, and
   tests.
 
 Your own: implement the three methods. `plg.ParseManifest` parses a `plugin.json` exactly like the FS storage, for
-storages that keep the same layout elsewhere. A `Version` that changes exactly when the plugin changes lets
+storages that keep the same layout elsewhere; read at most `plg.MaxManifestSize`+1 bytes of it, as it rejects more. A `Version` that changes exactly when the plugin changes lets
 reloads skip unchanged plugins (an empty one makes plg hash the files on every reload). Two complete storages,
 kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.json
 layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, only enabled plugins listed,

@@ -44,9 +44,7 @@ type Client interface {
 const (
 	// DefaultMaxPluginSize bounds the bytes of one plugin's objects that Open downloads.
 	DefaultMaxPluginSize = 32 << 20
-	// maxManifestSize bounds a plugin.json.
-	maxManifestSize = 64 << 10
-	manifestName    = "plugin.json"
+	manifestName         = "plugin.json"
 	// listPageSize is S3's largest page of a listing.
 	listPageSize = 1000
 	// readOnly is the mode of the files Open returns.
@@ -265,7 +263,7 @@ func (s *Storage) manifest(ctx context.Context, key string, obj object) (plg.Des
 		return cached.desc, nil
 	}
 
-	got, err := s.download(ctx, key, maxManifestSize)
+	got, err := s.download(ctx, key, plg.MaxManifestSize)
 	if errors.Is(err, errTooLarge) {
 		return plg.Descriptor{}, fmt.Errorf("%w: %w", plg.ErrInvalidManifest, err)
 	}
