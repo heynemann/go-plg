@@ -6,9 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test with `memoryLimit: 1` and `65535` reproduces the bug (fails on the current code) and passes with the fix
-- [ ] `ParseManifest`/`List` reject them with `ErrInvalidManifest`; 65536 is accepted by both manifest parsing and Register
-- [ ] Fuzz target for manifests still passes
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test with `memoryLimit: 1` and `65535` reproduces the bug (fails on the current code) and passes with the fix
+- [x] `ParseManifest`/`List` reject them with `ErrInvalidManifest`; 65536 is accepted by both manifest parsing and Register
+- [x] Fuzz target for manifests still passes
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -163,9 +163,9 @@ func (c *registerConfig) settle() error {
 	}
 
 	if c.limitSet {
-		if c.memoryLimit < engine.PageSize || c.memoryLimit > maxMemoryLimit {
+		if !validMemoryLimit(c.memoryLimit) {
 			return fmt.Errorf("%w: WithMemoryLimit(%d): want from one %d-byte page to 4 GiB", ErrInvalidOption,
-				c.memoryLimit, engine.PageSize)
+				c.memoryLimit, minMemoryLimit)
 		}
 
 		c.memoryLimit = wholePages(c.memoryLimit)

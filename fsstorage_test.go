@@ -117,8 +117,8 @@ func TestFSStorageParsesManifests(t *testing.T) {
 			want:     plg.Descriptor{Language: plg.LanguageTypeScript, Entrypoint: "src/index.ts", Version: "3"},
 		},
 		{
-			manifest: `{"language":"go","entrypoint":".","version":"4","memoryLimit":1}`,
-			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "4", MemoryLimit: 1},
+			manifest: `{"language":"go","entrypoint":".","version":"4","memoryLimit":65536}`,
+			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "4", MemoryLimit: 64 << 10},
 		},
 		{
 			manifest: `{"language":"go","entrypoint":".","version":"5","memoryLimit":4294967296}`,
@@ -186,6 +186,8 @@ func TestFSStorageRejectsMalformedManifests(t *testing.T) {
 		"version type":         `{"language":"go","entrypoint":".","version":1}`,
 		"control character":    "{\"language\":\"go\",\"entrypoint\":\".\",\"version\":\"a\x01b\"}",
 		"zero memory limit":    `{"language":"go","entrypoint":".","memoryLimit":0}`,
+		"limit of 1 byte":      `{"language":"go","entrypoint":".","memoryLimit":1}`,
+		"limit under a page":   `{"language":"go","entrypoint":".","memoryLimit":65535}`,
 		"negative memoryLimit": `{"language":"go","entrypoint":".","memoryLimit":-1}`,
 		"fractional limit":     `{"language":"go","entrypoint":".","memoryLimit":1.5}`,
 		"limit as a string":    `{"language":"go","entrypoint":".","memoryLimit":"64MiB"}`,
@@ -670,7 +672,8 @@ func FuzzFSStorageManifest(f *testing.F) {
 		assert.Equal(t, "p", desc.Key)
 		assert.Contains(t, []plg.Language{plg.LanguageGo, plg.LanguageLua, plg.LanguageTypeScript}, desc.Language)
 		assert.True(t, desc.Entrypoint != "" && fs.ValidPath(desc.Entrypoint), "entrypoint %q", desc.Entrypoint)
-		assert.LessOrEqual(t, desc.MemoryLimit, uint64(4<<30))
+		assert.True(t, desc.MemoryLimit == 0 || desc.MemoryLimit >= 64<<10 && desc.MemoryLimit <= 4<<30,
+			"memoryLimit %d is zero or from one wasm page to 4 GiB, as Register requires", desc.MemoryLimit)
 
 		// Re-encoding the descriptor's fields gives the same plugin (an empty version stays empty: Register
 		// hashes the files it loads).

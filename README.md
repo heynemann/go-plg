@@ -404,7 +404,7 @@ Built in:
   ```
 
   `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
-  `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes) may only lower
+  `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes, from 65536 — one wasm page — to 4 GiB) may only lower
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
   drops a limit. A `plugin.json` must be a regular file of at most `plg.MaxManifestSize` (64 KiB) bytes, else
   it is `plg.ErrInvalidManifest` too (a FIFO or a link to a device is never read). Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an

@@ -15,6 +15,7 @@ import (
 
 	"github.com/bytedance/sonic"
 
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/memfs"
 )
 
@@ -25,8 +26,18 @@ const manifestName = "plugin.json"
 // [ErrInvalidManifest], and a storage reading manifests from elsewhere should read at most this much plus one.
 const MaxManifestSize = 64 << 10
 
-// maxMemoryLimit is the most memory a wasm32 instance can address: 65536 pages of 64 KiB.
-const maxMemoryLimit = 1 << 32
+// The memory limits a Register, a descriptor or a plugin.json may ask for: from one wasm page (64 KiB) to the
+// most a wasm32 instance can address, 65536 pages (4 GiB).
+const (
+	minMemoryLimit = engine.PageSize
+	maxMemoryLimit = 1 << 32
+)
+
+// validMemoryLimit reports whether limit is from [minMemoryLimit] to [maxMemoryLimit], the one rule shared by
+// WithMemoryLimit, Register's descriptor check and plugin.json decoding.
+func validMemoryLimit(limit uint64) bool {
+	return limit >= minMemoryLimit && limit <= maxMemoryLimit
+}
 
 // contentVersionPrefix starts every version computed from a plugin's files.
 const contentVersionPrefix = "sha256:"
@@ -43,8 +54,8 @@ const contentVersionPrefix = "sha256:"
 //     Register uses "sha256:" and the hex SHA-256 of the regular files it loads (their paths relative to the
 //     directory and their contents): it is stable, and changes exactly when a file is added, removed, renamed
 //     or edited.
-//   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 1 to 4 GiB. It can only
-//     lower the Register limit.
+//   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 65536 (one wasm page) to
+//     4 GiB, as Register requires of every descriptor. It can only lower the Register limit.
 //
 // A plugin.json must be a regular file (a link to one is followed only where the tree allows it) of at most
 // [MaxManifestSize] bytes. Keys are case sensitive and unknown keys are errors, so a misspelt key is not
@@ -270,7 +281,7 @@ type manifest struct {
 var (
 	errManifestLanguage    = errors.New(`language must be "go", "lua" or "typescript"`)
 	errManifestEntrypoint  = errors.New("entrypoint must be a slash-separated path inside the plugin directory")
-	errManifestMemoryLimit = errors.New("memoryLimit must be from 1 byte to 4 GiB")
+	errManifestMemoryLimit = fmt.Errorf("memoryLimit must be from %d bytes (one wasm page) to 4 GiB", minMemoryLimit)
 )
 
 // ParseManifest parses and checks a plugin.json exactly as [FSStorage] does, for storages keeping the same
@@ -319,7 +330,7 @@ func decodeManifest(data []byte) (Descriptor, error) {
 	desc := Descriptor{Language: parsed.Language, Entrypoint: parsed.Entrypoint, Version: parsed.Version}
 
 	if limit := parsed.MemoryLimit; limit != nil {
-		if *limit == 0 || *limit > maxMemoryLimit {
+		if !validMemoryLimit(*limit) {
 			return Descriptor{}, fmt.Errorf("%w, not %d", errManifestMemoryLimit, *limit)
 		}
 

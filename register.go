@@ -335,9 +335,9 @@ func checkDescriptor(storeName string, desc *Descriptor) error {
 			storeName, *desc)
 	}
 
-	if desc.MemoryLimit != 0 && (desc.MemoryLimit < engine.PageSize || desc.MemoryLimit > maxMemoryLimit) {
+	if desc.MemoryLimit != 0 && !validMemoryLimit(desc.MemoryLimit) {
 		return fmt.Errorf("%w: storage %s lists %q with a memory limit of %d bytes, not from one %d-byte page "+
-			"to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, engine.PageSize)
+			"to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, minMemoryLimit)
 	}
 
 	return nil
