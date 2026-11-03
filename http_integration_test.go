@@ -299,6 +299,26 @@ func stallingServer(t *testing.T) *stalling {
 	return srv
 }
 
+// expiring is a call context whose deadline passes when the test closes it rather than at a set time: closed
+// once the plugin's request is in flight, it is a deadline that cannot race the request. It carries no values
+// and reports no deadline time.
+type expiring chan struct{}
+
+func (expiring) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (e expiring) Done() <-chan struct{} { return e }
+
+func (e expiring) Err() error {
+	select {
+	case <-e:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (expiring) Value(any) any { return nil }
+
 func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 	t.Parallel()
 
@@ -332,12 +352,21 @@ func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 		srv := stallingServer(t)
 		plug := fetcherIn(t, ctr, "deadline", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
 
-		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-		defer cancel()
+		ctx := make(expiring)
+		done := make(chan error)
 
-		_, err := plug.Foo(ctx, "GET "+srv.URL)
+		go func() {
+			_, err := plug.Foo(ctx, "GET "+srv.URL)
+			done <- err
+		}()
+
+		<-srv.started
+		close(ctx) // the call's deadline passes while its request is in flight, well within the policy's 10s
+
+		err := <-done
 		require.ErrorContains(t, err, context.DeadlineExceeded.Error(),
 			"the 10s default timeout never outlives the call")
+		require.NotContains(t, err.Error(), httpcap.ErrTimeout.Error(), "the call's deadline, not the policy's")
 		<-srv.abandoned
 	})
 
@@ -352,7 +381,13 @@ func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 		_, err := plug.Foo(t.Context(), "GET "+srv.URL)
 		require.ErrorContains(t, err, httpcap.ErrTimeout.Error())
 		require.NotErrorIs(t, err, plg.ErrCall, "the call itself goes on: the plugin sees a failed request")
-		<-srv.abandoned
+
+		select {
+		case <-srv.started: // the request reached the server before its timeout: it was aborted there
+			<-srv.abandoned
+
+		default: // under load, the 50ms ran out before the request reached the server: nothing runs there
+		}
 	})
 }
 

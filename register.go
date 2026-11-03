@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,7 +19,8 @@ import (
 // Register loads, under name, every plugin its storages list for the interface T, and publishes them in one
 // step: each plugin's key is "<name>/<descriptor key>". It loads synchronously and fails fast: on any error
 // nothing is published. Plugins in a language the language options ([WithGolangPlugins], …) leave out are
-// skipped and logged.
+// skipped and logged. Afterwards the registration follows its storages on [Container.Reload],
+// [ReloadInterface] and, with [WithPollInterval], by itself.
 //
 // It fails if T breaks the interface contract (every method takes a context.Context first, returns an error
 // last and uses only data types) with [ErrInvalidInterface], if T has no [Contract] with [ErrNoContract], if
@@ -44,7 +46,10 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 
 	plugins, err := c.loadAll(ctx, reg)
 	if err == nil {
-		err = c.publish(ctx, iface, plugins)
+		err = c.publish(iface, plugins, nil)
+		if err != nil {
+			c.closeUnpublished(ctx, plugins)
+		}
 	}
 
 	if err != nil {
@@ -53,6 +58,8 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 
 		return err
 	}
+
+	c.serve(ctx, reg)
 
 	return nil
 }
@@ -63,6 +70,7 @@ type registration struct {
 	cfg        *registerConfig
 	http       *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
 	host       *host           // the WithHost option's; nil without one
+	reloads    *reloader       // set once the registration is published
 	name       string
 	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host's stubs
 	goPayload  []byte // the Go init payload, likewise
@@ -123,11 +131,22 @@ type source struct {
 	limit     uint64 // per-instance memory limit, whole pages
 }
 
-// listPlugins lists the storages and checks their descriptors: every key and entrypoint and that no key is
-// listed twice first, then it skips (and logs) the plugins in languages the Register did not enable and checks
-// that each remaining plugin's language guest is linked.
+// problem is a listed plugin that cannot be loaded: its descriptor is invalid, its key is listed twice or its
+// language's guest is missing. key is its descriptor key, empty when it has none.
+type problem struct {
+	err error
+	key string
+}
+
+// listPlugins lists the storages for Register, which fails on any problem: a storage that cannot be listed, an
+// invalid descriptor, a key listed twice, a language whose guest is not linked. Plugins in languages the
+// Register did not enable are skipped and logged.
 func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) ([]source, error) {
-	listed, err := c.listStorages(ctx, name, cfg.storages)
+	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
+	if err == nil && len(problems) > 0 {
+		err = problems[0].err
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -135,87 +154,112 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 	srcs := listed[:0]
 
 	for i := range listed {
-		src := &listed[i]
-		if !cfg.enabled(src.desc.Language) {
-			c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin skipped: its language is not enabled",
-				slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storeName),
-				slog.String("language", string(src.desc.Language)))
-
-			continue
-		}
-
-		src.guest, err = guestFor(src.desc.Language)
+		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelInfo)
 		if err != nil {
-			return nil, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
+			return nil, err
 		}
 
-		src.limit = c.instanceLimit(ctx, name, cfg, src)
-		srcs = append(srcs, *src)
+		if ok {
+			srcs = append(srcs, listed[i])
+		}
 	}
 
 	return srcs, nil
 }
 
-// instanceLimit returns a plugin's per-instance memory limit: the Register's, lowered by the descriptor's.
-// A descriptor asking for more than the Register allows gets the Register's limit, with a warning.
-func (c *Container) instanceLimit(ctx context.Context, name string, cfg *registerConfig, src *source) uint64 {
-	asked := src.desc.MemoryLimit
-	if asked == 0 {
+// relistPlugins lists the storages for a reload: it returns the plugins to load and the problems of the others,
+// and fails only when a storage cannot be listed. Skipped languages are logged at Debug level only, rather than
+// on every poll.
+func (c *Container) relistPlugins(ctx context.Context, name string, cfg *registerConfig) (
+	[]source, []problem, error,
+) {
+	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srcs := listed[:0]
+
+	for i := range listed {
+		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelDebug)
+
+		switch {
+		case err != nil:
+			problems = append(problems, problem{key: listed[i].desc.Key, err: err})
+		case ok:
+			srcs = append(srcs, listed[i])
+		default: // in a language the Register did not enable
+		}
+	}
+
+	return srcs, problems, nil
+}
+
+// admit prepares a listed plugin for loading. It reports false for a plugin in a language the Register did not
+// enable, which it logs at level, and fails when the language's guest is not linked.
+func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig, src *source, level slog.Level) (
+	bool, error,
+) {
+	if !cfg.enabled(src.desc.Language) {
+		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled",
+			slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storeName),
+			slog.String("language", string(src.desc.Language)))
+
+		return false, nil
+	}
+
+	guest, err := guestFor(src.desc.Language)
+	if err != nil {
+		return false, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
+	}
+
+	src.guest, src.limit = guest, instanceLimit(cfg, &src.desc)
+
+	return true, nil
+}
+
+// instanceLimit returns a plugin's per-instance memory limit: the Register's, lowered by the descriptor's. A
+// descriptor asking for more than the Register allows gets the Register's limit ([Container.launch] warns).
+func instanceLimit(cfg *registerConfig, desc *Descriptor) uint64 {
+	if desc.MemoryLimit == 0 || desc.MemoryLimit > cfg.memoryLimit {
 		return cfg.memoryLimit
 	}
 
-	if asked > cfg.memoryLimit {
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
-			slog.String("key", name+"/"+src.desc.Key), slog.Uint64("asked", asked),
-			slog.Uint64("limit", cfg.memoryLimit))
-
-		return cfg.memoryLimit
-	}
-
-	return wholePages(asked)
+	return wholePages(desc.MemoryLimit)
 }
 
 // listStorages lists every storage, checking that each descriptor has a key and an entrypoint and that no key
-// is listed twice, whatever its language. A panicking storage fails with a reported [PanicError].
-func (c *Container) listStorages(ctx context.Context, name string, storages []Storage) ([]source, error) {
-	var srcs []source
+// is listed twice, whatever its language. A key with a problem is not loaded from any storage. A panicking
+// storage fails with a reported [PanicError].
+func (c *Container) listStorages(ctx context.Context, name string, storages []Storage) (
+	[]source, []problem, error,
+) {
+	var (
+		srcs     []source
+		problems []problem
+	)
 
 	owner := map[string]string{} // key -> storage name
 
 	for _, store := range storages {
-		var (
-			storeName string
-			descs     []Descriptor
-		)
-
-		err := c.storageCall(ctx, name, "Name", func() error {
-			storeName = store.Name()
-
-			return nil
-		})
-		if err == nil {
-			err = c.storageCall(ctx, name, "List", func() error {
-				var listErr error
-
-				descs, listErr = store.List(ctx)
-
-				return listErr //nolint:wrapcheck // wrapped below, with the storage's name
-			})
-		}
-
+		storeName, descs, err := c.listStorage(ctx, name, store)
 		if err != nil {
-			return nil, fmt.Errorf("%w: listing storage %s: %w", ErrLoad, storeName, err)
+			return nil, nil, err
 		}
 
 		for _, desc := range descs {
 			err = checkDescriptor(storeName, &desc)
-			if err != nil {
-				return nil, err
+			if err == nil {
+				if prev, dup := owner[desc.Key]; dup {
+					err = fmt.Errorf("%w %q: listed by storages %s and %s", ErrDuplicateKey, desc.Key, prev,
+						storeName)
+				}
 			}
 
-			if prev, dup := owner[desc.Key]; dup {
-				return nil, fmt.Errorf("%w %q: listed by storages %s and %s", ErrDuplicateKey, desc.Key, prev,
-					storeName)
+			if err != nil {
+				problems = append(problems, problem{key: desc.Key, err: err})
+
+				continue
 			}
 
 			owner[desc.Key] = storeName
@@ -223,7 +267,41 @@ func (c *Container) listStorages(ctx context.Context, name string, storages []St
 		}
 	}
 
-	return srcs, nil
+	srcs = slices.DeleteFunc(srcs, func(src source) bool {
+		return slices.ContainsFunc(problems, func(p problem) bool { return p.key == src.desc.Key })
+	})
+
+	return srcs, problems, nil
+}
+
+// listStorage asks a storage for its name and its descriptors; a panicking storage fails with a reported
+// [PanicError].
+func (c *Container) listStorage(ctx context.Context, name string, store Storage) (string, []Descriptor, error) {
+	var (
+		storeName string
+		descs     []Descriptor
+	)
+
+	err := c.storageCall(ctx, name, "Name", func() error {
+		storeName = store.Name()
+
+		return nil
+	})
+	if err == nil {
+		err = c.storageCall(ctx, name, "List", func() error {
+			var listErr error
+
+			descs, listErr = store.List(ctx)
+
+			return listErr //nolint:wrapcheck // wrapped below, with the storage's name
+		})
+	}
+
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: listing storage %s: %w", ErrLoad, storeName, err)
+	}
+
+	return storeName, descs, nil
 }
 
 // storageCall runs a method of a user's [Storage], turning a panic into a reported [PanicError] in
@@ -277,37 +355,43 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 
 		plug, err := c.load(ctx, reg, key, &srcs[i])
 		if err != nil {
-			c.closePlugins(ctx, plugins)
+			c.closeUnpublished(ctx, plugins)
 			c.budget.unreserve(reserved)
 
 			return nil, fmt.Errorf("%w: %s (storage %s): %w", ErrLoad, key, srcs[i].storeName, err)
 		}
 
+		plug.value = reg.contr.bind(c, key) //nolint:contextcheck // each adapter call takes the context it is passed
+		plug.reserved = worstCase(reg.cfg, &srcs[i])
+		reserved -= plug.reserved
 		plugins = append(plugins, plug)
 	}
 
 	return plugins, nil
 }
 
-// reserveMemory reserves the worst case of every plugin, pool maximum × its memory limit, in the container's
-// budget, and returns the bytes reserved.
-func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []source) (uint64, error) {
-	maxSize := uint64(cfg.poolMax) //nolint:gosec // G115: settle validated 1 <= poolMax <= maxPoolSize
+// worstCase is the most memory a plugin's instances may take: its pool maximum × its memory limit.
+func worstCase(cfg *registerConfig, src *source) uint64 {
+	return uint64(cfg.poolMax) * src.limit //nolint:gosec // G115: settle validated 1 <= poolMax <= maxPoolSize
+}
 
+// reserveMemory reserves the worst case of every plugin in the container's budget, and returns the bytes
+// reserved.
+func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []source) (uint64, error) {
 	var reserved, needed uint64
 
 	for i := range srcs {
-		needed += maxSize * srcs[i].limit
+		needed += worstCase(cfg, &srcs[i])
 	}
 
 	for i := range srcs {
-		worst := maxSize * srcs[i].limit
+		worst := worstCase(cfg, &srcs[i])
 		if !c.budget.reserve(worst) {
 			c.budget.unreserve(reserved)
 
 			return 0, fmt.Errorf("%w: %s needs up to %d bytes (a pool of up to %d instances per plugin), "+
 				"and %d of the %d-byte budget are reserved by other plugins", ErrMemoryBudget, name, needed,
-				maxSize, c.budget.reserved.Load(), c.budget.total)
+				cfg.poolMax, c.budget.reserved.Load(), c.budget.total)
 		}
 
 		reserved += worst
@@ -316,35 +400,40 @@ func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []sourc
 	return reserved, nil
 }
 
-// load opens a plugin, starts the minimum instances of its pool (running Create in each) and binds an adapter
-// to it. A panic on the host meanwhile (the plugin's fs.FS is the storage's code) fails with a reported
-// [PanicError] in [PhaseLoad].
+// load opens a listed plugin and launches it. A panic on the host meanwhile (the plugin's fs.FS is the
+// storage's code) fails with a reported [PanicError] in [PhaseLoad].
 func (c *Container) load(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
-	var (
-		plug *plugin
-		err  error
-	)
+	var plug *plugin
 
-	func() {
-		defer func() {
-			if v := recover(); v != nil {
-				failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad}
-				c.panics.recovered(ctx, failure, v)
+	err := c.loadStep(ctx, key, src, func() error {
+		files, err := c.open(ctx, key, src)
+		if err == nil {
+			plug, err = c.launch(ctx, reg, key, src, files)
+		}
 
-				plug, err = nil, failure
-			}
-		}()
-
-		plug, err = c.loadPlugin(ctx, reg, key, src)
-	}()
+		return err
+	})
 
 	return plug, err
 }
 
-// loadPlugin is load without its panic boundary.
-func (c *Container) loadPlugin(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
-	start := time.Now()
+// loadStep runs a step of loading the plugin key, turning a panic into a reported [PanicError] in [PhaseLoad].
+func (c *Container) loadStep(ctx context.Context, key string, src *source, step func() error) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad}
+			c.panics.recovered(ctx, failure, v)
 
+			err = failure
+		}
+	}()
+
+	return step()
+}
+
+// open opens a listed plugin's files and resolves its version: a content hash of the files when the storage
+// gives none.
+func (c *Container) open(ctx context.Context, key string, src *source) (fs.FS, error) {
 	var files fs.FS
 
 	err := c.storageCall(ctx, key, "Open", func() error {
@@ -365,6 +454,23 @@ func (c *Container) loadPlugin(ctx context.Context, reg *registration, key strin
 		}
 	}
 
+	return files, nil
+}
+
+// launch starts the minimum instances of an opened plugin's pool (running Create in each) and returns the
+// generation they serve. Its adapter and its memory reservation are the caller's to set. A panic once the
+// instances started (the user's logger) closes them before going on: nothing else owns them yet.
+func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files fs.FS) (
+	*plugin, error,
+) {
+	start := time.Now()
+
+	if src.desc.MemoryLimit > reg.cfg.memoryLimit {
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
+			slog.String("key", key), slog.Uint64("asked", src.desc.MemoryLimit),
+			slog.Uint64("limit", reg.cfg.memoryLimit))
+	}
+
 	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, src.desc.Entrypoint)
 	if err != nil {
 		return nil, err
@@ -382,15 +488,21 @@ func (c *Container) loadPlugin(ctx context.Context, reg *registration, key strin
 		return nil, err
 	}
 
-	plug := &plugin{key: key, lang: src.desc.Language, iface: reg.contr.iface, http: reg.http, pool: instances}
-	plug.value = reg.contr.bind(plug) //nolint:contextcheck // each adapter call takes the context it is passed
+	gen := newGeneration(key, reg.contr.iface, &src.desc, instances)
+
+	defer func() {
+		if v := recover(); v != nil {
+			c.closeUnpublished(ctx, []*plugin{gen})
+			panic(v)
+		}
+	}()
 
 	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key),
 		slog.String("language", string(src.desc.Language)), slog.String("version", src.desc.Version),
 		slog.Uint64("memory_limit", src.limit), slog.Int("pool_min", reg.cfg.poolMin),
 		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
 
-	return plug, nil
+	return gen, nil
 }
 
 // goPool returns the (not yet warm) pool of a Go plugin's instances, which mount tree.
@@ -420,31 +532,35 @@ func (c *Container) goPool(reg *registration, key string, src *source, tree fs.F
 	})
 }
 
-// publish adds the plugins to the catalogue in one atomic step.
-func (c *Container) publish(ctx context.Context, iface reflect.Type, plugins []*plugin) error {
+// publish changes the plugins of iface in the catalogue in one atomic step: the plugins in put are added or
+// replace those with the same key, and the keys in removed are dropped. It fails with [ErrClosed] once the
+// container is closed.
+func (c *Container) publish(iface reflect.Type, put []*plugin, removed []string) error {
 	for {
 		old := c.catalogue.Load()
 		if old.closed {
-			c.closePlugins(ctx, plugins)
-
 			return ErrClosed
 		}
 
-		if c.catalogue.CompareAndSwap(old, old.with(iface, plugins)) {
+		if c.catalogue.CompareAndSwap(old, old.with(iface, put, removed)) {
 			return nil
 		}
 	}
 }
 
-// closePlugins closes plugins that were never published, logging failures.
-func (c *Container) closePlugins(ctx context.Context, plugins []*plugin) {
-	for _, p := range plugins {
-		p.http.Close()
+// closeUnpublished closes generations that were never published and gives their memory reservations back,
+// logging failures. Their instances get the container's close timeout to run the plugin's Close.
+func (c *Container) closeUnpublished(ctx context.Context, plugins []*plugin) {
+	for _, gen := range plugins {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.closeTimeout)
+		err := gen.pool.close(closeCtx)
 
-		err := p.pool.close(context.WithoutCancel(ctx))
+		cancel()
+		c.budget.unreserve(gen.reserved)
+
 		if err != nil {
 			c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an unpublished plugin failed",
-				slog.String("key", p.key), slog.String("error", err.Error()))
+				slog.String("key", gen.key), slog.String("error", err.Error()))
 		}
 	}
 }

@@ -9,7 +9,8 @@ import (
 // Errors returned by plg. Test for them with [errors.Is]; the returned errors wrap them with details such as the
 // key, the method or the offending type.
 var (
-	// ErrNotFound reports a key with no plugin behind it.
+	// ErrNotFound reports a key with no plugin behind it (never registered, or removed by a reload), or a name
+	// no interface is registered under.
 	ErrNotFound = errors.New("plg: plugin not found")
 	// ErrTypeMismatch reports a key whose plugin was registered for another interface.
 	ErrTypeMismatch = errors.New("plg: plugin registered for another interface")

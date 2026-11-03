@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime"
 	"slices"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 )
@@ -76,15 +77,16 @@ type RegisterOption func(*registerConfig)
 const maxPoolSize = 4096
 
 type registerConfig struct {
-	http        *HTTPPolicy // nil: HTTP refused
-	storages    []Storage
-	languages   []Language // enabled languages; empty enables every language
-	hosts       []hostSpec // WithHost options; at most one is valid
-	memoryLimit uint64     // per-instance limit, whole pages
-	poolMin     int
-	poolMax     int
-	poolSet     bool
-	limitSet    bool
+	http         *HTTPPolicy // nil: HTTP refused
+	storages     []Storage
+	languages    []Language    // enabled languages; empty enables every language
+	hosts        []hostSpec    // WithHost options; at most one is valid
+	memoryLimit  uint64        // per-instance limit, whole pages
+	pollInterval time.Duration // zero: no polling
+	poolMin      int
+	poolMax      int
+	poolSet      bool
+	limitSet     bool
 }
 
 // enabled reports whether the Register runs plugins in lang.
@@ -92,8 +94,8 @@ func (c *registerConfig) enabled(lang Language) bool {
 	return len(c.languages) == 0 || slices.Contains(c.languages, lang)
 }
 
-// registerOptions applies a Register call's options and checks them: at least one non-nil storage, and valid
-// pool and memory options, whose defaults it fills in.
+// registerOptions applies a Register call's options and checks them: at least one non-nil storage, valid pool
+// and memory options, whose defaults it fills in, and a poll interval that is not negative.
 func registerOptions(name string, opts []RegisterOption) (*registerConfig, error) {
 	cfg := &registerConfig{}
 
@@ -103,6 +105,11 @@ func registerOptions(name string, opts []RegisterOption) (*registerConfig, error
 
 	if len(cfg.storages) == 0 || slices.Contains(cfg.storages, nil) {
 		return nil, fmt.Errorf("%w: register %s with at least one non-nil WithStorage", ErrNoStorage, name)
+	}
+
+	if cfg.pollInterval < 0 {
+		return nil, fmt.Errorf("%w: WithPollInterval(%s): want a positive interval, or zero not to poll",
+			ErrInvalidOption, cfg.pollInterval)
 	}
 
 	err := cfg.settle()
@@ -149,6 +156,16 @@ func wholePages(limit uint64) uint64 {
 func WithStorage(s Storage) RegisterOption {
 	return func(c *registerConfig) {
 		c.storages = append(c.storages, s)
+	}
+}
+
+// WithPollInterval makes the Register's plugins follow their storages: every interval, a background goroutine
+// reloads them as [ReloadInterface] does, so changes are served without an explicit reload. Polling lists the
+// storages each time but reloads only the plugins whose descriptor or version changed. It must not be negative,
+// otherwise Register fails with [ErrInvalidOption]; zero, the default, does not poll.
+func WithPollInterval(interval time.Duration) RegisterOption {
+	return func(c *registerConfig) {
+		c.pollInterval = interval
 	}
 }
 

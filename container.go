@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
@@ -35,19 +36,26 @@ import (
 // goMemoryLimit is the default memory limit of each Go plugin instance; yaegi alone takes about 29 MiB.
 const goMemoryLimit = 128 << 20
 
+// closeTimeout bounds closing a generation's instances, in which each runs the plugin's optional Close: a Close
+// that hangs cannot keep a retired generation's memory forever.
+const closeTimeout = 10 * time.Second
+
 // Container holds registered plugins and the WebAssembly runtimes that run them: one per distinct per-instance
 // memory limit, all sharing the container's compilation cache. Create it with [New] and release it with
 // [Container.Close].
 type Container struct {
-	engine    *engine.Engine
-	logger    *slog.Logger
-	panics    *panicReporter
-	runtimes  *xsync.Map[uint64, *engine.Runtime] // by memory limit
-	modules   *xsync.Map[moduleKey, *compiledGuest]
-	names     *xsync.Map[string, bool] // registered (or registering) names
-	catalogue atomic.Pointer[snapshot]
-	budget    memoryBudget
-	closed    atomic.Bool
+	engine       *engine.Engine
+	logger       *slog.Logger
+	panics       *panicReporter
+	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
+	modules      *xsync.Map[moduleKey, *compiledGuest]
+	names        *xsync.Map[string, bool]          // registered (or registering) names
+	regs         *xsync.Map[string, *registration] // published registrations, by name
+	retired      *xsync.Map[*plugin, context.CancelFunc]
+	catalogue    atomic.Pointer[snapshot]
+	budget       memoryBudget
+	closeTimeout time.Duration // closeTimeout; tests shorten it
+	closed       atomic.Bool
 }
 
 // New returns an empty container.
@@ -58,34 +66,49 @@ func New(opts ...Option) *Container {
 	}
 
 	ctr := &Container{
-		engine:   engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
-		logger:   cfg.logger,
-		panics:   newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory),
-		runtimes: xsync.NewMap[uint64, *engine.Runtime](),
-		modules:  xsync.NewMap[moduleKey, *compiledGuest](),
-		names:    xsync.NewMap[string, bool](),
-		budget:   memoryBudget{total: cfg.memoryBudget},
+		engine:       engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
+		logger:       cfg.logger,
+		panics:       newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory),
+		runtimes:     xsync.NewMap[uint64, *engine.Runtime](),
+		modules:      xsync.NewMap[moduleKey, *compiledGuest](),
+		names:        xsync.NewMap[string, bool](),
+		regs:         xsync.NewMap[string, *registration](),
+		retired:      xsync.NewMap[*plugin, context.CancelFunc](),
+		budget:       memoryBudget{total: cfg.memoryBudget},
+		closeTimeout: closeTimeout,
 	}
 	ctr.catalogue.Store(&snapshot{})
 
 	return ctr
 }
 
-// Close stops serving plugins and their refill goroutines, and releases the runtimes. It waits on ctx for calls
-// in flight to finish; calls still running when ctx ends are stopped. Afterwards Get fails with [ErrClosed],
-// and so do calls through plugins obtained earlier. Closing a closed container does nothing.
+// Close stops the pollers and serves no more calls: it waits on ctx for the calls in flight to finish, closes
+// every instance (each running the plugin's optional Close), stops the refill goroutines and releases the
+// runtimes. Calls still running when ctx ends are stopped. It returns the failures, those of closing the
+// plugins included. Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed].
+// Closing a closed container does nothing.
 func (c *Container) Close(ctx context.Context) error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
+	errs := []error{c.stopReloaders(ctx)}
+
 	last := c.catalogue.Swap(&snapshot{closed: true})
+	for _, gen := range last.plugins {
+		c.retire(ctx, gen)
+	}
 
-	var errs []error
+	errs = append(errs, c.awaitRetired(ctx))
 
-	for _, plug := range last.plugins {
-		errs = append(errs, plug.pool.close(ctx))
-		plug.http.Close()
+	for _, gen := range last.plugins {
+		<-gen.closed // closed by now; receiving orders the read of closeErr after its write
+
+		errs = append(errs, gen.closeErr)
+	}
+
+	for _, reg := range c.regs.All() {
+		reg.http.Close()
 	}
 
 	for _, rt := range c.runtimes.All() {

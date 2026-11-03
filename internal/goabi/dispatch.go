@@ -10,10 +10,10 @@ import (
 )
 
 // initTemplate renders [InitFunc], which creates the plugin instance and binds its methods to the
-// [CallPrefix]+<Method> variables. yaegi's run-time interface assertions are unreliable, so Create is assigned
-// to a variable of the exact expected type: yaegi rejects a Create with any other signature when it compiles
-// the dispatcher. A nil instance is reported as a problem (a load failure), apart from Create's own error.
-// With a Host, Create takes the dispatcher's Host stubs.
+// [CallPrefix]+<Method> variables and its optional Close to [CloseVar]. yaegi's run-time interface assertions
+// are unreliable, so Create is assigned to a variable of the exact expected type: yaegi rejects a Create with
+// any other signature when it compiles the dispatcher. A nil instance is reported as a problem (a load
+// failure), apart from Create's own error. With a Host, Create takes the dispatcher's Host stubs.
 //
 // The guest calls the bound method values directly: a forwarding function per method would cost a second
 // interpreted call and a dynamic method lookup on every call, about half of a small call's time in the guest.
@@ -31,7 +31,65 @@ func %[3]s() (string, error) {
 	}
 
 %[6]s
+	%[9]s = plgBindClose(v)
+
 	return "", nil
+}
+`
+
+// closeTemplate renders the binder of the instance's optional Close: a method Close() error, or Close(), that
+// the guest calls when the host closes the instance. yaegi's interface assertions compare method names only,
+// so an instance whose Close has another signature passes them and then panics when the method value is
+// assigned: each binder recovers and reports no Close, as Go's assertion would.
+const closeTemplate = `
+var %[2]s func() error
+
+type plgCloser interface{ Close() error }
+
+type plgPlainCloser interface{ Close() }
+
+func plgBindClose(v %[1]s) func() error {
+	if f := plgBindCloser(v); f != nil {
+		return f
+	}
+
+	if f := plgBindPlainCloser(v); f != nil {
+		return func() error {
+			f()
+
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func plgBindCloser(v %[1]s) (f func() error) {
+	defer func() {
+		if recover() != nil {
+			f = nil
+		}
+	}()
+
+	if c, ok := v.(plgCloser); ok {
+		f = c.Close
+	}
+
+	return f
+}
+
+func plgBindPlainCloser(v %[1]s) (f func()) {
+	defer func() {
+		if recover() != nil {
+			f = nil
+		}
+	}()
+
+	if c, ok := v.(plgPlainCloser); ok {
+		f = c.Close
+	}
+
+	return f
 }
 `
 
@@ -238,7 +296,9 @@ func (r *renderer) render(iface, host reflect.Type) []byte {
 	}
 
 	r.printf(initTemplate, ifaceExpr, CreateFunc, InitFunc,
-		strconv.Quote(CreateFunc+" returned a nil "+iface.String()), vars.String(), binds.String(), hostParam, hostArg)
+		strconv.Quote(CreateFunc+" returned a nil "+iface.String()), vars.String(), binds.String(), hostParam, hostArg,
+		CloseVar)
+	r.printf(closeTemplate, ifaceExpr, CloseVar)
 
 	for i, sig := range sigs {
 		ret := ""

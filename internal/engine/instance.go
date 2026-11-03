@@ -15,6 +15,18 @@ import (
 // status or a malformed message. The instance is broken afterwards.
 var ErrABI = errors.New("engine: guest ABI violation")
 
+// CloseError reports a plugin whose Close, run by plg_close, did not succeed: Status is [wire.StatusError] when
+// it returned an error and [wire.StatusPanic] when it panicked (any other status breaks the ABI), with the
+// guest's message.
+type CloseError struct {
+	Message string
+	Status  wire.Status
+}
+
+func (e *CloseError) Error() string {
+	return fmt.Sprintf("engine: plugin Close failed: guest status %s: %s", e.Status, e.Message)
+}
+
 // Guest export names.
 const (
 	exportAlloc = "plg_alloc"
@@ -101,12 +113,19 @@ func (in *Instance) Call(ctx context.Context, method uint32, args []byte) (Resul
 	return in.invoke(ctx, in.call, in.stack[:2])
 }
 
-// Close runs plg_close on a healthy instance and frees it.
+// Close frees the instance. First, on a healthy instance and while ctx lives, it runs plg_close, which calls the
+// plugin's optional Close: one that fails or panics is reported as a [*CloseError], a guest that traps or is
+// stopped by ctx meanwhile as the trap; the instance is freed all the same.
 func (in *Instance) Close(ctx context.Context) error {
 	var err error
 
-	if !in.broken {
-		_, err = in.invoke(ctx, in.close, in.stack[:1])
+	if !in.broken && ctx.Err() == nil {
+		var res Result
+
+		res, err = in.invoke(ctx, in.close, in.stack[:1])
+		if err == nil && res.Status != wire.StatusOK {
+			err = &CloseError{Status: res.Status, Message: res.Message}
+		}
 	}
 
 	in.broken = true

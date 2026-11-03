@@ -1110,9 +1110,9 @@ func TestCallFailuresArePanicErrors(t *testing.T) {
 			reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
 			spawner := &fakeSpawner{call: tc.call, guest: tc.guest}
 			instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
-			plug := &plugin{key: "test/k", lang: LanguageGo, pool: instances}
+			plug := &plugin{key: "test/k", desc: Descriptor{Language: LanguageGo}, pool: instances}
 
-			_, err := plug.call(meth, []reflect.Value{reflect.ValueOf(t.Context())})
+			_, err := plug.call(t.Context(), meth, []reflect.Value{reflect.ValueOf(t.Context())})
 
 			assert.Equal(t, PhaseCall, requirePanicError(t, err, PhaseCall).Phase)
 			require.ErrorIs(t, err, ErrCall)
@@ -1442,4 +1442,227 @@ func TestGuestFailureValues(t *testing.T) {
 	require.True(t, ok, "any other status is an error naming it")
 	require.ErrorIs(t, abi, errGuestStatus)
 	assert.EqualError(t, abi, "guest status abi: bad payload")
+}
+
+// isClosed reports whether ch is closed, without waiting.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+func testGeneration() *plugin {
+	return newGeneration("test/k", reflect.TypeFor[pair](), &Descriptor{Key: "k"}, nil)
+}
+
+func TestGenerationGoesIdleAfterItsLastCall(t *testing.T) {
+	t.Parallel()
+
+	t.Run("serving", func(t *testing.T) {
+		t.Parallel()
+
+		gen := testGeneration()
+		require.True(t, gen.enter())
+		gen.leave()
+		assert.False(t, isClosed(gen.idle), "a generation still served never goes idle")
+	})
+
+	t.Run("retired without calls", func(t *testing.T) {
+		t.Parallel()
+
+		gen := testGeneration()
+		gen.retire()
+		assert.True(t, isClosed(gen.idle))
+		assert.False(t, gen.enter(), "a retired generation takes no call")
+	})
+
+	t.Run("retired with calls in flight", func(t *testing.T) {
+		t.Parallel()
+
+		gen := testGeneration()
+		require.True(t, gen.enter())
+		require.True(t, gen.enter())
+		gen.retire()
+		assert.False(t, isClosed(gen.idle), "two calls are in flight")
+		assert.False(t, gen.enter(), "a retired generation takes no call")
+		assert.False(t, isClosed(gen.idle), "a refused call does not count")
+		gen.leave()
+		assert.False(t, isClosed(gen.idle), "one call is in flight")
+		gen.leave()
+		assert.True(t, isClosed(gen.idle), "the last call left")
+	})
+}
+
+// TestGenerationRetiringUnderLoad retires a generation while goroutines keep calling through it: no call sees it
+// idle while in flight, it goes idle exactly once (closing idle twice would panic) once every call that entered
+// has left, and it takes no call afterwards.
+func TestGenerationRetiringUnderLoad(t *testing.T) {
+	t.Parallel()
+
+	const workers = 32
+
+	gen := testGeneration()
+
+	var calls, refused, violations atomic.Int64
+
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Go(func() {
+			for gen.enter() {
+				if isClosed(gen.idle) {
+					violations.Add(1)
+				}
+
+				calls.Add(1)
+				gen.leave()
+				runtime.Gosched()
+			}
+
+			refused.Add(1)
+		})
+	}
+
+	for calls.Load() < 100*workers { // retire in the middle of the traffic
+		runtime.Gosched()
+	}
+
+	gen.retire()
+	wg.Wait()
+
+	assert.True(t, isClosed(gen.idle))
+	assert.Zero(t, violations.Load(), "no call ran on an idle generation")
+	assert.Equal(t, int64(workers), refused.Load(), "every worker was refused once retired")
+	assert.Equal(t, int64(retiredBit), gen.state.Load(), "nothing is left in flight")
+}
+
+// startReloader runs a reloader whose rounds call round, until the test ends.
+func startReloader(t *testing.T, interval time.Duration, round func(context.Context) error) *reloader {
+	t.Helper()
+
+	ctx, stop := context.WithCancel(context.Background())
+	reloads := newReloader(stop)
+
+	go reloads.run(ctx, interval, round)
+
+	t.Cleanup(func() {
+		stop()
+		<-reloads.stopped
+	})
+
+	return reloads
+}
+
+var errRound = errors.New("round failed")
+
+// TestReloaderCoalescesRequestsMadeDuringARound requests a reload while a round runs: that round started listing
+// before the requests, so it cannot serve them; the next one serves them all.
+func TestReloaderCoalescesRequestsMadeDuringARound(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan error)
+
+		var rounds atomic.Int32
+
+		reloads := startReloader(t, 0, func(context.Context) error {
+			rounds.Add(1)
+
+			return <-gate
+		})
+
+		first := reloads.request()
+
+		synctest.Wait()
+		require.Equal(t, int32(1), rounds.Load(), "the first request starts a round")
+
+		later := []*reloadRound{reloads.request(), reloads.request(), reloads.request()}
+
+		gate <- errRound
+
+		require.ErrorIs(t, first.wait(t.Context()), errRound)
+
+		synctest.Wait()
+		require.Equal(t, int32(2), rounds.Load(), "one more round serves the three later requests")
+
+		gate <- nil
+
+		for _, round := range later {
+			require.NoError(t, round.wait(t.Context()), "the later requests get the second round's outcome")
+		}
+
+		synctest.Wait()
+		assert.Equal(t, int32(2), rounds.Load(), "no request is left pending")
+	})
+}
+
+func TestReloaderPollsEveryInterval(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var polled, unpolled atomic.Int32
+
+		startReloader(t, time.Minute, func(context.Context) error {
+			polled.Add(1)
+
+			return nil
+		})
+
+		manual := startReloader(t, 0, func(context.Context) error {
+			unpolled.Add(1)
+
+			return nil
+		})
+
+		time.Sleep(time.Minute - time.Nanosecond)
+		synctest.Wait()
+		assert.Zero(t, polled.Load(), "the first poll comes one interval after the start")
+
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		assert.Equal(t, int32(1), polled.Load())
+
+		time.Sleep(2 * time.Minute)
+		synctest.Wait()
+		assert.Equal(t, int32(3), polled.Load())
+		assert.Zero(t, unpolled.Load(), "without an interval, nothing polls")
+
+		require.NoError(t, manual.request().wait(t.Context()))
+		assert.Equal(t, int32(1), unpolled.Load(), "requests still reload")
+	})
+}
+
+func TestReloaderStops(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, stop := context.WithCancel(context.Background())
+		reloads := newReloader(stop)
+
+		go reloads.run(ctx, 0, func(ctx context.Context) error {
+			<-ctx.Done()
+
+			return context.Cause(ctx)
+		})
+
+		running := reloads.request()
+
+		synctest.Wait()
+
+		pending := reloads.request()
+
+		canceled, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, pending.wait(canceled), context.Canceled, "waiting ends with its context")
+
+		stop()
+		<-reloads.stopped
+
+		require.ErrorIs(t, running.wait(t.Context()), context.Canceled, "the round in progress is stopped")
+		require.ErrorIs(t, pending.wait(t.Context()), ErrClosed, "the pending round never runs")
+		require.ErrorIs(t, reloads.request().wait(t.Context()), ErrClosed, "nor does any later one")
+	})
 }

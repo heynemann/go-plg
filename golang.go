@@ -186,23 +186,23 @@ func (l *goLauncher) start(ctx context.Context) (instance, error) {
 
 	switch {
 	case err != nil:
-		err = l.failed(ctx, err, out)
+		err = l.failed(ctx, PhaseCreate, err, out)
 	case res.Status == wire.StatusOK:
-		return &goInstance{Instance: inst, out: out}, nil
+		return &goInstance{Instance: inst, launcher: l, out: out}, nil
 	case res.Status == wire.StatusError:
 		err = fmt.Errorf("%w: %s", errCreate, res.Message)
 	case res.Status == wire.StatusLoad:
 		err = fmt.Errorf("%w: %s", errGuestLoad, res.Message)
 	default:
-		err = l.failed(ctx, guestFailure(res), out)
+		err = l.failed(ctx, PhaseCreate, guestFailure(res), out)
 	}
 
 	return nil, errors.Join(err, inst.Close(context.WithoutCancel(ctx)))
 }
 
-// failed reports a Create the guest failed, with what it wrote to stderr meanwhile.
-func (l *goLauncher) failed(ctx context.Context, value any, out *guestout.Capture) *PanicError {
-	failure := &PanicError{Key: l.key, Language: LanguageGo, Phase: PhaseCreate, Value: value, Guest: out.Guest()}
+// failed reports a step (Create, Close) the guest failed, with what it wrote to stderr meanwhile.
+func (l *goLauncher) failed(ctx context.Context, phase Phase, value any, out *guestout.Capture) *PanicError {
+	failure := &PanicError{Key: l.key, Language: LanguageGo, Phase: phase, Value: value, Guest: out.Guest()}
 	l.panics.report(ctx, failure)
 
 	return failure
@@ -223,7 +223,8 @@ func guestFailure(res engine.Result) any {
 type goInstance struct {
 	*engine.Instance
 
-	out *guestout.Capture
+	launcher *goLauncher
+	out      *guestout.Capture
 }
 
 func (g *goInstance) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {
@@ -235,13 +236,30 @@ func (g *goInstance) Call(ctx context.Context, method uint32, args []byte) (engi
 	return res, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
 
+// Close closes the instance, running the plugin's optional Close. A Close that returns an error fails with that
+// error; a guest that panics, traps, is stopped by ctx or breaks the ABI meanwhile fails with a reported
+// [PanicError] in [PhaseClose].
 func (g *goInstance) Close(ctx context.Context) error {
 	g.out.Begin()
 
 	err := g.Instance.Close(ctx)
 	g.out.End(ctx)
 
-	return err //nolint:wrapcheck // the pool wraps close errors with the instance
+	if err == nil {
+		return nil
+	}
+
+	value := any(err)
+
+	if closeErr, ok := errors.AsType[*engine.CloseError](err); ok {
+		if closeErr.Status == wire.StatusError {
+			return err //nolint:wrapcheck // the pool wraps close errors with the instance
+		}
+
+		value = guestFailure(engine.Result{Status: closeErr.Status, Message: closeErr.Message})
+	}
+
+	return g.launcher.failed(ctx, PhaseClose, value, g.out)
 }
 
 // Guest returns what the guest wrote to stderr during its last step.

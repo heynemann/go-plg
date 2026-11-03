@@ -148,15 +148,16 @@ func (m *method) failed(err error) []reflect.Value {
 
 var errNilContext = errors.New("nil context")
 
-// bind returns a new adapter for the plugin: a pointer to the contract's adapter struct whose W<Method> fields
-// call the plugin, so it implements the contract's interface.
-func (ct *contract) bind(plug *plugin) any {
+// bind returns a new adapter for the plugin c serves under key: a pointer to the contract's adapter struct whose
+// W<Method> fields call that plugin, so it implements the contract's interface. Each call runs on the
+// generation of the plugin c serves when the call starts, so an adapter keeps working across reloads.
+func (ct *contract) bind(c *Container, key string) any {
 	adapter := reflect.New(ct.adapter)
 	fields := adapter.Elem()
 
 	for _, meth := range ct.methods {
 		fields.Field(meth.field).Set(reflect.MakeFunc(meth.typ, func(args []reflect.Value) []reflect.Value {
-			out, err := plug.call(meth, args)
+			out, err := c.call(key, meth, args)
 			if err != nil {
 				return meth.failed(err)
 			}
@@ -168,14 +169,26 @@ func (ct *contract) bind(plug *plugin) any {
 	return adapter.Interface()
 }
 
-// call runs one method call on an instance of the plugin, waiting for one while all are busy. Its context is
-// the call's first argument.
-func (p *plugin) call(meth *method, args []reflect.Value) ([]reflect.Value, error) {
+// call runs one method call on the generation of the plugin c serves under key, counted in flight on it until
+// it ends. Its context is the call's first argument.
+func (c *Container) call(key string, meth *method, args []reflect.Value) ([]reflect.Value, error) {
 	ctx, ok := reflect.TypeAssert[context.Context](args[0])
 	if !ok {
-		return nil, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, errNilContext)
+		return nil, fmt.Errorf("plg: %s.%s: %w", key, meth.name, errNilContext)
 	}
 
+	gen, err := c.serving(key)
+	if err != nil {
+		return nil, fmt.Errorf("plg: %s.%s: %w", key, meth.name, err)
+	}
+
+	defer gen.leave()
+
+	return gen.call(ctx, meth, args)
+}
+
+// call runs one method call on an instance of the plugin, waiting for one while all are busy.
+func (p *plugin) call(ctx context.Context, meth *method, args []reflect.Value) ([]reflect.Value, error) {
 	held, err := p.pool.acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, err)
@@ -206,7 +219,7 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseCall, Method: meth.name}
+				failure := &PanicError{Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name}
 				p.pool.panics.recovered(ctx, failure, v)
 
 				out, discard, err = nil, true, failure
@@ -257,7 +270,8 @@ func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, args [
 // failed reports a call the guest failed, with what the guest wrote to stderr meanwhile.
 func (p *plugin) failed(ctx context.Context, held *slot, meth *method, value any) *PanicError {
 	failure := &PanicError{
-		Key: p.key, Language: p.lang, Phase: PhaseCall, Method: meth.name, Value: value, Guest: held.inst.Guest(),
+		Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Value: value,
+		Guest: held.inst.Guest(),
 	}
 	p.pool.panics.report(ctx, failure)
 

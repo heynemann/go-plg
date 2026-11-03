@@ -5,7 +5,8 @@
 // plugin's source at [PluginImportPath] and the rendered dispatcher at [DispatchImportPath]. The guest
 // imports the dispatcher, fills its [HostCallPrefix]+<Method> variables with calls into the host (when the
 // plugins have a Host), calls [InitFunc] (which runs the plugin's Create, passing it the Host stubs) and resolves
-// one [CallPrefix]+<Method> function per interface method, in the order of [InitPayload.Methods].
+// one [CallPrefix]+<Method> function per interface method, in the order of [InitPayload.Methods], and the
+// instance's optional Close at [CloseVar], which it calls when the host closes the instance.
 package goabi
 
 import (
@@ -33,6 +34,9 @@ const (
 	// HostCallPrefix prefixes the dispatcher variable each Host stub method calls: the guest sets it to a function
 	// that encodes the arguments, calls the plg.host_call import and decodes the answer.
 	HostCallPrefix = "PlgHostCall_"
+	// CloseVar is the dispatcher variable [InitFunc] binds to the plugin instance's optional Close (a method
+	// Close() error or Close()); it stays nil when the instance has none.
+	CloseVar = "PlgClose"
 )
 
 // ErrPayload reports a malformed init payload.

@@ -8,53 +8,139 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-
-	"github.com/heynemann/go-plg/internal/httpcap"
+	"sync/atomic"
 )
 
-// plugin is a loaded plugin as the catalogue serves it.
+// plugin is one generation of a loaded plugin: what the catalogue serves under its key until a reload replaces
+// or removes it. Each call counts itself in flight on the generation it runs on, so a retired generation is
+// closed only once its last call has left.
 type plugin struct {
-	value any          // the bound adapter; it implements iface
-	iface reflect.Type // the interface it was registered for
-	pool  *pool
-	http  *httpcap.Client // the Register call's, shared with its other plugins
-	key   string          // "<name>/<descriptor key>"
-	lang  Language
+	value    any          // the key's adapter, shared by its generations; it implements iface
+	iface    reflect.Type // the interface it was registered for
+	closeErr error        // closing the retired generation's instances failed; set before closed is closed
+	pool     *pool
+	idle     chan struct{} // closed once the generation is retired and no call is in flight
+	closed   chan struct{} // closed once a retired generation's instances are closed
+	key      string        // "<name>/<descriptor key>"
+	desc     Descriptor    // as loaded, its Version resolved
+	reserved uint64        // its worst case in the container's memory budget, given back once it is closed
+	state    atomic.Int64  // calls in flight, plus retiredBit once retired
+	quiet    atomic.Bool   // idle is closed
 }
 
-// snapshot is an immutable state of the catalogue. Register publishes a new one with compare-and-swap, so
-// readers never wait and always see a consistent catalogue.
+// retiredBit marks a retired generation in plugin.state, far above any count of calls in flight.
+const retiredBit = 1 << 62
+
+// newGeneration returns a generation of the plugin key served by instances.
+func newGeneration(key string, iface reflect.Type, desc *Descriptor, instances *pool) *plugin {
+	return &plugin{
+		key:    key,
+		iface:  iface,
+		desc:   *desc,
+		pool:   instances,
+		idle:   make(chan struct{}),
+		closed: make(chan struct{}),
+	}
+}
+
+// enter counts a call in flight, unless the generation is retired: the caller must then find the generation
+// that replaced it in a later snapshot.
+func (p *plugin) enter() bool {
+	if p.state.Add(1)&retiredBit != 0 {
+		p.leave()
+
+		return false
+	}
+
+	return true
+}
+
+// leave ends a call that entered.
+func (p *plugin) leave() {
+	if p.state.Add(-1) == retiredBit {
+		p.quieten()
+	}
+}
+
+// retire stops the generation taking calls; idle is closed once those in flight have left. The catalogue must
+// no longer hold it, so that callers find its successor.
+func (p *plugin) retire() {
+	if p.state.Or(retiredBit) == 0 {
+		p.quieten()
+	}
+}
+
+// quieten closes idle, once: both the last leave after retire and a leave of a call that entered too late may
+// see the count reach zero.
+func (p *plugin) quieten() {
+	if p.quiet.CompareAndSwap(false, true) {
+		close(p.idle)
+	}
+}
+
+// snapshot is an immutable state of the catalogue. Register and reloads publish a new one with
+// compare-and-swap, so readers never wait and always see a consistent catalogue.
 type snapshot struct {
 	plugins map[string]*plugin
 	byIface map[reflect.Type][]*plugin // sorted by key
 	closed  bool
 }
 
-// with returns a snapshot that adds plugins, all registered for iface, to s.
-func (s *snapshot) with(iface reflect.Type, added []*plugin) *snapshot {
+// with returns a snapshot changing the plugins of iface in s: the plugins in put are added or replace those with
+// the same key, and those whose keys are in removed are gone.
+func (s *snapshot) with(iface reflect.Type, put []*plugin, removed []string) *snapshot {
 	next := &snapshot{
-		plugins: make(map[string]*plugin, len(s.plugins)+len(added)),
-		byIface: maps.Clone(s.byIface),
+		plugins: make(map[string]*plugin, len(s.plugins)+len(put)),
+		byIface: make(map[reflect.Type][]*plugin, len(s.byIface)+1),
 	}
 
 	maps.Copy(next.plugins, s.plugins)
+	maps.Copy(next.byIface, s.byIface)
 
-	for _, p := range added {
+	for _, key := range removed {
+		delete(next.plugins, key)
+	}
+
+	for _, p := range put {
 		next.plugins[p.key] = p
 	}
 
-	if len(added) > 0 {
-		if next.byIface == nil {
-			next.byIface = map[reflect.Type][]*plugin{}
+	var list []*plugin
+
+	for _, p := range next.plugins {
+		if p.iface == iface {
+			list = append(list, p)
 		}
+	}
 
-		list := slices.Concat(s.byIface[iface], added)
-		slices.SortFunc(list, func(a, b *plugin) int { return cmp.Compare(a.key, b.key) })
+	slices.SortFunc(list, func(a, b *plugin) int { return cmp.Compare(a.key, b.key) })
 
+	if len(list) == 0 {
+		delete(next.byIface, iface)
+	} else {
 		next.byIface[iface] = list
 	}
 
 	return next
+}
+
+// serving returns the generation c serves under key, with a call entered: the caller leaves it when done. It
+// fails with [ErrNotFound] for an unknown key and with [ErrClosed] once the container is closed.
+func (c *Container) serving(key string) (*plugin, error) {
+	for {
+		snap := c.catalogue.Load()
+
+		gen, found := snap.plugins[key]
+		switch {
+		case found && gen.enter():
+			return gen, nil
+		case found: // retired after snap was loaded, which happens only once a later snapshot is published
+		case snap.closed:
+			return nil, ErrClosed
+		default:
+			return nil, ErrNotFound
+		}
+	}
 }
 
 // Get returns the plugin with the given key, "<name>/<descriptor key>", as a T. It fails with [ErrNotFound]

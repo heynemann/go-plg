@@ -31,6 +31,7 @@ var (
 	errCreateType = errors.New("plugin Create has the wrong type")
 	errCallType   = errors.New("dispatcher function has the wrong type; want func(context.Context, ...) (..., error)")
 	errAnswer     = errors.New("malformed host answer")
+	errCloseType  = errors.New("dispatcher close variable has the wrong type; want func() error")
 )
 
 // HostFunc sends the encoded arguments of a call to the Host method with the given index (the order of
@@ -44,10 +45,11 @@ type Guest struct {
 	host           HostFunc
 	fault          error // a host answer broke the ABI during the current call; the instance must be discarded
 
-	in         []byte // input buffer handed out by Alloc; the host writes requests into it
-	out        []byte // result buffer; valid until the next call
-	hostArgs   []byte // encoded arguments of the current host call
-	hostAnswer []byte // the host's answer to it
+	closer     reflect.Value // the dispatcher's [goabi.CloseVar]: the instance's Close, or nil
+	in         []byte        // input buffer handed out by Alloc; the host writes requests into it
+	out        []byte        // result buffer; valid until the next call
+	hostArgs   []byte        // encoded arguments of the current host call
+	hostAnswer []byte        // the host's answer to it
 	methods    []method
 	started    bool // Init ran; it runs at most once
 	ready      bool // Init succeeded
@@ -91,11 +93,26 @@ func (g *Guest) Call(index, size uint32) []byte {
 	return g.guarded(func() []byte { return g.invoke(index, size) })
 }
 
-// Close ends the instance; later calls are rejected.
+// Close ends the instance, calling the plugin instance's Close if it has one (a method Close() error or
+// Close()); later calls are rejected. A Close that fails or panics is reported like a call's error or panic.
+// Only the first Close reaches the plugin.
 func (g *Guest) Close() []byte {
+	if g.closed || !g.ready || g.closer.IsNil() {
+		g.closed = true
+
+		return g.ok()
+	}
+
 	g.closed = true
 
-	return g.ok()
+	return g.guarded(func() []byte {
+		out := g.closer.Call(nil)
+		if closeErr, failed := reflect.TypeAssert[error](out[0]); failed {
+			return g.fail(wire.StatusError, closeErr.Error())
+		}
+
+		return g.ok()
+	})
 }
 
 // guarded runs fn, turning a panic in the plugin (or the interpreter) into a StatusPanic result.
@@ -255,7 +272,27 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 		}
 	}
 
+	g.closer, err = resolveCloser(interpreter)
+	if err != nil {
+		return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
+	}
+
 	return initFn, 0, nil
+}
+
+// resolveCloser looks up the dispatcher's variable holding the instance's optional Close, bound by
+// [goabi.InitFunc]; like a method's variable, the value Eval returns sees that binding.
+func resolveCloser(interpreter *interp.Interpreter) (reflect.Value, error) {
+	closer, err := interpreter.Eval(dispatchAlias + "." + goabi.CloseVar)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("resolving %s: %w", goabi.CloseVar, err)
+	}
+
+	if closer.Type() != reflect.TypeFor[func() error]() {
+		return reflect.Value{}, fmt.Errorf("%w: %s has type %s", errCloseType, goabi.CloseVar, closer.Type())
+	}
+
+	return closer, nil
 }
 
 // checkCreate imports the plugin package and checks that it declares func Create() (T, error), or

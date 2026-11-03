@@ -414,6 +414,10 @@ func TestRegisterArguments(t *testing.T) {
 			}})},
 		},
 		{
+			name: "poll-negative", opts: withEmpty(plg.WithPollInterval(-time.Second)), want: plg.ErrInvalidOption,
+			msg: "WithPollInterval(-1s)",
+		},
+		{
 			name: "desc-limit-huge", want: plg.ErrInvalidDescriptor, msg: "4294967297 bytes",
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
 				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 4<<30 + 1},

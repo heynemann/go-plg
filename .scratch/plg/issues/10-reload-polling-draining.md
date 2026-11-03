@@ -9,12 +9,12 @@
 
 **Blocked by:** 05 (Filesystem and fs.FS storages), 06 (Pooling and resource limits)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Editing a plugin on disk and reloading serves the new version; calls already running finish on the old one
-- [ ] A broken update keeps the previous version serving and logs the failure
-- [ ] Removing a plugin makes Get return ErrNotFound after reload
-- [ ] Polling detects changes without explicit Reload; unchanged plugins don't recompile
-- [ ] Draining calls the plugin's Close after the last in-flight call; c.Close returns after everything is drained
-- [ ] Reload racing with heavy call traffic passes -race
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] Editing a plugin on disk and reloading serves the new version; calls already running finish on the old one
+- [x] A broken update keeps the previous version serving and logs the failure
+- [x] Removing a plugin makes Get return ErrNotFound after reload
+- [x] Polling detects changes without explicit Reload; unchanged plugins don't recompile
+- [x] Draining calls the plugin's Close after the last in-flight call; c.Close returns after everything is drained
+- [x] Reload racing with heavy call traffic passes -race
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

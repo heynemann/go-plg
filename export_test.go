@@ -2,7 +2,9 @@ package plg
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 )
@@ -21,19 +23,25 @@ type Held struct {
 	ID      uint64 // instances of a plugin are numbered from 1 in the order they started
 }
 
-// HoldInstance is [Hold], also returning the identity of the instance taken.
+// HoldInstance is [Hold], also returning the identity of the instance taken. Like a call, it counts as in
+// flight on the generation of the plugin it holds until it is released.
 func HoldInstance(ctx context.Context, c *Container, key string) (Held, error) {
-	plug, ok := c.catalogue.Load().plugins[key]
-	if !ok {
-		return Held{}, ErrNotFound
-	}
-
-	held, err := plug.pool.acquire(ctx)
+	gen, err := c.serving(key)
 	if err != nil {
 		return Held{}, err
 	}
 
-	return Held{ID: held.id, Release: func() { plug.pool.release(held) }}, nil
+	held, err := gen.pool.acquire(ctx)
+	if err != nil {
+		gen.leave()
+
+		return Held{}, err
+	}
+
+	return Held{ID: held.id, Release: func() {
+		gen.pool.release(held)
+		gen.leave()
+	}}, nil
 }
 
 // PoolStats describes a plugin's pool.
@@ -52,6 +60,49 @@ func Stats(c *Container, key string) PoolStats {
 // MemoryInUse returns the memory limits of every instance alive in the container, added up.
 func MemoryInUse(c *Container) uint64 {
 	return c.budget.used.Load()
+}
+
+// MemoryReserved returns the worst cases of every plugin version the container holds, added up.
+func MemoryReserved(c *Container) uint64 {
+	return c.budget.reserved.Load()
+}
+
+// Generation identifies the version of the plugin c serves under key; nil when there is none.
+func Generation(c *Container, key string) any {
+	gen, ok := c.catalogue.Load().plugins[key]
+	if !ok {
+		return nil
+	}
+
+	return gen
+}
+
+// Version returns the version of the plugin c serves under key.
+func Version(c *Container, key string) string {
+	return c.catalogue.Load().plugins[key].desc.Version
+}
+
+// Retired returns how many replaced or removed plugin versions are not closed yet.
+func Retired(c *Container) int {
+	return c.retired.Size()
+}
+
+// AwaitRetired waits on ctx until every replaced or removed plugin version is closed.
+func AwaitRetired(ctx context.Context, c *Container) error {
+	for gen := range c.retired.All() {
+		select {
+		case <-gen.closed:
+		case <-ctx.Done():
+			return fmt.Errorf("awaiting retired versions: %w", context.Cause(ctx))
+		}
+	}
+
+	return nil
+}
+
+// SetCloseTimeout replaces the time a retired version's instances get to run their Close.
+func SetCloseTimeout(c *Container, d time.Duration) {
+	c.closeTimeout = d
 }
 
 func (p *pool) stats() PoolStats {

@@ -3,6 +3,7 @@ package engine_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"testing"
 	"time"
 
@@ -278,7 +280,12 @@ func TestResults(t *testing.T) {
 			t.Parallel()
 
 			size := uint32(len(tc.result)) //nolint:gosec // G115: tiny
-			inst := mustInstantiate(t, fakeGuest{data: tc.result, bodies: abiOK(0, size)})
+			bodies := abiOK(0, size)
+			bodies["plg_close"] = packed(size, 1) // the OK status byte placed after the result
+			inst := mustInstantiate(
+				t,
+				fakeGuest{data: slices.Concat(tc.result, []byte{byte(wire.StatusOK)}), bodies: bodies},
+			)
 
 			res, err := inst.Init(t.Context(), []byte("payload"))
 			require.NoError(t, err)
@@ -294,6 +301,33 @@ func TestResults(t *testing.T) {
 			}
 
 			assert.NoError(t, inst.Close(t.Context()))
+		})
+	}
+}
+
+func TestCloseReportsAFailingPluginClose(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []wire.Status{wire.StatusError, wire.StatusPanic} {
+		t.Run(status.String(), func(t *testing.T) {
+			t.Parallel()
+
+			result := statusMessage(status, "flush failed")
+			bodies := abiOK(0, 1)
+			bodies["plg_close"] = packed(1, uint32(len(result))) //nolint:gosec // G115: tiny
+
+			inst := mustInstantiate(
+				t,
+				fakeGuest{data: slices.Concat([]byte{byte(wire.StatusOK)}, result), bodies: bodies},
+			)
+			_, err := inst.Init(t.Context(), nil)
+			require.NoError(t, err)
+
+			err = inst.Close(t.Context())
+			closeErr, ok := errors.AsType[*engine.CloseError](err)
+			require.True(t, ok, "%v", err)
+			assert.Equal(t, engine.CloseError{Status: status, Message: "flush failed"}, *closeErr)
+			assert.True(t, inst.Broken(), "the instance is freed all the same")
 		})
 	}
 }
@@ -400,6 +434,13 @@ func TestCloseRunsPlgClose(t *testing.T) {
 
 	inst := mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
 	require.ErrorContains(t, inst.Close(t.Context()), "plg_close", "a healthy instance is closed through the guest")
+	assert.True(t, inst.Broken(), "a closed instance is never reused")
+
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	inst = mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
+	require.NoError(t, inst.Close(ended), "once its context has ended, closing frees without calling into the guest")
 	assert.True(t, inst.Broken(), "a closed instance is never reused")
 }
 

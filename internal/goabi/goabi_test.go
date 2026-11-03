@@ -144,6 +144,9 @@ func TestRenderDispatcherForTheTestContract(t *testing.T) {
 		"f = func(a0 p0.Context, a1 string) (string, error) { return v.Foo(a0, a1) }",
 		"var PlgCall_Boil func(p0.Context, p1.Celsius) (bool, float64, error)\n",
 		"var PlgCall_Fail func(p0.Context, string) error\n", // a single result is not parenthesized
+		"var PlgClose func() error\n",
+		"\tPlgClose = plgBindClose(v)\n", // PlgInit binds the instance's optional Close
+		"func plgBindClose(v p1.Fooer) func() error {",
 	} {
 		assert.Contains(t, string(src), want)
 	}

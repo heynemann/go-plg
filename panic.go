@@ -28,9 +28,11 @@ const (
 	PhaseHTTP Phase = "http"
 	// PhaseStorage is a [Storage] method (Name, List or Open).
 	PhaseStorage Phase = "storage"
-	// PhaseClose is an instance being closed.
+	// PhaseClose is an instance being closed, the plugin's optional Close included, or a plugin version that a
+	// reload replaced or removed being closed.
 	PhaseClose Phase = "close"
-	// PhasePoll is the background polling of a Register call's storages.
+	// PhasePoll is a reload of a Register call's plugins, polled ([WithPollInterval]) or asked for
+	// ([Container.Reload], [ReloadInterface]), outside its storage calls and plugin loads.
 	PhasePoll Phase = "poll"
 	// PhaseRefill is the background goroutine keeping a plugin's pool at its minimum.
 	PhaseRefill Phase = "refill"

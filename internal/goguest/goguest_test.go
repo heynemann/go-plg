@@ -2,6 +2,7 @@ package goguest_test
 
 import (
 	"bytes"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -442,6 +443,106 @@ func Create() (testcontract.Fooer, error) { return partial{}, nil }
 	assert.Equal(t, wire.StatusPanic, res.status, "the unimplemented method panics on the call, like Go")
 }
 
+// closerPlugin is a plugin whose instance has the given methods besides Fooer's (unimplemented: they panic).
+func closerPlugin(methods string) map[string]string {
+	return map[string]string{"p.go": `package p
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/heynemann/go-plg/internal/testcontract"
+)
+
+var _, _ = errors.New, fmt.Sprint
+
+type closer struct{ testcontract.Fooer }
+
+func Create() (testcontract.Fooer, error) { return &closer{}, nil }
+
+` + methods}
+}
+
+//nolint:paralleltest // interprets testcontract: serial, see above
+func TestCloseCallsThePluginsClose(t *testing.T) {
+	tests := []struct {
+		name    string
+		methods string
+		msg     string // of the close result
+		output  string // the plugin's output: whether its Close ran
+		status  wire.Status
+	}{
+		{
+			name:    "close with error result",
+			methods: `func (*closer) Close() error { fmt.Println("closed"); return nil }`,
+			output:  "closed\n",
+			status:  wire.StatusOK,
+		},
+		{
+			name:    "close without result",
+			methods: `func (closer) Close() { fmt.Println("closed") }`,
+			output:  "closed\n",
+			status:  wire.StatusOK,
+		},
+		{
+			name:    "failing close",
+			methods: `func (*closer) Close() error { fmt.Println("closed"); return errors.New("flush failed") }`,
+			msg:     "flush failed",
+			output:  "closed\n",
+			status:  wire.StatusError,
+		},
+		{
+			name:    "panicking close",
+			methods: `func (*closer) Close() error { fmt.Println("closed"); panic("close panicked") }`,
+			msg:     "close panicked",
+			output:  "closed\n",
+			status:  wire.StatusPanic,
+		},
+		{name: "no close", status: wire.StatusOK},
+		{
+			name:    "close with parameters",
+			methods: `func (*closer) Close(n int) error { fmt.Println("closed"); return nil }`,
+			status:  wire.StatusOK,
+		},
+		{
+			name:    "close with another result",
+			methods: `func (*closer) Close() int { fmt.Println("closed"); return 1 }`,
+			status:  wire.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			guest := goguest.New(&output, io.Discard, nil) // yaegi writes a panic's trace to stderr
+			res := parse(t, guest.Init(send(guest, initPayload(t, gopath(t, closerPlugin(tc.methods)), methodNames()))))
+			require.Equal(t, wire.StatusOK, res.status, res.msg)
+
+			res = parse(t, guest.Close())
+			assert.Equal(t, tc.status, res.status, res.msg)
+			assert.Contains(t, res.msg, tc.msg)
+			assert.Equal(t, tc.output, output.String(), "only a Close() error or Close() method is called")
+
+			res = parse(t, guest.Close())
+			assert.Equal(t, wire.StatusOK, res.status, "closing again does nothing")
+			assert.Equal(t, tc.output, output.String(), "only the first Close reaches the plugin")
+
+			res = parse(t, guest.Call(methodIndex(t, "Foo"), send(guest, encode(t, "x"))))
+			assert.Equal(t, wire.StatusABI, res.status, "a closed guest takes no calls")
+		})
+	}
+}
+
+//nolint:paralleltest // would interpret testcontract if Init ignored the Close: serial, see above
+func TestCloseBeforeALoadReachesNoPlugin(t *testing.T) {
+	guest := goguest.New(nil, nil, nil)
+	assert.Equal(t, wire.StatusOK, parse(t, guest.Close()).status, "there is no plugin to close")
+
+	res := parse(t, guest.Init(send(guest, initPayload(t, gopath(t, testdataPlugin(t, "fooer")), methodNames()))))
+	assert.Equal(t, wire.StatusABI, res.status, "a closed guest loads nothing")
+}
+
 //nolint:paralleltest // interprets testcontract: serial, see above
 func TestNetHTTPIsClientOnly(t *testing.T) {
 	for name, body := range map[string]string{
@@ -552,6 +653,8 @@ func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
 
 	const init = "func PlgInit() (string, error) { return \"\", nil }\n"
 
+	const foo = "func PlgCall_Foo(ctx context.Context, s string) (string, error) { return s, nil }\n"
+
 	tests := []struct {
 		name       string
 		dispatcher string
@@ -579,6 +682,8 @@ func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
 			header + init + "func PlgCall_Foo(ctx context.Context) (map[int]string, error) { return nil, nil }\n",
 			"result 0",
 		},
+		{"no close variable", header + init + foo, "PlgClose"},
+		{"close of another type", header + init + foo + "var PlgClose func() int\n", "want func() error"},
 	}
 
 	for _, tc := range tests {
