@@ -114,7 +114,7 @@ func (c *Client) answer(ctx context.Context, key string, done func(context.Conte
 // outcome classifies a request's failure: in transit (a timeout and a too large response included) or refused
 // by the policy.
 func outcome(err error) Outcome {
-	for _, failed := range []error{ErrFailed, ErrTimeout, ErrResponseTooLarge} {
+	for _, failed := range []error{ErrFailed, ErrTimeout, ErrResponseTooLarge, ErrUpgrade} {
 		if errors.Is(err, failed) {
 			return OutcomeFailed
 		}
@@ -143,6 +143,12 @@ func (c *Client) do(ctx context.Context, xch *exchange, dst, raw []byte, n int) 
 	defer resp.Body.Close() //nolint:errcheck // the body was read; a close error changes nothing
 
 	xch.status = resp.StatusCode
+
+	// A 101 hands the connection over: the request's timeout and cancellation no longer reach it, so a silent
+	// server would hold the call forever. The deferred Close closes the upgraded connection.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return dst, ErrUpgrade
+	}
 
 	out, err := httpabi.AppendBody(httpabi.AppendResponseHead(dst, resp.StatusCode, resp.Header), resp.Body,
 		c.policy.MaxResponseBytes)

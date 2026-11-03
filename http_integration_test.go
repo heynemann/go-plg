@@ -419,6 +419,84 @@ func httpEndsWithTheCall(t *testing.T, lang contractLanguage) {
 	})
 }
 
+// upgrading is a server answering every request with 101 Switching Protocols and then staying silent, holding
+// the connection until the client closes it; closed receives a value as each connection is closed.
+type upgrading struct {
+	*httptest.Server
+
+	closed chan struct{}
+}
+
+func upgradingServer(t *testing.T) *upgrading {
+	t.Helper()
+
+	srv := &upgrading{closed: make(chan struct{}, 16)}
+	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		defer conn.Close() //nolint:errcheck // the test only waits for the client to close it
+
+		_, err = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: silent\r\nConnection: Upgrade\r\n\r\n")
+		assert.NoError(t, err)
+		assert.NoError(t, buf.Flush())
+
+		_, err = io.Copy(io.Discard, conn)
+		assert.NoError(t, err, "the client closed the connection")
+
+		srv.closed <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+func TestPluginHTTPUpgradesAreRefused(t *testing.T) {
+	t.Parallel()
+
+	t.Run("blocking", func(t *testing.T) {
+		t.Parallel()
+
+		eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+			t.Helper()
+
+			srv := upgradingServer(t)
+			ctr := plg.New(plg.WithLogger(slog.New(slog.DiscardHandler)))
+			plug := fetcherIn(t, lang, ctr, "upgrade", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
+
+			_, err := plug.Foo(t.Context(), "GET "+srv.URL)
+			require.ErrorContains(t, err, httpcap.ErrUpgrade.Error())
+			require.NotErrorIs(t, err, plg.ErrCall, "a refused upgrade is a failed request, the instance lives on")
+			<-srv.closed // the upgraded connection was closed, not left to the server
+			require.NoError(t, ctr.Close(t.Context()))
+		})
+	})
+
+	t.Run("multiplexed", func(t *testing.T) {
+		t.Parallel()
+
+		eachScript(t, func(t *testing.T, lang contractLanguage) {
+			t.Helper()
+
+			srv := upgradingServer(t)
+			ctr := plg.New(plg.WithLogger(slog.New(slog.DiscardHandler)))
+			plug := muxFetcher(t, lang, ctr, "upgrade", srv.Server, 2)
+
+			first, second := callLater(t.Context(), plug, "GET "+srv.URL), callLater(t.Context(), plug, "GET "+srv.URL)
+			for _, done := range []<-chan callResult{first, second} {
+				res := <-done
+				require.ErrorContains(t, res.err, httpcap.ErrUpgrade.Error())
+				require.NotErrorIs(t, res.err, plg.ErrCall)
+				<-srv.closed
+			}
+
+			require.NoError(t, ctr.Close(t.Context()))
+		})
+	})
+}
+
 // benchTarget is the fetcher plugin allowed to reach a loopback server answering "ok", and the GET command for
 // that server.
 type benchTarget struct {

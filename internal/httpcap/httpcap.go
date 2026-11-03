@@ -57,6 +57,9 @@ var (
 	ErrScheme = errors.New("plg http: unsupported URL scheme")
 	// ErrMethod refuses the CONNECT method: plugins get requests, not tunnels.
 	ErrMethod = errors.New("plg http: method not allowed")
+	// ErrUpgrade fails a request answered with 101 Switching Protocols: plugins get responses, not upgraded
+	// connections (WebSocket, h2c), so the connection is closed at once.
+	ErrUpgrade = errors.New("plg http: protocol upgrade refused")
 	// ErrHostNotAllowed refuses a host and port not in AllowedHosts.
 	ErrHostNotAllowed = errors.New("plg http: host not allowed")
 	// ErrPrivateAddress refuses a connection to a private network address.

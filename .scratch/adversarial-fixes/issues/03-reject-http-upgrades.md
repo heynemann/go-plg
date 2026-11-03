@@ -8,9 +8,9 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests with a server that answers 101 and then stays silent, for a blocking Go plugin call and a multiplexed TS/Lua call reproduces the bug (fails on the current code) and passes with the fix
+- [x] Tests with a server that answers 101 and then stays silent, for a blocking Go plugin call and a multiplexed TS/Lua call reproduces the bug (fails on the current code) and passes with the fix
 The request fails promptly with a documented error; the call and `Container.Close` return; no goroutine leak (goleak)
 README HTTP section states upgrades are refused
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

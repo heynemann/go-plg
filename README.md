@@ -479,7 +479,9 @@ Go plugins use `net/http` (`http.Get`, `http.Client`, …), TypeScript plugins `
 wildcards, IPs, optional ports; http and https only), refuses private, loopback, link-local and metadata
 addresses after DNS resolution (`BlockPrivateNetworks`; set it to `new(false)` to reach them), never uses an
 environment proxy, bounds sizes and time (never past the call's `ctx`), and logs and counts each request with the
-plugin's key. Redirects are followed by the plugin's side, each hop checked like the first.
+plugin's key. Redirects are followed by the plugin's side, each hop checked like the first. Plugins get requests
+and responses, not tunnels or upgraded protocols: `CONNECT` is refused, and a `101 Switching Protocols` answer
+(WebSocket, h2c) fails the request with `plg http: protocol upgrade refused`, its connection closed at once.
 
 ### Many I/O-bound calls on one instance: `WithConcurrentCalls`
 
