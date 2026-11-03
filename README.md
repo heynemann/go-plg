@@ -493,8 +493,9 @@ Calls on one instance share it as concurrent requests share a Node.js process:
   at once with the same error as without `WithConcurrentCalls`, never copied into host memory.
 - They **do share the plugin's global state** (module-level variables in TypeScript, globals and upvalues in Lua,
   whatever `Create` built), which may change while a call waits, and the instance's memory limit.
-- Each call keeps its own `ctx`: one that ends while the call waits for a response fails alone with the
-  context's error; the instance serves on (the plugin sees the request fail and gets 250 ms to finish).
+- Each call keeps its own `ctx`: one that ends while the call waits for a response fails alone, at once (even
+  while another call's code runs on the instance), with the context's error; the instance serves on (the plugin
+  sees the request fail and gets 250 ms to finish).
 - A call that traps, runs out of memory, panics or is stopped while running discards the instance: it fails
   with a `PanicError`, every other call on that instance with `plg.ErrInstanceLost` (safe to retry).
 - Only HTTP requests let other calls run; a Host call, and a Lua request made where the call cannot yield (inside

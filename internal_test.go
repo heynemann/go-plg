@@ -2430,6 +2430,263 @@ func TestMuxAbandonsACallAtItsDeadline(t *testing.T) {
 	}
 }
 
+// TestMuxCallReturnsAtItsDeadlineWhileAnotherCallsStepRuns: a call waiting for its request returns at its
+// deadline even while the owner runs another call's step (here until the test ends it); that call and the
+// instance serve on, and the abandoned call's late answer reaches nobody.
+func TestMuxCallReturnsAtItsDeadlineWhileAnotherCallsStepRuns(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		guest, web := newScriptedGuest(), newFakeWeb()
+		instances := muxPool(t, guest, 2, web.serve, nil)
+		held := acquireN(t, instances, 2)
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+
+		late := callLane(ctx, held[0], "late")
+		step := guest.next()
+		abandoned := step.call
+		step.wait(1)
+
+		request := <-web.requests
+
+		busy := callLane(t.Context(), held[1], "busy")
+		running := guest.next() // the owner runs this step until the test ends it
+
+		deadline, _ := ctx.Deadline()
+		time.Sleep(time.Until(deadline))
+		synctest.Wait()
+
+		assert.Len(t, late, 1, "the call returned at its deadline, while the other call's step runs")
+		assert.True(t, time.Now().Equal(deadline), "no time passed meanwhile")
+
+		running.finish(running.call, "busy")
+
+		got := <-busy
+		require.NoError(t, got.err, "the other call goes on")
+		assert.Equal(t, "busy", string(got.res.Body))
+		assert.Equal(t, running.call, <-guest.ended)
+
+		got = <-late
+		require.ErrorIs(t, got.err, context.DeadlineExceeded)
+		require.ErrorContains(t, got.err, "abandoned while waiting for its HTTP requests")
+
+		lost, ok := errors.AsType[*muxError](got.err)
+		require.True(t, ok)
+		assert.False(t, lost.discard, "the instance serves on")
+		<-request.done // its request ends with it
+
+		// The failed request still reaches the guest, which runs the rest of the call on borrowed time; its
+		// answer is discarded.
+		step = guest.next()
+		assert.Equal(t, []any{uint32(1), "ended"}, []any{step.request, string(step.args)})
+		assert.WithinDuration(t, time.Now().Add(muxGrace), step.deadline, 0)
+		step.finish(abandoned, "nobody reads this")
+		assert.Equal(t, abandoned, <-guest.ended)
+
+		for _, lane := range held {
+			next := callLane(t.Context(), lane, "next")
+
+			step = guest.next()
+			step.finish(step.call, string(step.args))
+
+			got = <-next
+			require.NoError(t, got.err)
+			assert.Equal(t, "next", string(got.res.Body), "an abandoned call's result reaches nobody")
+			assert.False(t, lane.inst.Broken())
+			instances.release(t.Context(), lane)
+		}
+
+		assert.Empty(t, instances.panics.history.recent())
+	})
+}
+
+// ownStep is a call whose context ended during a step of its own, as TestMuxCallWaitsForItsOwnStepAtItsDeadline
+// plays it.
+type ownStep struct {
+	instances *pool
+	guest     *scriptedGuest
+	web       *fakeWeb
+	call      uint32
+}
+
+// TestMuxCallWaitsForItsOwnStepAtItsDeadline: a call whose context ends during a step of its own waits for that
+// step, which the context stops: it gets the step's failure, as it would alone; or, when the step ends with the
+// call waiting for a request, it is abandoned right after the step.
+func TestMuxCallWaitsForItsOwnStepAtItsDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		reply func(s *guestStep) stepReply
+		check func(t *testing.T, own *ownStep, got laneResult)
+		name  string
+	}{
+		{
+			name:  "stopped",
+			reply: func(*guestStep) stepReply { return stepReply{err: errFake} },
+			check: func(t *testing.T, own *ownStep, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, errFake)
+				require.NotErrorAs(t, got.err, new(*muxError), "the step's own failure")
+				assert.Empty(t, own.instances.panics.history.recent(), "its caller reports it")
+			},
+		},
+		{
+			name: "waiting",
+			reply: func(s *guestStep) stepReply {
+				return stepReply{step: engine.Step{Requests: []engine.Request{{Call: s.call, ID: 1, N: 1}}}}
+			},
+			check: func(t *testing.T, own *ownStep, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, errLate)
+				require.ErrorContains(t, got.err, "abandoned while waiting for its HTTP requests")
+
+				lost, ok := errors.AsType[*muxError](got.err)
+				require.True(t, ok)
+				assert.False(t, lost.discard, "the instance serves on")
+				<-(<-own.web.requests).done // its request ends with it
+
+				step := own.guest.next()
+				assert.WithinDuration(t, time.Now().Add(muxGrace), step.deadline, 0, "on borrowed time")
+				step.finish(own.call, "nobody reads this")
+				assert.Equal(t, own.call, <-own.guest.ended)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				own := &ownStep{guest: newScriptedGuest(), web: newFakeWeb()}
+				own.instances = muxPool(t, own.guest, 2, own.web.serve, nil)
+				held := acquireN(t, own.instances, 1)
+
+				ctx, cancel := context.WithCancelCause(t.Context())
+				result := callLane(ctx, held[0], "own")
+				step := own.guest.next()
+				own.call = step.call
+
+				cancel(errLate)
+				synctest.Wait()
+				assert.Empty(t, result, "the call waits for its own step")
+
+				step.reply <- tc.reply(step)
+
+				tc.check(t, own, <-result)
+
+				if held[0].inst.Broken() {
+					own.instances.discard(t.Context(), held[0])
+				} else {
+					own.instances.release(t.Context(), held[0])
+				}
+			})
+		})
+	}
+}
+
+// leftFirst is a context the test ends, whose end never reaches the contexts derived from it (it hands them an
+// AfterFunc it never runs): its caller sees it end while the call's own context, derived from it, has not.
+type leftFirst chan struct{}
+
+func (leftFirst) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c leftFirst) Done() <-chan struct{} { return c }
+
+func (c leftFirst) Err() error {
+	select {
+	case <-c:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (leftFirst) Value(any) any { return nil }
+
+func (leftFirst) AfterFunc(func()) func() bool { return func() bool { return true } }
+
+// TestMuxAbandonsACallWhoseCallerLeftFirst: a caller can see its context end, and leave, before that end reaches
+// its call's context; the call's next step still runs on borrowed time, not under a context about to end, which
+// would stop the whole instance.
+func TestMuxAbandonsACallWhoseCallerLeftFirst(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		guest, web := newScriptedGuest(), newFakeWeb()
+		instances := muxPool(t, guest, 2, web.serve, nil)
+		held := acquireN(t, instances, 1)
+
+		ctx := make(leftFirst)
+		late := callLane(ctx, held[0], "late")
+
+		step := guest.next()
+		abandoned := step.call
+		step.wait(1)
+
+		request := <-web.requests
+
+		synctest.Wait() // the owner is done with the step: the call waits for its request
+		close(ctx)
+		require.ErrorIs(t, (<-late).err, context.DeadlineExceeded)
+
+		request.answer <- "ok" // the call's own context lives on, and its request with it
+
+		step = guest.next()
+		assert.Equal(t, "ok", string(step.args))
+		assert.WithinDuration(t, time.Now().Add(muxGrace), step.deadline, 0, "on borrowed time")
+		step.finish(abandoned, "nobody reads this")
+		assert.Equal(t, abandoned, <-guest.ended)
+		assert.False(t, held[0].inst.Broken())
+		instances.release(t.Context(), held[0])
+	})
+}
+
+// TestMuxReportsTheFailureOfACallWhoseCallerLeft: a call whose caller left at its deadline, then failed by
+// another call's step, is reported by the mux, since no caller will. (The bubble turns a caller that cannot leave
+// while the other step runs into a deadlock failure instead of a hang.)
+func TestMuxReportsTheFailureOfACallWhoseCallerLeft(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		guest, web := newScriptedGuest(), newFakeWeb()
+		guest.output = "trace"
+		instances := muxPool(t, guest, 2, web.serve, nil)
+		held := acquireN(t, instances, 2)
+
+		ctx, cancel := context.WithCancelCause(t.Context())
+		late := callLane(ctx, held[0], "late")
+
+		step := guest.next()
+		left := step.call
+		step.wait(1)
+
+		<-web.requests
+
+		busy := callLane(t.Context(), held[1], "busy")
+		running := guest.next()
+
+		cancel(errLate)
+		require.ErrorIs(t, (<-late).err, errLate, "the caller leaves while the other call's step runs")
+
+		failure := engine.Result{Status: wire.StatusPanic, Message: "boom"}
+		running.reply <- stepReply{step: engine.Step{Done: []engine.Completion{{Call: left, Result: failure}}}}
+
+		require.ErrorIs(t, (<-busy).err, ErrInstanceLost)
+
+		panics := instances.panics.history.recent()
+		require.Len(t, panics, 1)
+		assert.Equal(t, []any{PhaseCall, "boom", "trace"}, []any{panics[0].Phase, panics[0].Value, panics[0].Guest})
+
+		for _, lane := range held {
+			assert.True(t, lane.inst.Broken())
+			instances.discard(t.Context(), lane)
+		}
+	})
+}
+
 func TestMuxFailingStepFailsEveryCallOnTheInstance(t *testing.T) {
 	t.Parallel()
 

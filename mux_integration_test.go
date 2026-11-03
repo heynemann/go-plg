@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -203,6 +204,93 @@ func TestConcurrentCallsKeepTheirOwnDeadlines(t *testing.T) {
 		got = <-callLater(t.Context(), plug, "GET "+srv.URL)
 		require.NoError(t, got.err)
 		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "deadline/fetch"), "the same instance")
+	})
+}
+
+// holdingLogger holds every "hold" line a plugin prints until release is closed (or safety ends), so a step
+// printing it runs on its instance until then; held receives a value as each one arrives.
+type holdingLogger struct {
+	held    chan struct{}
+	release chan struct{}
+	safety  <-chan struct{}
+}
+
+func (*holdingLogger) Enabled(context.Context, slog.Level) bool { return true }
+
+//nolint:gocritic // hugeParam: slog.Handler fixes the signature
+func (h *holdingLogger) Handle(_ context.Context, rec slog.Record) error {
+	rec.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "line" || attr.Value.String() != "hold" {
+			return true
+		}
+
+		h.held <- struct{}{}
+
+		select {
+		case <-h.release:
+		case <-h.safety:
+		}
+
+		return false
+	})
+
+	return nil
+}
+
+func (h *holdingLogger) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *holdingLogger) WithGroup(string) slog.Handler { return h }
+
+// TestAMultiplexedCallReturnsAtItsDeadlineWhileAnotherCallRuns: a call waiting for its request returns at its
+// deadline even while another call's step runs on the instance (held printing); that call and the instance serve
+// on, and the abandoned call's late answer reaches nobody.
+func TestAMultiplexedCallReturnsAtItsDeadlineWhileAnotherCallRuns(t *testing.T) {
+	t.Parallel()
+
+	eachScript(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		// The step is held until the test releases it or a safety deadline ends: a call that cannot return before
+		// that step ends then fails the test instead of hanging it.
+		safety, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+
+		logs := &holdingLogger{held: make(chan struct{}, 1), release: make(chan struct{}), safety: safety.Done()}
+		srv := newGateServer(t)
+		ctr := newContainer(t, plg.WithLogger(slog.New(logs)))
+		plug := muxFetcher(t, lang, ctr, "busy", srv.Server, 4)
+
+		ctx := make(expiring)
+		late := callLater(ctx, plug, "GET "+srv.URL)
+		<-srv.started
+
+		busy := callLater(t.Context(), plug, "PRINT hold")
+
+		<-logs.held // its step runs, held printing
+
+		close(ctx) // the first call's deadline passes while the other call's step runs
+
+		got := <-late
+
+		require.NoError(t, safety.Err(), "the call returned while the other call's step ran")
+		require.ErrorIs(t, got.err, context.DeadlineExceeded)
+		require.ErrorContains(t, got.err, "abandoned while waiting for its HTTP requests")
+		assert.NotErrorAs(t, got.err, new(*plg.PanicError), "the instance did not fail")
+		<-srv.abandoned // its request ended with it
+
+		close(logs.release)
+
+		got = <-busy
+		require.NoError(t, got.err, "the other call goes on")
+		assert.Equal(t, "printed", got.out)
+
+		close(srv.release)
+
+		got = <-callLater(t.Context(), plug, "GET "+srv.URL)
+		require.NoError(t, got.err)
+		assert.Equal(t, "200||ok", got.out)
+		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "busy/fetch"), "the same instance")
+		assert.Empty(t, ctr.RecentPanics(), "the late answer reached nobody")
 	})
 }
 

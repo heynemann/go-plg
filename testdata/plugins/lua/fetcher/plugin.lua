@@ -9,6 +9,7 @@
 --   LOOP -                loops forever
 --   HOG -                 allocates until it runs out of memory
 --   YIELD -               yields from the method itself
+--   PRINT <text>          prints text on stdout, then returns "printed"
 --
 -- and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
 -- distinct sorted reasons of the failed requests, joined by ;>".
@@ -93,6 +94,9 @@ function Fetcher:Foo(cmd)
     end
   elseif verb == "YIELD" then
     coroutine.yield()
+  elseif verb == "PRINT" then
+    print(args[2])
+    return "printed"
   end
   return nil, "unknown command " .. verb
 end

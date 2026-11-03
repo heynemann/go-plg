@@ -6,10 +6,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test (call A with a short deadline waiting on HTTP while call B's step spins) reproduces the bug (fails on the current code) and passes with the fix
-- [ ] Call A returns within a small bound of its deadline with its ctx error; call B and the instance are unaffected
-- [ ] Late answers for a departed call are discarded without leaks (goleak) or panics
-- [ ] The mux unit and integration tests pass 5× under `-race`
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test (call A with a short deadline waiting on HTTP while call B's step spins) reproduces the bug (fails on the current code) and passes with the fix
+- [x] Call A returns within a small bound of its deadline with its ctx error; call B and the instance are unaffected
+- [x] Late answers for a departed call are discarded without leaks (goleak) or panics
+- [x] The mux unit and integration tests pass 5× under `-race`
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -9,6 +9,7 @@
 //   LOOP -                loops forever
 //   HOG -                 allocates until it runs out of memory
 //   HANG -                awaits a promise nothing settles
+//   PRINT <text>          prints text on stdout, then returns "printed"
 //
 // and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
 // distinct sorted reasons of the failed requests, joined by ;>".
@@ -78,6 +79,9 @@ export function Create() {
         }
         case "HANG":
           return new Promise<string>(() => {});
+        case "PRINT":
+          console.log(args[1]);
+          return "printed";
         default:
           throw new Error("unknown command " + args[0]);
       }

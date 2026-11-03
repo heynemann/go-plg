@@ -56,9 +56,11 @@ func (e *muxError) Unwrap() error { return e.err }
 // One goroutine, the owner (run), drives the instance: callers and request goroutines send it operations (ops),
 // which it runs one at a time, so the instance and every callState are only ever touched by it. Callers take a
 // lane each from the pool; a lane is an [instance] whose Call hands the call to the owner and waits for its
-// answer, so every call has its own argument and result buffers. A step that traps, is stopped, panics or breaks
-// the ABI fails its own call with a [PanicError] and every other call on the instance with [ErrInstanceLost];
-// the instance is then broken, and its lanes are discarded.
+// answer in a mailbox, so every call has its own argument and result buffers. A caller whose context ends while
+// its call waits leaves at once, even while the owner runs another call's step: the owner then answers that
+// mailbox to nobody (see callWaiting). A step that traps, is stopped, panics or breaks the ABI fails its own call
+// with a [PanicError] and every other call on the instance with [ErrInstanceLost]; the instance is then broken,
+// and its lanes are discarded.
 type muxInstance struct {
 	inst       stepper // owned by run, then by the Close of the last lane
 	pool       *pool
@@ -91,27 +93,48 @@ type callState struct {
 	// exactly while the call is in flight, as an http.Request carries its own.
 	ctx      context.Context //nolint:containedctx // the context of one call in flight, see above
 	cancel   context.CancelFunc
-	mailbox  *muxCall // the waiting caller; nil once answered
+	mailbox  *muxCall // the call's mailbox; nil once answered
 	pending  int      // HTTP requests not answered yet
 	id       uint32
 	finished bool // the guest ended the call
 }
 
-// muxCall is a lane's mailbox: the caller fills it, the owner answers it once per call and signals done.
+// The stages of a muxCall: the handshake between its caller, who alone leaves, and the owner, who alone steps,
+// rests and answers. While the call waits (for the owner to start it, for its HTTP requests, or for the owner,
+// busy with another call's step), a caller whose context ends leaves at once; during a step of the call's own,
+// which runs under that context, it waits for the step's outcome instead: the context stops the step.
+const (
+	callQueued   uint32 = iota // handed to the owner, not started yet
+	callWaiting                // started; the owner runs no step of its own
+	callStepping               // a step runs under the call's own context
+	callLeaving                // that context ended during the step: the caller waits for the answer
+	callAnswered               // the owner answered: the caller takes the answer
+	callLeft                   // the caller left: the owner answers to nobody
+)
+
+// muxCall is a call's mailbox: the caller fills it, the owner answers it once and signals done. A lane reuses its
+// mailbox from call to call, except when its caller left before the answer: the owner keeps that one, to answer
+// it to nobody, and the lane takes a new one.
 type muxCall struct {
 	err    error
+	cause  error      // why the caller left, or is leaving: its context's cause
 	state  *callState // owner-only: the call in flight, nil once answered
 	done   chan struct{}
 	guest  string // what the guest wrote to stderr during a failed step
 	body   []byte // the result's body, copied out of guest memory
 	result engine.Result
+	stage  atomic.Uint32 // callQueued, …
 }
 
 // muxLane is one of the calls a multiplexed instance serves at once, as the pool hands it out.
 type muxLane struct {
 	m       *muxInstance
-	mailbox muxCall
+	mailbox *muxCall
 	primary bool // reports the instance's memory; the other lanes report none
+}
+
+func newMuxCall() *muxCall {
+	return &muxCall{done: make(chan struct{}, 1)}
 }
 
 // newMux starts the owner of inst and returns its lanes. The pool owns the lanes; the owner stops when the
@@ -133,7 +156,7 @@ func newMux(p *pool, inst stepper, lanes int) []*muxLane {
 
 	out := make([]*muxLane, lanes)
 	for i := range out {
-		out[i] = &muxLane{m: mux, primary: i == 0, mailbox: muxCall{done: make(chan struct{}, 1)}}
+		out[i] = &muxLane{m: mux, primary: i == 0, mailbox: newMuxCall()}
 	}
 
 	go mux.run()
@@ -199,12 +222,11 @@ func (m *muxInstance) do(operation func()) {
 	operation()
 }
 
-// start starts a call, answering it at once when the call's context has ended or the instance is broken.
+// start starts a call, answering it at once when the call's context has ended (its caller may have left
+// already) or the instance is broken.
 func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32, args []byte) {
-	if ctx.Err() != nil {
-		mailbox.answer(engine.Result{}, &muxError{
-			err: fmt.Errorf("waiting for its instance: %w", context.Cause(ctx)),
-		})
+	if ctx.Err() != nil || !mailbox.begin(callQueued) {
+		mailbox.answer(engine.Result{}, unstarted(context.Cause(ctx)), "")
 
 		return
 	}
@@ -212,7 +234,7 @@ func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32
 	if m.broken.Load() {
 		mailbox.answer(engine.Result{}, &muxError{
 			err: fmt.Errorf("%w: %w", ErrInstanceLost, errMuxDiscarded), discard: true,
-		})
+		}, "")
 
 		return
 	}
@@ -229,25 +251,30 @@ func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32
 
 	step, err := m.inst.Start(callCtx, state.id, method, args)
 	m.after(state, &step, err) //nolint:contextcheck // requests run under their own call's context
+	m.settle(state)
 }
 
-// abandon answers a call whose caller's context ended (with cause) while it waited, and ends its requests; the
-// guest then runs the rest of the call (with the failed requests) under muxGrace per step.
-func (*muxInstance) abandon(mailbox *muxCall, cause error) {
-	state := mailbox.state
-	if state == nil { // answered meanwhile
-		return
-	}
-
+// abandon answers a call whose caller's context ended with cause while the call waited (or ran a step of its
+// own), and ends its requests; a caller that left already gets nothing. The guest then runs the rest of the call
+// (with the failed requests) under muxGrace per step.
+func (*muxInstance) abandon(state *callState, cause error) {
 	state.cancel()
-	mailbox.answer(engine.Result{}, &muxError{
-		err: fmt.Errorf("abandoned while waiting for its HTTP requests: %w", cause),
-	})
+	state.mailbox.answer(engine.Result{}, abandoned(cause), "")
 }
 
-// resume delivers a request's answer to the guest. When the call's context has ended meanwhile, its caller is
-// abandoning it (or will find it answered): it is answered now, so that the step does not run under an ended
-// context, which would stop the whole instance.
+// abandoned is the error of a call whose context ended with cause while it waited for its HTTP requests.
+func abandoned(cause error) *muxError {
+	return &muxError{err: fmt.Errorf("abandoned while waiting for its HTTP requests: %w", cause)}
+}
+
+// unstarted is the error of a call whose context ended with cause before its instance started it.
+func unstarted(cause error) *muxError {
+	return &muxError{err: fmt.Errorf("waiting for its instance: %w", cause)}
+}
+
+// resume delivers a request's answer to the guest. When the call's context has ended meanwhile (its caller left,
+// or will find it answered), it is abandoned now, so that the step does not run under an ended context, which
+// would stop the whole instance.
 func (m *muxInstance) resume(state *callState, request uint32, answer []byte) {
 	state.pending--
 
@@ -257,8 +284,15 @@ func (m *muxInstance) resume(state *callState, request uint32, answer []byte) {
 		return
 	}
 
-	if mailbox := state.mailbox; mailbox != nil && state.ctx.Err() != nil {
-		m.abandon(mailbox, context.Cause(state.ctx))
+	if mailbox := state.mailbox; mailbox != nil {
+		switch {
+		case state.ctx.Err() != nil:
+			m.abandon(state, context.Cause(state.ctx))
+		case !mailbox.begin(callWaiting):
+			m.abandon(state, mailbox.cause) // its caller left before its context's end reached the call's
+		default:
+			// The step runs under the call's context, its caller waiting.
+		}
 	}
 
 	ctx := state.ctx
@@ -271,6 +305,15 @@ func (m *muxInstance) resume(state *callState, request uint32, answer []byte) {
 
 	step, err := m.inst.Resume(ctx, request, answer)
 	m.after(state, &step, err)
+	m.settle(state)
+}
+
+// settle hands a call back to waiting after a step of its own, under its context, that did not answer it; when
+// that context ended meanwhile, its caller waiting for the step's outcome (see callLeaving), it abandons the call.
+func (m *muxInstance) settle(state *callState) {
+	if mailbox := state.mailbox; mailbox != nil && !mailbox.rest() {
+		m.abandon(state, mailbox.cause)
+	}
 }
 
 // after handles a step run for the call culprit: it starts the requests the step started and answers the calls
@@ -367,17 +410,12 @@ func (m *muxInstance) roundTrip(ctx context.Context, req []byte, n int) []byte {
 	return m.pool.http(ctx, nil, req, n)
 }
 
-// finish answers a call the guest ended, copying its result out of guest memory.
+// finish answers a call the guest ended.
 func (m *muxInstance) finish(state *callState, res engine.Result) {
 	state.finished = true
 
 	if mailbox := state.mailbox; mailbox != nil {
-		if res.Status == wire.StatusOK {
-			mailbox.body = append(mailbox.body[:0], res.Body...)
-			res.Body = mailbox.body
-		}
-
-		mailbox.answer(res, nil)
+		mailbox.answer(res, nil, "")
 	}
 
 	m.forget(state)
@@ -400,7 +438,8 @@ func (m *muxInstance) forget(state *callState) {
 
 // fail breaks the instance: culprit, the call whose step failed (nil when no call is to blame), gets res and
 // err, and every other call in flight [ErrInstanceLost]. Their requests end; the refusals waiting are dropped. A
-// culprit nobody waits for any more (abandoned at its deadline) is reported here, since no caller will.
+// culprit nobody waits for any more (abandoned at its deadline, or its caller left) is reported here, since no
+// caller will.
 func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	m.broken.Store(true)
 
@@ -412,7 +451,7 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 
 	guest := m.inst.Guest()
 
-	if culprit != nil && culprit.mailbox == nil {
+	if culprit != nil && (culprit.mailbox == nil || !culprit.mailbox.answer(res, err, guest)) {
 		m.pool.panics.report(culprit.ctx, &PanicError{
 			Key: m.pool.key, Language: m.pool.lang, Phase: PhaseCall, Value: cause, Guest: guest,
 		})
@@ -421,21 +460,11 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	for _, state := range m.flight {
 		state.cancel()
 
-		mailbox := state.mailbox
-		if mailbox == nil {
-			continue
+		if mailbox := state.mailbox; mailbox != nil {
+			mailbox.answer(engine.Result{}, &muxError{
+				err: fmt.Errorf("%w: another call on its instance failed: %v", ErrInstanceLost, cause), discard: true,
+			}, "")
 		}
-
-		if state == culprit {
-			mailbox.guest = guest
-			mailbox.answer(res, err)
-
-			continue
-		}
-
-		mailbox.answer(engine.Result{}, &muxError{
-			err: fmt.Errorf("%w: another call on its instance failed: %v", ErrInstanceLost, cause), discard: true,
-		})
 	}
 
 	clear(m.flight)
@@ -443,37 +472,92 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	m.refused = nil
 }
 
-// answer answers the call and signals its caller.
-func (c *muxCall) answer(res engine.Result, err error) {
+// begin is the owner's side of a step of the call's own starting, under its context, the call waiting at stage
+// from (callQueued for its first step); false when its caller left.
+func (c *muxCall) begin(from uint32) bool {
+	return c.stage.CompareAndSwap(from, callStepping)
+}
+
+// rest is the owner's side of a step of the call's own ending without answering it; false when the call's
+// context ended meanwhile, its caller waiting for the answer.
+func (c *muxCall) rest() bool {
+	return c.stage.CompareAndSwap(callStepping, callWaiting)
+}
+
+// answer answers the call with res (its body copied out of guest memory), err and guest, what the guest wrote to
+// stderr during the step that failed it, and signals its caller. It reports false, answering nobody, when the
+// caller left.
+func (c *muxCall) answer(res engine.Result, err error, guest string) bool {
 	if c.state != nil {
 		c.state.mailbox = nil
 		c.state = nil
 	}
 
-	c.result, c.err = res, err
+	if c.stage.Swap(callAnswered) == callLeft {
+		return false
+	}
+
+	if res.Status == wire.StatusOK {
+		c.body = append(c.body[:0], res.Body...)
+		res.Body = c.body
+	}
+
+	c.result, c.err, c.guest = res, err, guest
 	c.done <- struct{}{}
+
+	return true
 }
 
-// Call hands the call to the owner and waits for its answer. When ctx ends first, the call is abandoned: it
-// fails with ctx's cause, and the instance serves on.
+// leave is the caller's side of its context ending with cause. When the call waits, the caller leaves at once (the
+// owner answering to nobody), and leave returns the error the call fails with; it returns nil when the caller
+// must take the answer, sent or about to be (the call's own step, which the context stops, is running).
+func (c *muxCall) leave(cause error) error {
+	c.cause = cause // read by the owner once it sees the call left or leaving
+
+	for {
+		switch stage := c.stage.Load(); stage {
+		case callAnswered:
+			return nil
+		case callStepping:
+			if c.stage.CompareAndSwap(callStepping, callLeaving) {
+				return nil
+			}
+		case callQueued:
+			if c.stage.CompareAndSwap(callQueued, callLeft) {
+				return unstarted(cause)
+			}
+		default:
+			if c.stage.CompareAndSwap(callWaiting, callLeft) { // the caller sees no other stage
+				return abandoned(cause)
+			}
+		}
+	}
+}
+
+// Call hands the call to the owner and waits for its answer. When ctx ends first, the call is abandoned: it fails
+// with ctx's cause, at once (or once a step of its own, which ctx stops, ends), and the instance serves on.
 func (l *muxLane) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {
-	owner, mailbox := l.m, &l.mailbox
+	owner, mailbox := l.m, l.mailbox
 	mailbox.guest = ""
+	mailbox.stage.Store(callQueued)
 
 	select {
 	case owner.ops <- func() { owner.start(ctx, mailbox, method, args) }:
 	case <-ctx.Done():
-		return engine.Result{}, &muxError{err: fmt.Errorf("waiting for its instance: %w", context.Cause(ctx))}
+		return engine.Result{}, unstarted(context.Cause(ctx))
 	}
 
 	select {
 	case <-mailbox.done:
 	case <-ctx.Done():
-		select {
-		case owner.ops <- func() { owner.abandon(mailbox, context.Cause(ctx)) }:
-			<-mailbox.done
-		case <-mailbox.done:
+		err := mailbox.leave(context.Cause(ctx))
+		if err != nil {
+			l.mailbox = newMuxCall() // the owner keeps this one, to answer it to nobody
+
+			return engine.Result{}, err
 		}
+
+		<-mailbox.done
 	}
 
 	return mailbox.result, mailbox.err
