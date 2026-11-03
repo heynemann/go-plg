@@ -59,10 +59,10 @@ func TestFSStorageListsPluginDirectories(t *testing.T) {
 	descs, err := store.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, descs, 3, "README.md is not a plugin directory")
-	assert.Regexp(t, isContentHash, descs[0].Version, "multifile has no version: its content hash stands in")
 
+	// multifile has no version: Register hashes the files it loads (TestRegisterHashesVersionlessPlugins).
 	want := []plg.Descriptor{
-		{Key: "multifile", Language: plg.LanguageGo, Entrypoint: ".", Version: descs[0].Version, MemoryLimit: 64 << 20},
+		{Key: "multifile", Language: plg.LanguageGo, Entrypoint: ".", MemoryLimit: 64 << 20},
 		{Key: "scripted", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "0.1.0"},
 		{Key: "single", Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "1.2.3"},
 	}
@@ -70,7 +70,7 @@ func TestFSStorageListsPluginDirectories(t *testing.T) {
 
 	embedded, err := embeddedStorage(t, "embed", "disk").List(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, want, embedded, "an embed.FS of the same tree lists the same plugins and content hash")
+	assert.Equal(t, want, embedded, "an embed.FS of the same tree lists the same plugins")
 
 	files, err := store.Open(t.Context(), descs[2])
 	require.NoError(t, err)
@@ -146,7 +146,7 @@ func TestFSStorageParsesManifests(t *testing.T) {
 	}
 }
 
-func TestParseManifestLeavesAMissingVersionToTheStorage(t *testing.T) {
+func TestParseManifestLeavesAMissingVersionToRegister(t *testing.T) {
 	t.Parallel()
 
 	manifest := `{"language":"go","entrypoint":"."}`
@@ -157,8 +157,8 @@ func TestParseManifestLeavesAMissingVersionToTheStorage(t *testing.T) {
 
 	descs, err := manifestStorage(manifest).List(t.Context())
 	require.NoError(t, err)
-	require.Len(t, descs, 1)
-	assert.Regexp(t, isContentHash, descs[0].Version, "FSStorage hashes the directory instead")
+	assert.Equal(t, []plg.Descriptor{{Key: "p", Language: plg.LanguageGo, Entrypoint: "."}}, descs,
+		"FSStorage leaves it to Register too, which hashes the files it loads")
 }
 
 func TestFSStorageRejectsMalformedManifests(t *testing.T) {
@@ -231,10 +231,15 @@ func TestFSStorageRequiresAManifestPerPluginDirectory(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
-func TestFSStorageListErrors(t *testing.T) {
+func TestFSStorageListAndOpenErrors(t *testing.T) {
 	t.Parallel()
 
-	_, err := plg.NewFSStorage(filepath.Join(t.TempDir(), "missing")).List(t.Context())
+	missing := plg.NewFSStorage(filepath.Join(t.TempDir(), "missing"))
+
+	_, err := missing.List(t.Context())
+	require.ErrorIs(t, err, fs.ErrNotExist)
+
+	_, err = missing.Open(t.Context(), plg.Descriptor{Key: "p"})
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -243,7 +248,7 @@ func TestFSStorageListErrors(t *testing.T) {
 	_, err = manifestStorage(`{"language":"go","entrypoint":"."}`).List(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 
-	// Hashing a version-less plugin reads every file and directory below it.
+	// Opening a plugin copies every file and directory below it; listing reads only the manifests.
 	files := fstest.MapFS{
 		"p/plugin.json": {Data: []byte(`{"language":"go","entrypoint":"."}`)},
 		"p/plugin.go":   {Data: []byte("package p\n")},
@@ -258,7 +263,13 @@ func TestFSStorageListErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := plg.NewFSStorageFromFS("broken", broken).List(t.Context())
+			store := plg.NewFSStorageFromFS("broken", broken)
+
+			descs, err := store.List(t.Context())
+			require.NoError(t, err)
+			require.Len(t, descs, 1)
+
+			_, err = store.Open(t.Context(), descs[0])
 			require.ErrorIs(t, err, errStorage)
 			require.ErrorContains(t, err, "plugin directory p")
 		})
@@ -323,16 +334,22 @@ func TestFSStorageOpen(t *testing.T) {
 	})
 }
 
-// versionOf returns the version an FS storage lists for the single plugin directory of files.
+// versionOf returns the version Register gives the single, version-less plugin directory of files.
 func versionOf(t *testing.T, files fs.FS) string {
 	t.Helper()
 
-	descs, err := plg.NewFSStorageFromFS("v", files).List(t.Context())
+	store := plg.NewFSStorageFromFS("v", files)
+
+	descs, err := store.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, descs, 1)
-	require.Regexp(t, isContentHash, descs[0].Version)
+	require.Empty(t, descs[0].Version)
 
-	return descs[0].Version
+	version, err := plg.LoadedVersion(t.Context(), store, descs[0])
+	require.NoError(t, err)
+	require.Regexp(t, isContentHash, version)
+
+	return version
 }
 
 func TestFSStorageVersionFallsBackToAStableContentHash(t *testing.T) {
@@ -600,8 +617,8 @@ func FuzzFSStorageManifest(f *testing.F) {
 		assert.True(t, desc.Entrypoint != "" && fs.ValidPath(desc.Entrypoint), "entrypoint %q", desc.Entrypoint)
 		assert.LessOrEqual(t, desc.MemoryLimit, uint64(4<<30))
 
-		// Re-encoding with the version made explicit gives the same plugin: an empty version would be hashed
-		// again (over other files) and differ.
+		// Re-encoding the descriptor's fields gives the same plugin (an empty version stays empty: Register
+		// hashes the files it loads).
 		fields := map[string]any{"language": desc.Language, "entrypoint": desc.Entrypoint, "version": desc.Version}
 		if desc.MemoryLimit != 0 {
 			fields["memoryLimit"] = desc.MemoryLimit
@@ -616,8 +633,7 @@ func FuzzFSStorageManifest(f *testing.F) {
 	})
 }
 
-// BenchmarkFSStorageList measures what Register pays per FS storage before loading: reading every plugin.json
-// and hashing the version-less plugin.
+// BenchmarkFSStorageList measures what Register pays per FS storage before loading: reading every plugin.json.
 func BenchmarkFSStorageList(b *testing.B) {
 	sub, err := fs.Sub(storagesFS, "testdata/storages/disk")
 	require.NoError(b, err)

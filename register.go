@@ -441,18 +441,24 @@ func (c *Container) loadStep(ctx context.Context, key string, src *source, step 
 	return step()
 }
 
-// open opens a listed plugin's files and resolves its version: a content hash of the files when the storage
-// gives none.
+// open opens a listed plugin's files, copies them into the snapshot it returns (see [Storage]) and resolves its
+// version: a content hash of the snapshot when the storage gives none. Hashing, bundling and loading all read
+// that one snapshot.
 func (c *Container) open(ctx context.Context, key string, src *source) (fs.FS, error) {
-	var files fs.FS
+	var opened fs.FS
 
 	err := c.storageCall(ctx, key, "Open", func() error {
 		var openErr error
 
-		files, openErr = src.storage.Open(ctx, src.desc)
+		opened, openErr = src.storage.Open(ctx, src.desc)
 
 		return openErr //nolint:wrapcheck // wrapped below
 	})
+	if err != nil {
+		return nil, fmt.Errorf("opening: %w", err)
+	}
+
+	files, err := snapshotFiles(opened)
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
 	}

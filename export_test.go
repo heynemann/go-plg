@@ -97,6 +97,22 @@ func Version(c *Container, key string) string {
 	return c.catalogue.Load().plugins[key].desc.Version
 }
 
+// LoadedVersion opens the plugin desc of store and returns the version Register gives it when desc has none:
+// the content hash of the snapshot it loads.
+func LoadedVersion(ctx context.Context, store Storage, desc Descriptor) (string, error) {
+	files, err := store.Open(ctx, desc)
+	if err != nil {
+		return "", fmt.Errorf("opening: %w", err)
+	}
+
+	frozen, err := snapshotFiles(files)
+	if err != nil {
+		return "", err
+	}
+
+	return contentVersion(frozen, ".")
+}
+
 // Retired returns how many replaced or removed plugin versions are not closed yet.
 func Retired(c *Container) int {
 	return c.retired.Size()

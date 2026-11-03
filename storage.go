@@ -3,9 +3,13 @@ package plg
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
+	"path"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
@@ -40,12 +44,19 @@ const LanguageTypeScript Language = "typescript"
 
 // Storage lists plugins and opens their sources. A storage belongs to one Register call: every plugin it lists
 // implements that call's interface. Implementations must be safe for concurrent use.
+//
+// Register reads an opened plugin's files exactly once, into an in-memory snapshot it hashes (for an empty
+// Version), bundles and loads, so the files cannot change between those steps. The snapshot holds every regular
+// file. Symbolic links (as fs.ReadDir reports them) are never followed: one that stays inside the plugin's files
+// is skipped, as if it were not there, and one whose target is absolute, leads out of the plugin's files or
+// cannot be read (the fs.FS is no fs.ReadLinkFS) fails the load, naming it. Other irregular files are skipped.
 type Storage interface {
 	// Name identifies the storage in errors and logs.
 	Name() string
 	// List returns the plugins the storage holds.
 	List(ctx context.Context) ([]Descriptor, error)
-	// Open returns the plugin's source tree; the Descriptor's Entrypoint is a path inside it.
+	// Open returns the plugin's source tree; the Descriptor's Entrypoint is a path inside it. Register copies
+	// the tree once, as described above, before using it.
 	Open(ctx context.Context, d Descriptor) (fs.FS, error)
 }
 
@@ -58,8 +69,8 @@ type Descriptor struct {
 	// Entrypoint is a path inside the plugin's fs.FS. For Go it names the package directory or a .go file in
 	// it; every file of that directory (and below) is loaded.
 	Entrypoint string
-	// Version identifies the plugin's revision. When it is empty, Register uses a content hash of the
-	// plugin's files (see [FSStorage]).
+	// Version identifies the plugin's revision. When it is empty, Register uses a content hash of the files it
+	// loads (see [FSStorage]).
 	Version string
 	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit. It can only
 	// lower that limit.
@@ -90,26 +101,19 @@ func (s *MemoryStorage) Name() string {
 	return s.name
 }
 
-// Put adds the plugin desc, or replaces the plugin with the same key. It copies every regular file of files,
-// so later changes to files are not seen.
+// Put adds the plugin desc, or replaces the plugin with the same key. It copies files as Register does (see
+// [Storage]), failing on a symbolic link out of them, so later changes to files are not seen.
 func (s *MemoryStorage) Put(desc Descriptor, files fs.FS) error {
 	if desc.Key == "" {
 		return fmt.Errorf("%w: memory storage %s: empty key", ErrInvalidDescriptor, s.name)
 	}
 
-	var tree memfs.Builder
-
-	err := tree.AddTree(".", files, ".")
+	copied, err := snapshotFiles(files)
 	if err != nil {
 		return fmt.Errorf("plg: memory storage %s: plugin %s: %w", s.name, desc.Key, err)
 	}
 
-	snapshot, err := tree.Build()
-	if err != nil {
-		return fmt.Errorf("plg: memory storage %s: plugin %s: %w", s.name, desc.Key, err)
-	}
-
-	s.plugins.Store(desc.Key, memoryPlugin{desc: desc, files: snapshot})
+	s.plugins.Store(desc.Key, memoryPlugin{desc: desc, files: copied})
 
 	return nil
 }
@@ -139,4 +143,63 @@ func (s *MemoryStorage) Open(_ context.Context, d Descriptor) (fs.FS, error) {
 	}
 
 	return p.files, nil
+}
+
+// errSymlinkOut reports a symbolic link of a plugin's files whose target is absolute, leads out of the files or
+// cannot be read.
+var errSymlinkOut = errors.New("symbolic link out of the plugin's files")
+
+// snapshotFiles returns an immutable copy of a plugin's files, as [Storage] describes. A [memfs.FS], which the
+// built-in storages return, is one already.
+func snapshotFiles(files fs.FS) (*memfs.FS, error) {
+	if frozen, ok := files.(*memfs.FS); ok {
+		return frozen, nil
+	}
+
+	var tree memfs.Builder
+
+	err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case entry.Type().IsRegular():
+			data, readErr := fs.ReadFile(files, name)
+			if readErr != nil {
+				return fmt.Errorf("reading %s: %w", name, readErr)
+			}
+
+			return tree.Add(name, data)
+		case entry.Type()&fs.ModeSymlink != 0:
+			return checkLink(files, name)
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("copying the plugin's files: %w", err)
+	}
+
+	copied, err := tree.Build()
+	if err != nil {
+		return nil, fmt.Errorf("copying the plugin's files: %w", err)
+	}
+
+	return copied, nil
+}
+
+// checkLink accepts the symbolic link name of files when its target stays inside files, judged by the target's
+// path alone: snapshotFiles skips it, so nothing is read through it whatever it resolves to.
+func checkLink(files fs.FS, name string) error {
+	target, err := fs.ReadLink(files, name)
+	if err != nil {
+		return fmt.Errorf("%s: %w: reading its target: %w", name, errSymlinkOut, err)
+	}
+
+	slashed := filepath.ToSlash(target)
+	if inside := path.Join(path.Dir(name), slashed); filepath.IsAbs(target) || path.IsAbs(slashed) ||
+		inside == ".." || strings.HasPrefix(inside, "../") {
+		return fmt.Errorf("%s: %w (to %s)", name, errSymlinkOut, target)
+	}
+
+	return nil
 }

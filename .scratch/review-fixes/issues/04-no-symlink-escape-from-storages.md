@@ -8,11 +8,11 @@ Approach suggested by the review (pick and document): open storages with `os.Ope
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Regression tests (TS import of a symlink to a host file; Go entrypoint symlinked to `/`; Lua `require` through a symlink) reproduces the bug (fails on the current code) and passes with the fix
-- [ ] Each case fails the plugin's load with a clear error naming the offending path; no host file content reaches the guest
-- [ ] Symlinks that stay inside the plugin directory have documented behaviour (followed or skipped) and a test
-- [ ] Version hashing, bundling and loading all read the same snapshot (no TOCTOU between hash and load)
-- [ ] README/FSStorage docs updated to match
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Regression tests (TS import of a symlink to a host file; Go entrypoint symlinked to `/`; Lua `require` through a symlink) reproduces the bug (fails on the current code) and passes with the fix
+- [x] Each case fails the plugin's load with a clear error naming the offending path; no host file content reaches the guest
+- [x] Symlinks that stay inside the plugin directory have documented behaviour (followed or skipped) and a test
+- [x] Version hashing, bundling and loading all read the same snapshot (no TOCTOU between hash and load)
+- [x] README/FSStorage docs updated to match
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

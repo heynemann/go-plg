@@ -432,9 +432,9 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 
 	ctr := newContainer(t)
 
-	// Without a version, Register hashes the plugin's files first; with one, it reads them first to check them
-	// for go statements.
-	for version, step := range map[string]string{"": "hashing", "v1": "reading the plugin source"} {
+	// With a version or without one, Register first copies the plugin's files: it hashes, checks and loads the
+	// copy.
+	for version, step := range map[string]string{"": "versionless", "v1": "versioned"} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
 
@@ -445,7 +445,7 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 			err := plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer"+version, plg.WithStorage(store))
 			require.ErrorIs(t, err, plg.ErrLoad)
 			require.ErrorIs(t, err, errStorage)
-			require.ErrorContains(t, err, step)
+			require.ErrorContains(t, err, "copying the plugin's files: reading pkg/secret.go")
 		})
 	}
 }

@@ -388,6 +388,12 @@ type Storage interface {
 A storage belongs to one Register call: every plugin it lists implements that call's interface. Register may take
 several storages (`plg.WithStorage` repeated); a key listed twice fails with `plg.ErrDuplicateKey`.
 
+Register reads an opened plugin's files once, into an in-memory copy that it hashes (for an empty `Version`),
+bundles and loads, so files changing during a load are never half seen. Symbolic links are never followed, in
+any storage: a link that stays inside the plugin's files is skipped as if it were not there (a plugin cannot
+import or `require` it), and a link whose target is absolute or leads out of the plugin's files (or cannot be
+read) fails the plugin's load with an error naming it.
+
 Built in:
 
 - `plg.NewFSStorage(dir)` and `plg.NewFSStorageFromFS(name, fsys)` (any `fs.FS`: an `embed.FS`, `fs.Sub` of one,
@@ -397,10 +403,11 @@ Built in:
   {"language": "go", "entrypoint": "plugin.go", "version": "1.4.0", "memoryLimit": 67108864}
   ```
 
-  `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it, a
-  SHA-256 of the directory's files is the version); `memoryLimit` (bytes) may only lower the Register's limit.
-  Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently drops a limit.
-  Top-level files and dot-directories are ignored.
+  `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
+  `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes) may only lower
+  the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
+  drops a limit. Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an
+  `os.Root`, so no path or link leads it out of `dir`, not even a file swapped for a link mid-read.
 - `plg.NewMemoryStorage(name)` with `Put(desc, files)` and `Delete(key)`: plugins a program builds itself, and
   tests.
 

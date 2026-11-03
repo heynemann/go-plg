@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+
+	"github.com/heynemann/go-plg/internal/memfs"
 )
 
 // manifestName is the file describing a plugin directory of an [FSStorage].
@@ -33,27 +35,36 @@ const contentVersionPrefix = "sha256:"
 // Its keys are:
 //   - language (required): "go", "lua" or "typescript".
 //   - entrypoint (required): a slash-separated path inside the plugin directory; see [Descriptor].
-//   - version (optional): the plugin's revision. Without it, the version is "sha256:" and the hex SHA-256 of
-//     the directory's regular files (their paths relative to the directory and their contents): it is stable,
-//     and changes exactly when a file is added, removed, renamed or edited.
+//   - version (optional): the plugin's revision. Without it, List leaves the Descriptor's Version empty and
+//     Register uses "sha256:" and the hex SHA-256 of the regular files it loads (their paths relative to the
+//     directory and their contents): it is stable, and changes exactly when a file is added, removed, renamed
+//     or edited.
 //   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 1 to 4 GiB. It can only
 //     lower the Register limit.
 //
 // Keys are case sensitive and unknown keys are errors, so a misspelt key is not silently ignored. Top-level
-// entries that are not directories, and entries whose names start with a dot, are not plugins and are
-// ignored. Symlinked files are skipped, as Register skips them when it loads a plugin.
+// entries that are not directories (symbolic links to directories included), and entries whose names start
+// with a dot, are not plugins and are ignored.
+//
+// Open copies the plugin directory into memory, as Register copies every storage's files (see [Storage]):
+// symbolic links are never followed; a link that stays inside the plugin directory is skipped, and one whose
+// target is absolute or leads out of the plugin directory fails the load, naming it. The plugin then runs from
+// that copy, so a file changed during the load cannot be half seen.
 //
 // An FSStorage is safe for concurrent use when its file tree is.
 type FSStorage struct {
-	fsys fs.FS
+	fsys fs.FS  // the file tree, nil for dir
+	dir  string // the directory of a [NewFSStorage], opened as an [os.Root] by every List and Open
 	name string
 }
 
 var _ Storage = (*FSStorage)(nil)
 
-// NewFSStorage returns a storage over the plugin directories in dir, named dir.
+// NewFSStorage returns a storage over the plugin directories in dir, named dir. List and Open read dir through
+// an [os.Root], so neither a path nor a symbolic link can lead them out of dir, even when a file is replaced by
+// a link while they read. Each opens dir anew: a directory moved into dir's place is seen by the next call.
 func NewFSStorage(dir string) *FSStorage {
-	return &FSStorage{fsys: os.DirFS(dir), name: dir}
+	return &FSStorage{dir: dir, name: dir}
 }
 
 // NewFSStorageFromFS returns a storage named name over the plugin directories at the root of fsys, such as an
@@ -70,29 +81,38 @@ func (s *FSStorage) Name() string {
 // List reads every plugin directory's plugin.json and returns the plugins, sorted by key. It fails with
 // [ErrInvalidManifest], naming the directory, if a plugin.json is missing or malformed.
 func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
-	entries, err := fs.ReadDir(s.fsys, ".")
+	var descs []Descriptor
+
+	err := s.withTree(func(fsys fs.FS) error {
+		entries, err := fs.ReadDir(fsys, ".")
+		if err != nil {
+			return fmt.Errorf("plg: reading the plugin directories: %w", err)
+		}
+
+		descs = make([]Descriptor, 0, len(entries))
+
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+
+			err = ctx.Err()
+			if err != nil {
+				return fmt.Errorf("plg: listing plugins: %w", err)
+			}
+
+			desc, err := describe(fsys, entry.Name())
+			if err != nil {
+				return err
+			}
+
+			descs = append(descs, desc)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("plg: reading the plugin directories: %w", err)
-	}
-
-	descs := make([]Descriptor, 0, len(entries))
-
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		err = ctx.Err()
-		if err != nil {
-			return nil, fmt.Errorf("plg: listing plugins: %w", err)
-		}
-
-		desc, err := s.describe(entry.Name())
-		if err != nil {
-			return nil, err
-		}
-
-		descs = append(descs, desc)
+		return nil, err
 	}
 
 	return descs, nil
@@ -100,33 +120,70 @@ func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 
 var errPluginKey = errors.New("a plugin key is a directory name")
 
-// Open returns the files of the plugin directory named by desc's key.
+// Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
 func (s *FSStorage) Open(_ context.Context, desc Descriptor) (fs.FS, error) {
 	key := desc.Key
-	if key == "." || strings.Contains(key, "/") {
+	if key == "." || strings.Contains(key, "/") || !fs.ValidPath(key) {
 		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, errPluginKey)
 	}
 
-	files, err := fs.Sub(s.fsys, key)
-	if err != nil {
-		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, err)
-	}
+	var files *memfs.FS
 
-	info, err := fs.Stat(s.fsys, key)
-	if err == nil && !info.IsDir() {
-		err = errPluginKey
-	}
+	err := s.withTree(func(fsys fs.FS) error {
+		// Lstat: a link to a directory is not a plugin, as List does not list it.
+		info, err := fs.Lstat(fsys, key)
+		if err == nil && !info.IsDir() {
+			err = errPluginKey
+		}
 
+		if err == nil {
+			var dir fs.FS
+
+			dir, err = fs.Sub(fsys, key)
+			if err == nil {
+				files, err = snapshotFiles(dir)
+			}
+		}
+
+		if err != nil {
+			return fmt.Errorf("plg: plugin directory %s: %w", key, err)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("plg: plugin directory %s: %w", key, err)
+		return nil, err
 	}
 
 	return files, nil
 }
 
-// describe reads the plugin directory dir.
-func (s *FSStorage) describe(dir string) (Descriptor, error) {
-	data, err := fs.ReadFile(s.fsys, path.Join(dir, manifestName))
+// withTree calls use with the storage's file tree: its fs.FS, or its directory opened as an [os.Root], closed
+// once use returns.
+func (s *FSStorage) withTree(use func(fsys fs.FS) error) error {
+	if s.fsys != nil {
+		return use(s.fsys)
+	}
+
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return fmt.Errorf("plg: opening the plugin directories: %w", err)
+	}
+
+	err = use(root.FS())
+
+	closeErr := root.Close()
+	if closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("plg: closing the plugin directories: %w", closeErr))
+	}
+
+	return err
+}
+
+// describe reads the plugin directory dir of fsys. A plugin.json without a version leaves Version empty:
+// Register hashes the files it loads.
+func describe(fsys fs.FS, dir string) (Descriptor, error) {
+	data, err := fs.ReadFile(fsys, path.Join(dir, manifestName))
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("%w: plugin directory %s: %w", ErrInvalidManifest, dir, err)
 	}
@@ -137,13 +194,6 @@ func (s *FSStorage) describe(dir string) (Descriptor, error) {
 	}
 
 	desc.Key = dir
-
-	if desc.Version == "" {
-		desc.Version, err = contentVersion(s.fsys, dir)
-		if err != nil {
-			return Descriptor{}, fmt.Errorf("plg: plugin directory %s: %w", dir, err)
-		}
-	}
 
 	return desc, nil
 }
@@ -215,8 +265,8 @@ func decodeManifest(data []byte) (Descriptor, error) {
 }
 
 // contentVersion returns the version of the files below root in fsys: a SHA-256 over every regular file's path
-// relative to root and the SHA-256 of its contents, in lexical order. Irregular files (symlinks included) are
-// skipped, as [memfs.Builder.AddTree] skips them when a plugin loads.
+// relative to root and the SHA-256 of its contents, in lexical order. Register hashes the snapshot it loads,
+// which holds regular files only.
 func contentVersion(fsys fs.FS, root string) (string, error) {
 	sum, file := sha256.New(), sha256.New()
 	buf := make([]byte, 0, binary.MaxVarintLen64+sha256.Size)

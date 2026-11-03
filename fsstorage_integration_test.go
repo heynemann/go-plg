@@ -108,22 +108,27 @@ type loadRecord struct {
 func TestRegisterHashesVersionlessPlugins(t *testing.T) {
 	t.Parallel()
 
-	listed, err := plg.NewFSStorage(diskDir).List(t.Context())
+	disk := plg.NewFSStorage(diskDir)
+
+	listed, err := disk.List(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "multifile", listed[0].Key)
-	require.Regexp(t, isContentHash, listed[0].Version)
+	require.Empty(t, listed[0].Version, "List leaves it to Register")
 
-	// The same files in a memory storage, without a version: Register hashes them as the FS storage does.
+	// The same files in a memory storage, without a version: Register hashes them as it hashes the FS
+	// storage's.
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(t, store.Put(plg.Descriptor{Key: "m", Language: plg.LanguageGo, Entrypoint: "."},
+	require.NoError(t, store.Put(plg.Descriptor{Key: "multifile", Language: plg.LanguageGo, Entrypoint: "."},
 		os.DirFS(filepath.Join(diskDir, "multifile"))))
 
 	var logs bytes.Buffer
 
-	err = plg.Register[testcontract.Fooer](t.Context(), loggedContainer(t, &logs), "hash", plg.WithStorage(store))
-	require.NoError(t, err)
+	ctr := loggedContainer(t, &logs)
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "mem", plg.WithStorage(store)))
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "disk", plg.WithStorage(disk),
+		plg.WithGolangPlugins()))
 
-	var versions []string
+	versions := map[string]string{}
 
 	lines := bufio.NewScanner(&logs)
 	for lines.Scan() {
@@ -131,11 +136,13 @@ func TestRegisterHashesVersionlessPlugins(t *testing.T) {
 
 		require.NoError(t, sonic.Unmarshal(lines.Bytes(), &rec))
 
-		if rec.Key == "hash/m" {
-			versions = append(versions, rec.Version)
+		if rec.Key == "mem/multifile" || rec.Key == "disk/multifile" {
+			versions[rec.Key] = rec.Version
 		}
 	}
 
 	require.NoError(t, lines.Err())
-	assert.Equal(t, []string{listed[0].Version}, versions)
+	require.Regexp(t, isContentHash, versions["mem/multifile"])
+	assert.Equal(t, versions["mem/multifile"], versions["disk/multifile"])
+	assert.Equal(t, versions["disk/multifile"], plg.Version(ctr, "disk/multifile"))
 }
