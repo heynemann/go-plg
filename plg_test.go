@@ -192,6 +192,17 @@ func emptyStorage() plg.RegisterOption {
 	return plg.WithStorage(plg.NewMemoryStorage("empty"))
 }
 
+// goPluginStorage holds one Go plugin, "k".
+func goPluginStorage(t *testing.T) *plg.MemoryStorage {
+	t.Helper()
+
+	store := plg.NewMemoryStorage("go")
+	files := fstest.MapFS{"plugin.go": {Data: []byte("package p\n")}}
+	require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
+
+	return store
+}
+
 // Interfaces breaking the interface contract.
 type (
 	noMethods   any
@@ -422,6 +433,26 @@ func TestRegisterArguments(t *testing.T) {
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
 				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 4<<30 + 1},
 			}})},
+		},
+		{
+			name: "go-guest-empty", opts: withEmpty(plg.WithGoGuest(nil)), want: plg.ErrInvalidOption,
+			msg: "WithGoGuest: the module is empty",
+		},
+		{
+			name: "go-guest-twice", want: plg.ErrInvalidOption, msg: "WithGoGuest given 2 times",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithGoGuest([]byte("a")), plg.WithGoGuest([]byte("a"))},
+		},
+		{
+			// The custom guest replaces the linked one (the unit test binary links none) and fails to compile.
+			name: "go-guest-not-wasm", want: plg.ErrLoad,
+			msg:  "loading the go sha256:982d9e3eb996f559e633f4d194def3761d909f5a3b647d1a851fead67c32c9d1 guest",
+			opts: []plg.RegisterOption{plg.WithGoGuest([]byte("text")), plg.WithStorage(goPluginStorage(t))},
+		},
+		{
+			name: "go-guest-without-the-abi", want: plg.ErrLoad, msg: "missing memory or one of the plg_alloc",
+			opts: []plg.RegisterOption{
+				plg.WithGoGuest([]byte("\x00asm\x01\x00\x00\x00")), plg.WithStorage(goPluginStorage(t)),
+			},
 		},
 	}
 

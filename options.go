@@ -2,6 +2,8 @@ package plg
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/guestreg"
 )
 
 // Option configures a [Container]; pass it to [New].
@@ -43,8 +46,10 @@ func WithMemoryBudget(total uint64) Option {
 }
 
 // WithCompilationCacheDir sets the directory of the on-disk compilation cache shared by every guest the
-// container compiles. The default is os.UserCacheDir()/plg/<wazero version>. A directory that cannot be
-// created or written falls back to an in-memory cache, with a warning.
+// container compiles. The default is the PLG_CACHE_DIR environment variable when it is set, otherwise
+// os.UserCacheDir()/plg/<wazero version>; [Warm] and `plg warm` resolve it the same way, so a cache they fill
+// is the one a container reads. A directory that cannot be created or written falls back to an in-memory
+// cache, with a warning.
 func WithCompilationCacheDir(dir string) Option {
 	return func(c *containerConfig) {
 		c.cacheDir = dir
@@ -77,10 +82,12 @@ type RegisterOption func(*registerConfig)
 const maxPoolSize = 4096
 
 type registerConfig struct {
-	http         *HTTPPolicy // nil: HTTP refused
+	http         *HTTPPolicy     // nil: HTTP refused
+	goGuest      *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
 	storages     []Storage
 	languages    []Language    // enabled languages; empty enables every language
 	hosts        []hostSpec    // WithHost options; at most one is valid
+	goGuests     [][]byte      // WithGoGuest options; at most one is valid
 	memoryLimit  uint64        // per-instance limit, whole pages
 	pollInterval time.Duration // zero: no polling
 	poolMin      int
@@ -112,7 +119,12 @@ func registerOptions(name string, opts []RegisterOption) (*registerConfig, error
 			ErrInvalidOption, cfg.pollInterval)
 	}
 
-	err := cfg.settle()
+	err := cfg.customGoGuest()
+	if err != nil {
+		return nil, err
+	}
+
+	err = cfg.settle()
 	if err != nil {
 		return nil, err
 	}
@@ -215,4 +227,54 @@ func withLanguage(lang Language) RegisterOption {
 	return func(c *registerConfig) {
 		c.languages = append(c.languages, lang)
 	}
+}
+
+// WithGoGuest runs the Register's Go plugins in a custom Go guest instead of the one guest/golang links: wasm is
+// a module `plg build-guest` built, which adds packages to the standard library allowlist, so the plugins may
+// import them (they may import exactly the default allowlist plus those packages; anything else fails to load,
+// as with the default guest). The program need not link guest/golang then. The custom guest runs under the same
+// rules as the default one: the same plugin checks, memory limits, CPU cap, pool, panic containment, Host and
+// HTTP.
+//
+// Register keeps wasm without copying it (an embedded file, typically), so it must not be modified afterwards.
+// Registers given the same module share one compiled copy per container; compiling it is the service's cold
+// start (`plg warm` warms the linked guests only). wasm must not be empty and the option may be given once,
+// otherwise Register fails with [ErrInvalidOption]; a module that is not a Go guest fails Register with
+// [ErrLoad].
+func WithGoGuest(wasm []byte) RegisterOption {
+	return func(c *registerConfig) {
+		c.goGuests = append(c.goGuests, wasm)
+	}
+}
+
+// customGoGuest checks the WithGoGuest options and sets the custom guest, identified by its SHA-256.
+func (c *registerConfig) customGoGuest() error {
+	switch {
+	case len(c.goGuests) == 0:
+		return nil
+	case len(c.goGuests) > 1:
+		return fmt.Errorf("%w: WithGoGuest given %d times; a Register runs one Go guest", ErrInvalidOption,
+			len(c.goGuests))
+	case len(c.goGuests[0]) == 0:
+		return fmt.Errorf("%w: WithGoGuest: the module is empty", ErrInvalidOption)
+	}
+
+	wasm := c.goGuests[0]
+	digest := sha256.Sum256(wasm)
+	c.goGuest = &guestreg.Guest{
+		Language: string(LanguageGo),
+		Wasm:     func() ([]byte, error) { return wasm, nil },
+		ID:       "sha256:" + hex.EncodeToString(digest[:]),
+	}
+
+	return nil
+}
+
+// guestFor returns the guest that runs the Register's lang plugins: its custom Go guest, or the linked guest.
+func (c *registerConfig) guestFor(lang Language) (guestreg.Guest, error) {
+	if lang == LanguageGo && c.goGuest != nil {
+		return *c.goGuest, nil
+	}
+
+	return guestFor(lang)
 }

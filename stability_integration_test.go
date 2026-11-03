@@ -65,11 +65,24 @@ func requirePanic(t *testing.T, err error, key string, phase plg.Phase) *plg.Pan
 func TestHostileGoPluginsCannotTakeTheHostDown(t *testing.T) {
 	t.Parallel()
 
+	for _, guest := range goGuests(t) {
+		t.Run(guest.name, func(t *testing.T) {
+			t.Parallel()
+
+			hostileGoPluginsCannotTakeTheHostDown(t, guest.opts...)
+		})
+	}
+}
+
+func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOption) {
+	t.Helper()
+
 	var logs bytes.Buffer
 
 	ctr := loggedContainer(t, &logs)
-	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer", plg.WithStorage(corpus("hostile")),
-		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
+
+	opts = append(opts, plg.WithStorage(corpus("hostile")), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit))
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer", opts...))
 
 	hostile := getFooer(t, ctr, "fooer/hostile")
 

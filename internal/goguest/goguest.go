@@ -1,6 +1,6 @@
 // Package goguest is the generic Go guest: it interprets a plugin package's source with yaegi and serves the
 // plg guest ABI. It is platform independent, so it runs (and is tested) natively as well as inside the wasip1
-// artifact, where guestsrc/golang only adapts pointers to these methods.
+// artifact, where guestsrc/golang/reactor only adapts pointers to these methods.
 //
 // A Guest is single-threaded, like the wasm instance that owns it.
 package goguest

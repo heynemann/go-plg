@@ -208,7 +208,7 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 		return false, nil
 	}
 
-	guest, err := guestFor(src.desc.Language)
+	guest, err := cfg.guestFor(src.desc.Language)
 	if err != nil {
 		return false, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
 	}

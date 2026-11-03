@@ -4,16 +4,21 @@ package guestreg
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
-// Guest is a linked guest artifact.
+// Guest is a guest artifact: a linked one, or a custom one a Register brings (plg.WithGoGuest).
 type Guest struct {
-	// Wasm returns the guest module. It is called at most once per container that needs the guest.
+	// Wasm returns the guest module. It is called at most once per container runtime that needs the guest.
 	Wasm func() ([]byte, error)
 	// Language is the plugin language the guest runs ("go", "lua", "typescript").
 	Language string
+	// ID tells a custom guest apart from the linked guest of its language (empty) and from other custom
+	// guests: its content digest, so that one module is compiled once per container.
+	ID string
 }
 
 // guests holds every linked guest, keyed by language.
@@ -36,4 +41,16 @@ func Register(g Guest) {
 // Lookup returns the guest registered for language.
 func Lookup(language string) (Guest, bool) {
 	return guests.Load(language)
+}
+
+// All returns every registered guest, sorted by language.
+func All() []Guest {
+	all := make([]Guest, 0, guests.Size())
+	for _, g := range guests.All() {
+		all = append(all, g)
+	}
+
+	slices.SortFunc(all, func(a, b Guest) int { return strings.Compare(a.Language, b.Language) })
+
+	return all
 }

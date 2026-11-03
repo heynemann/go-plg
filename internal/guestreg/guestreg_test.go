@@ -62,3 +62,33 @@ func TestRegisterRejectsProgrammingErrors(t *testing.T) {
 	_, ok := guestreg.Lookup(unregistered)
 	assert.False(t, ok, "a rejected guest is not registered")
 }
+
+func TestAllIsSortedByLanguage(t *testing.T) {
+	t.Parallel()
+
+	wasm := func() ([]byte, error) { return nil, nil }
+	first, second := language(), language()
+
+	if first > second {
+		first, second = second, first
+	}
+
+	// Registered out of order; other tests register guests concurrently, so only these two are checked.
+	guestreg.Register(guestreg.Guest{Language: second, Wasm: wasm})
+	guestreg.Register(guestreg.Guest{Language: first, Wasm: wasm})
+
+	var mine []string
+
+	all := guestreg.All()
+	for i, g := range all {
+		if i > 0 {
+			assert.Less(t, all[i-1].Language, g.Language, "sorted, each language once")
+		}
+
+		if g.Language == first || g.Language == second {
+			mine = append(mine, g.Language)
+		}
+	}
+
+	assert.Equal(t, []string{first, second}, mine)
+}

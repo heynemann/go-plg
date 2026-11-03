@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,6 +146,7 @@ func TestCacheDirectory(t *testing.T) {
 func TestDefaultCacheDirectory(t *testing.T) {
 	t.Run("under the user cache directory", func(t *testing.T) {
 		root := t.TempDir()
+		t.Setenv(engine.CacheDirEnv, "")
 		t.Setenv("XDG_CACHE_HOME", root)
 		t.Setenv("HOME", root)
 
@@ -157,11 +159,25 @@ func TestDefaultCacheDirectory(t *testing.T) {
 		assert.Equal(t, want, e.CacheDir())
 	})
 
+	t.Run("PLG_CACHE_DIR wins over the user cache directory", func(t *testing.T) {
+		root, env := t.TempDir(), filepath.Join(t.TempDir(), "plg-cache")
+		t.Setenv(engine.CacheDirEnv, env)
+		t.Setenv("XDG_CACHE_HOME", root)
+		t.Setenv("HOME", root)
+
+		assert.Equal(t, env, newEngine(t, engine.Options{}).CacheDir())
+
+		explicit := t.TempDir()
+		assert.Equal(t, explicit, newEngine(t, engine.Options{CacheDir: explicit}).CacheDir(),
+			"an explicit directory wins over the environment")
+	})
+
 	t.Run("no user cache directory falls back to memory", func(t *testing.T) {
 		if runtime.GOOS != "linux" {
 			t.Skip("unsetting the user cache directory is platform specific")
 		}
 
+		t.Setenv(engine.CacheDirEnv, "")
 		t.Setenv("XDG_CACHE_HOME", "")
 		t.Setenv("HOME", "")
 
@@ -169,7 +185,34 @@ func TestDefaultCacheDirectory(t *testing.T) {
 		e := newEngine(t, engine.Options{Logger: logger})
 		assert.Empty(t, e.CacheDir())
 		assert.Contains(t, logs.String(), "user cache directory")
+
+		_, err := engine.NewOnDisk(engine.Options{})
+		require.ErrorContains(t, err, "user cache directory", "NewOnDisk does not fall back to memory")
 	})
+}
+
+func TestNewOnDisk(t *testing.T) {
+	t.Parallel()
+
+	notADir := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(notADir, nil, 0o600))
+
+	_, err := engine.NewOnDisk(engine.Options{CacheDir: filepath.Join(notADir, "cache")})
+	require.ErrorIs(t, err, syscall.ENOTDIR, "an unusable directory is an error")
+	require.ErrorContains(t, err, notADir)
+
+	dir := filepath.Join(t.TempDir(), "nested")
+	e, err := engine.NewOnDisk(engine.Options{CacheDir: dir})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, e.Close(context.Background())) })
+	assert.Equal(t, dir, e.CacheDir())
+
+	_, err = newRuntime(t, e).Compile(t.Context(), "fake", fakeGuest{bodies: abiOK(0, 1)}.wasm())
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "the compiled module is persisted in its wazero version directory")
 }
 
 func TestWazeroVersionMatchesGoMod(t *testing.T) {

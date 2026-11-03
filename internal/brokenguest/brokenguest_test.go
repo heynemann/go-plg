@@ -57,3 +57,22 @@ func TestGuestFailuresFailRegisterAndAreRetried(t *testing.T) {
 	require.ErrorContains(t, err, "compiling guest go")
 	assert.Equal(t, before+2, artifactCalls.Load())
 }
+
+//nolint:paralleltest // it counts the artifact requests of the one guest, so no other test may run with it
+func TestWarmFailsWithTheGuest(t *testing.T) {
+	// Two warms meet both failures, in an order that depends on the artifact requests made before.
+	odd := artifactCalls.Load()%2 == 0
+
+	for range 2 {
+		err := plg.Warm(t.Context(), plg.WithCompilationCacheDir(t.TempDir()))
+		require.ErrorContains(t, err, "plg: warm: loading the go guest")
+
+		if odd {
+			require.ErrorIs(t, err, errArtifact)
+		} else {
+			require.ErrorContains(t, err, "compiling guest go")
+		}
+
+		odd = !odd
+	}
+}

@@ -39,3 +39,10 @@ func TestRegisterNamesTheMissingGuestImport(t *testing.T) {
 	require.ErrorContains(t, err, `import _ "github.com/heynemann/go-plg/guest/golang"`)
 	require.ErrorContains(t, err, "plugin k (storage mem)")
 }
+
+func TestWarmNeedsALinkedGuest(t *testing.T) {
+	t.Parallel()
+
+	err := plg.Warm(t.Context(), plg.WithCompilationCacheDir(t.TempDir()))
+	require.ErrorIs(t, err, plg.ErrGuestNotLinked)
+}

@@ -60,10 +60,7 @@ type Container struct {
 
 // New returns an empty container.
 func New(opts ...Option) *Container {
-	cfg := containerConfig{logger: slog.New(slog.DiscardHandler), panicHistory: defaultPanicHistory}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := containerOptions(opts)
 
 	ctr := &Container{
 		engine:       engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
@@ -80,6 +77,16 @@ func New(opts ...Option) *Container {
 	ctr.catalogue.Store(&snapshot{})
 
 	return ctr
+}
+
+// containerOptions applies the container options over their defaults.
+func containerOptions(opts []Option) containerConfig {
+	cfg := containerConfig{logger: slog.New(slog.DiscardHandler), panicHistory: defaultPanicHistory}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
 }
 
 // Close stops the pollers and serves no more calls: it waits on ctx for the calls in flight to finish, closes
@@ -140,9 +147,11 @@ func (c *Container) runtime(ctx context.Context, limit uint64) (*engine.Runtime,
 	return rt, nil
 }
 
-// moduleKey identifies a compiled guest module: one per language and runtime.
+// moduleKey identifies a compiled guest module: one per guest (the language's linked guest, or a custom one by
+// its digest) and runtime.
 type moduleKey struct {
 	lang  Language
+	guest string // guestreg.Guest.ID
 	limit uint64
 }
 
@@ -161,7 +170,7 @@ type compiledGuest struct {
 func (c *Container) module(ctx context.Context, lang Language, guest guestreg.Guest, limit uint64) (
 	*engine.Module, error,
 ) {
-	key := moduleKey{lang: lang, limit: limit}
+	key := moduleKey{lang: lang, guest: guest.ID, limit: limit}
 
 	for {
 		mine := &compiledGuest{done: make(chan struct{})}
@@ -202,18 +211,25 @@ func (c *Container) compile(ctx context.Context, key moduleKey, guest guestreg.G
 	return entry.mod, entry.err
 }
 
+// compileGuest compiles a guest for rt. It is named by its language, and a custom guest by its ID too, in the
+// compile log and errors.
 func compileGuest(ctx context.Context, rt *engine.Runtime, lang Language, guest guestreg.Guest) (
 	*engine.Module, error,
 ) {
+	name := string(lang)
+	if guest.ID != "" {
+		name += " " + guest.ID
+	}
+
 	wasm, err := guest.Wasm()
 	if err == nil {
 		var mod *engine.Module
 
-		mod, err = rt.Compile(ctx, string(lang), wasm)
+		mod, err = rt.Compile(ctx, name, wasm)
 		if err == nil {
 			return mod, nil
 		}
 	}
 
-	return nil, fmt.Errorf("loading the %s guest: %w", lang, err)
+	return nil, fmt.Errorf("loading the %s guest: %w", name, err)
 }

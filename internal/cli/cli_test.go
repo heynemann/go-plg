@@ -79,6 +79,41 @@ func TestErrors(t *testing.T) {
 			files:  map[string]string{"c.go": fooer, "fooer_plg.go": "package c\n"},
 			prefix: "plg gen: refusing to overwrite a file plg gen did not generate", contains: "fooer_plg.go",
 		},
+		{name: "help", args: []string{"warm", "-h"}, code: 2, prefix: "usage: plg <command>"},
+		{
+			name: "warm unknown flag", args: []string{"warm", "-x"}, code: 2,
+			prefix: "plg warm: flag provided but not defined: -x\n\nusage:",
+		},
+		{
+			name: "warm arguments", args: []string{"warm", "extra"}, code: 2,
+			prefix: "plg warm: unexpected arguments: extra\n\nusage:",
+		},
+		{
+			// The relative directory is resolved against the command's directory, not the process's.
+			name: "warm unusable cache", args: []string{"warm", "-cache-dir", "file/cache"}, code: 1,
+			files:  map[string]string{"file": ""},
+			prefix: "plg: warm: compilation cache directory /", contains: "/file/cache: creating cache directory",
+		},
+		{
+			name: "build-guest without packages", args: []string{"build-guest", "-o", "g.wasm"}, code: 2,
+			prefix: "plg build-guest: name at least one package with -pkg\n\nusage:",
+		},
+		{
+			name: "build-guest without output", args: []string{"build-guest", "-pkg", "encoding/xml"}, code: 2,
+			prefix: "plg build-guest: name the output file with -o\n\nusage:",
+		},
+		{
+			name: "build-guest arguments", args: []string{"build-guest", "-pkg", "encoding/xml", "-o", "g", "x"},
+			code: 2, prefix: "plg build-guest: unexpected arguments: x\n\nusage:",
+		},
+		{
+			name: "build-guest failure", args: []string{"build-guest", "-pkg", "regexp", "-o", "g.wasm"}, code: 1,
+			prefix: "plg build-guest: invalid extra packages: regexp is in the default allowlist already\n",
+		},
+		{
+			name: "build-guest unknown flag", args: []string{"build-guest", "-pkgs", "x"}, code: 2,
+			prefix: "plg build-guest: flag provided but not defined: -pkgs\n\nusage:",
+		},
 	}
 
 	for _, tc := range tests {

@@ -3,7 +3,9 @@
 //	//go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
 //
 // generates the adapter plg calls plugins through, and registers it with the package's source. See
-// [github.com/heynemann/go-plg.Contract].
+// [github.com/heynemann/go-plg.Contract]. `plg warm` fills the compilation cache with the guests plg ships (see
+// [github.com/heynemann/go-plg.Warm]), and `plg build-guest` builds a custom Go guest with extra packages (see
+// [github.com/heynemann/go-plg.WithGoGuest]); `plg` without arguments prints the usage.
 package main
 
 import (

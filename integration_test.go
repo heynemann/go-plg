@@ -307,30 +307,37 @@ func TestRegisterFailsFastAndPublishesNothing(t *testing.T) {
 		{"forbidden", `"os"`},
 	}
 
-	ctr := newContainer(t)
-
-	for _, tc := range tests {
-		t.Run(tc.plugin, func(t *testing.T) {
+	for _, guest := range goGuests(t) {
+		t.Run(guest.name, func(t *testing.T) {
 			t.Parallel()
 
-			// "a-good" loads first, then the broken plugin fails the whole registration.
-			store := goStorage(t, "store-"+tc.plugin, map[string]string{"a-good": "fooer", "b-bad": tc.plugin})
-			err := plg.Register[testcontract.Fooer](t.Context(), ctr, tc.plugin, plg.WithStorage(store))
-			require.ErrorIs(t, err, plg.ErrLoad)
-			require.ErrorContains(t, err, tc.plugin+"/b-bad")
-			require.ErrorContains(t, err, "store-"+tc.plugin)
-			require.ErrorContains(t, err, tc.msg)
+			ctr := newContainer(t)
 
-			_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, tc.plugin+"/a-good")
-			require.ErrorIs(t, err, plg.ErrNotFound, "nothing is published")
+			for _, tc := range tests {
+				t.Run(tc.plugin, func(t *testing.T) {
+					t.Parallel()
 
-			store.Delete("b-bad")
-			require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, tc.plugin, plg.WithStorage(store)),
-				"a failed Register leaves its name free")
+					// "a-good" loads first, then the broken plugin fails the whole registration.
+					store := goStorage(t, "store-"+tc.plugin, map[string]string{"a-good": "fooer", "b-bad": tc.plugin})
+					opts := append([]plg.RegisterOption{plg.WithStorage(store)}, guest.opts...)
+					err := plg.Register[testcontract.Fooer](t.Context(), ctr, tc.plugin, opts...)
+					require.ErrorIs(t, err, plg.ErrLoad)
+					require.ErrorContains(t, err, tc.plugin+"/b-bad")
+					require.ErrorContains(t, err, "store-"+tc.plugin)
+					require.ErrorContains(t, err, tc.msg)
 
-			got, err := getFooer(t, ctr, tc.plugin+"/a-good").Foo(t.Context(), "again")
-			require.NoError(t, err)
-			assert.Equal(t, "hello, again", got)
+					_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, tc.plugin+"/a-good")
+					require.ErrorIs(t, err, plg.ErrNotFound, "nothing is published")
+
+					store.Delete("b-bad")
+					require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, tc.plugin, opts...),
+						"a failed Register leaves its name free")
+
+					got, err := getFooer(t, ctr, tc.plugin+"/a-good").Foo(t.Context(), "again")
+					require.NoError(t, err)
+					assert.Equal(t, "hello, again", got)
+				})
+			}
 		})
 	}
 }

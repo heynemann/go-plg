@@ -20,6 +20,9 @@ import (
 const (
 	wazeroModule = "github.com/tetratelabs/wazero"
 	cacheDirPerm = 0o750
+
+	// CacheDirEnv names the environment variable that, when set, is the default compilation cache directory.
+	CacheDirEnv = "PLG_CACHE_DIR"
 )
 
 // Options configure an [Engine].
@@ -43,14 +46,40 @@ type Engine struct {
 func New(ctx context.Context, opts Options) *Engine {
 	primeWazeroVersion()
 
-	e := &Engine{logger: opts.Logger}
-	if e.logger == nil {
-		e.logger = slog.New(slog.DiscardHandler)
+	eng := &Engine{logger: orDiscardLogger(opts.Logger)}
+
+	err := eng.openDiskCache(opts.CacheDir)
+	if err != nil {
+		eng.cache = wazero.NewCompilationCache()
+		eng.logger.LogAttrs(ctx, slog.LevelWarn,
+			"plg: compilation cache directory unusable; using an in-memory cache",
+			slog.String("dir", opts.CacheDir), slog.String("error", err.Error()))
 	}
 
-	e.openCache(ctx, opts.CacheDir)
+	return eng
+}
 
-	return e
+// NewOnDisk is [New] for the callers whose point is the on-disk cache, like warming it: a directory that cannot
+// be resolved, created or written is an error rather than a fallback to memory.
+func NewOnDisk(opts Options) (*Engine, error) {
+	primeWazeroVersion()
+
+	eng := &Engine{logger: orDiscardLogger(opts.Logger)}
+
+	err := eng.openDiskCache(opts.CacheDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return eng, nil
+}
+
+func orDiscardLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+
+	return logger
 }
 
 // primeWazeroVersion works around a data race in wazero v1.12.0: its internal/version package caches the
@@ -111,8 +140,13 @@ func depVersion(deps []*debug.Module, path string) string {
 	return "dev"
 }
 
-// DefaultCacheDir returns os.UserCacheDir()/plg/<wazero version>.
+// DefaultCacheDir returns the directory named by the PLG_CACHE_DIR environment variable ([CacheDirEnv]) when it
+// is set, otherwise os.UserCacheDir()/plg/<wazero version>.
 func DefaultCacheDir() (string, error) {
+	if dir := os.Getenv(CacheDirEnv); dir != "" {
+		return dir, nil
+	}
+
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving the user cache directory: %w", err)
@@ -121,13 +155,12 @@ func DefaultCacheDir() (string, error) {
 	return filepath.Join(dir, "plg", WazeroVersion()), nil
 }
 
-func (e *Engine) openCache(ctx context.Context, dir string) {
+// openDiskCache opens the engine's on-disk compilation cache in dir, or in [DefaultCacheDir] when dir is empty.
+func (e *Engine) openDiskCache(dir string) error {
 	if dir == "" {
 		def, err := DefaultCacheDir()
 		if err != nil {
-			e.warnMemoryCache(ctx, dir, err)
-
-			return
+			return err
 		}
 
 		dir = def
@@ -135,26 +168,17 @@ func (e *Engine) openCache(ctx context.Context, dir string) {
 
 	err := probeWritable(dir)
 	if err != nil {
-		e.warnMemoryCache(ctx, dir, err)
-
-		return
+		return fmt.Errorf("compilation cache directory %s: %w", dir, err)
 	}
 
-	cache, err := wazero.NewCompilationCacheWithDir(dir)
+	e.cache, err = wazero.NewCompilationCacheWithDir(dir)
 	if err != nil {
-		e.warnMemoryCache(ctx, dir, err)
-
-		return
+		return fmt.Errorf("compilation cache directory %s: %w", dir, err)
 	}
 
-	e.cache, e.cacheDir = cache, dir
-}
+	e.cacheDir = dir
 
-// warnMemoryCache falls back to an in-memory cache, with a warning.
-func (e *Engine) warnMemoryCache(ctx context.Context, dir string, err error) {
-	e.cache = wazero.NewCompilationCache()
-	e.logger.LogAttrs(ctx, slog.LevelWarn, "plg: compilation cache directory unusable; using an in-memory cache",
-		slog.String("dir", dir), slog.String("error", err.Error()))
+	return nil
 }
 
 // probeWritable creates dir and a temporary file in it.
