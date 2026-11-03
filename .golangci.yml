@@ -167,6 +167,11 @@ linters:
       # Guest packages register their embedded artifact from init(), by design (blank-import activation).
       - path: guest/
         linters: [gochecknoinits]
+      # examples/ is a module of its own, so that the core's go.mod stays free of the examples' dependencies
+      # (RULES.md §2); it builds against this checkout. Only that replace directive is exempt.
+      - path: go\.mod
+        linters: [gomoddirectives]
+        text: "local replacement are not allowed: github.com/heynemann/go-plg$"
 
 formatters:
   enable:
@@ -181,7 +186,7 @@ formatters:
       sections:
         - standard
         - default
-        - localmodule
+        - prefix(github.com/heynemann/go-plg) # not localmodule: the examples module must group plg the same way
     golines:
       max-len: 120
   exclusions:

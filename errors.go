@@ -42,7 +42,8 @@ var (
 	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, or whose MemoryLimit is under
 	// one 64 KiB page or over 4 GiB.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
-	// ErrInvalidManifest reports a plugin directory of an [FSStorage] whose plugin.json is missing or malformed.
+	// ErrInvalidManifest reports a plugin.json that is missing or malformed: in a plugin directory of an
+	// [FSStorage], or given to [ParseManifest].
 	ErrInvalidManifest = errors.New("plg: invalid plugin.json")
 	// ErrDuplicateKey reports a plugin key listed twice by the storages of one Register call.
 	ErrDuplicateKey = errors.New("plg: duplicate plugin key")

@@ -19,8 +19,13 @@ type Language string
 // needs the Go guest: import _ "github.com/heynemann/go-plg/guest/golang".
 const LanguageGo Language = "go"
 
-// LanguageLua is a Lua plugin. No Lua guest exists yet: Register fails every Lua plugin it does not skip with
-// [ErrUnsupportedLanguage].
+// LanguageLua is a Lua 5.4 plugin: its entrypoint is a .lua file defining a global function Create() that
+// returns a table whose functions implement the interface, called as methods (inst:Method(args...)). A method
+// returns its single result, or an array table of several; an error it raises (or a nil, message return) is the
+// call's error. The plugin's .lua files are mounted read-only at /plugin, where require resolves them; plugins
+// get the base (without file loading), string, table, math, utf8 and coroutine libraries, a json module, host
+// (the [WithHost] interface's methods) and http.request (through [WithHTTP]'s policy). Running Lua plugins needs
+// the guest: import _ "github.com/heynemann/go-plg/guest/lua".
 const LanguageLua Language = "lua"
 
 // LanguageTypeScript is a TypeScript (or JavaScript) plugin: its entrypoint file exports

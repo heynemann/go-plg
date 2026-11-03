@@ -131,7 +131,7 @@ func (s *FSStorage) describe(dir string) (Descriptor, error) {
 		return Descriptor{}, fmt.Errorf("%w: plugin directory %s: %w", ErrInvalidManifest, dir, err)
 	}
 
-	desc, err := parseManifest(data)
+	desc, err := decodeManifest(data)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("%w: plugin directory %s: %w", ErrInvalidManifest, dir, err)
 	}
@@ -162,8 +162,21 @@ var (
 	errManifestMemoryLimit = errors.New("memoryLimit must be from 1 byte to 4 GiB")
 )
 
-// parseManifest parses and checks a plugin.json; the returned descriptor has no key.
-func parseManifest(data []byte) (Descriptor, error) {
+// ParseManifest parses and checks a plugin.json exactly as [FSStorage] does, for storages keeping the same
+// manifest in another place (an object store, a database). The returned Descriptor has no Key, and an empty
+// Version when the manifest gives none: the storage then picks one (Register falls back to a content hash).
+// A malformed manifest fails with [ErrInvalidManifest].
+func ParseManifest(data []byte) (Descriptor, error) {
+	desc, err := decodeManifest(data)
+	if err != nil {
+		return Descriptor{}, fmt.Errorf("%w: %w", ErrInvalidManifest, err)
+	}
+
+	return desc, nil
+}
+
+// decodeManifest parses and checks a plugin.json; the returned descriptor has no key.
+func decodeManifest(data []byte) (Descriptor, error) {
 	strict := sonic.Config{
 		CaseSensitive:         true,
 		DisallowUnknownFields: true,

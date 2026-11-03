@@ -13,9 +13,10 @@ import (
 // Without [WithHTTP], every request is refused. Zero fields take the documented defaults.
 //
 // Go plugins use the standard net/http client (http.Get, http.Client, http.NewRequest, ...): inside the guest
-// http.DefaultTransport hands each request to the host. Redirects are followed by the plugin's client, each
-// hop being a new request checked like the first. Every request, made or refused, is logged with the plugin's
-// key through the container's logger.
+// http.DefaultTransport hands each request to the host. TypeScript plugins use fetch and Lua plugins
+// http.request{method, url, headers, body}, both reaching the same host transport. Redirects are followed by the
+// plugin's side (the Go client, fetch or http.request), each hop being a new request checked like the first.
+// Every request, made or refused, is logged with the plugin's key through the container's logger.
 type HTTPPolicy struct {
 	// BlockPrivateNetworks refuses connections to loopback, private, unique-local, link-local (including the
 	// 169.254.169.254 cloud metadata service), carrier-grade NAT, multicast and reserved addresses. It is

@@ -133,6 +133,10 @@ func TestFSStorageParsesManifests(t *testing.T) {
 		t.Run(tc.manifest, func(t *testing.T) {
 			t.Parallel()
 
+			parsed, err := plg.ParseManifest([]byte(tc.manifest))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, parsed, "ParseManifest reads the manifest as FSStorage does, without a key")
+
 			descs, err := manifestStorage(tc.manifest).List(t.Context())
 			require.NoError(t, err)
 
@@ -140,6 +144,21 @@ func TestFSStorageParsesManifests(t *testing.T) {
 			assert.Equal(t, []plg.Descriptor{tc.want}, descs)
 		})
 	}
+}
+
+func TestParseManifestLeavesAMissingVersionToTheStorage(t *testing.T) {
+	t.Parallel()
+
+	manifest := `{"language":"go","entrypoint":"."}`
+
+	parsed, err := plg.ParseManifest([]byte(manifest))
+	require.NoError(t, err)
+	assert.Equal(t, plg.Descriptor{Language: plg.LanguageGo, Entrypoint: "."}, parsed)
+
+	descs, err := manifestStorage(manifest).List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, descs, 1)
+	assert.Regexp(t, isContentHash, descs[0].Version, "FSStorage hashes the directory instead")
 }
 
 func TestFSStorageRejectsMalformedManifests(t *testing.T) {
@@ -180,6 +199,9 @@ func TestFSStorageRejectsMalformedManifests(t *testing.T) {
 			_, err := manifestStorage(manifest).List(t.Context())
 			require.ErrorIs(t, err, plg.ErrInvalidManifest)
 			require.ErrorContains(t, err, "plugin directory p")
+
+			_, err = plg.ParseManifest([]byte(manifest))
+			require.ErrorIs(t, err, plg.ErrInvalidManifest, "ParseManifest rejects what FSStorage rejects")
 		})
 	}
 }

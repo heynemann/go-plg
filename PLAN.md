@@ -262,7 +262,7 @@ It is:
 **Residual risks:**
 - Host memory is ordinary Go heap: after a large guest closes, RSS stays high until the Go scavenger returns memory (observed).
 - Lua's error handling depends on wazero's *experimental* exception-handling feature. Pinned and covered by tests.
-- Untested: whether yaegi can interpret typical contract packages, and whether the reflection codec works on interpreted types. This is the first task in M5; if it fails, the fallback is a per-contract guest built by `plg gen`, which the spike proved works.
+- Resolved (ticket 02): yaegi interprets contract packages inside the wasm guest, and the reflection codec works on interpreted types (see the ticket 02/03 entries below); the per-contract-guest fallback was not needed.
 
 ## Observability
 
@@ -308,7 +308,7 @@ Each milestone is implemented, tested with `go test -race`, smoke-run against re
 
 - Go plugins are ≈ 80× slower per call and ≈ 60× heavier per instance than Lua/TS in this design. This was accepted for full isolation.
 - wazero's exception-handling feature (needed by Lua) is experimental.
-- The yaegi guest's cold compile (≈ 11–15 s) depends on the disk cache and `plg warm` for fast startups.
+- The yaegi guest's cold compile (≈ 3–4 s, ≈ 0.15 s from the disk cache; see tickets 01 and 15) depends on the disk cache and `plg warm` for fast startups.
 - The guest `.wasm` artifacts must be rebuilt and re-verified whenever wazero, wasi-sdk, Lua, QuickJS, yaegi or Go are upgraded.
 
 ## Decisions and measurements (implementation log)
@@ -495,3 +495,13 @@ Each milestone is implemented, tested with `go test -race`, smoke-run against re
 - **Shared contract suite:** the TypeScript row (`plugin.ts`, json field names, `exactInts: false`) runs every shared case: all data types and the nesting limit, ±2^53, fooer (multi-file plugin with relative imports and a `.js` import of a `.ts` file), host, HTTP, pool. TypeScript-only tests cover the hostile corpus (`testdata/hostile/typescript`: throw, rejection, recursion, a never-settling promise, OOM, infinite loop, an oversized result, a Create that runs out of memory or throws), load failures, conversion errors naming the field, value forms, multiple results, host argument errors, fetch's API, the 64 MiB default, `Close`, console logging and the native stack.
 - **Measured (go1.27.3, linux/amd64, Ryzen 9 9950X3D, 32 threads, no race detector, 3 runs):** `BenchmarkCallTypeScript` 2.3–2.6 µs/op, 10 allocs (Go 123–129 µs, Lua 5.9–6.6 µs); `…Parallel` pool=1 2.8–3.0 µs, pool=32 1.2–1.3 µs; `…Struct` (SampleOrder both ways) 28–30 µs, 41 allocs (error paths are built only when a conversion fails: 27% faster than building them eagerly); `…Host` 4.3–4.7 µs, 15 allocs; `…HostStruct` 19 µs, 26 allocs; `BenchmarkHTTPRoundTripTypeScript` 386–400 µs, 95 allocs (parallel 24–29 µs).
 - **Limitations:** the bundle is not source-mapped (stack traces use bundle lines); a response header's values are combined into one, as fetch does; a variadic parameter arrives as one array; integer results that Go would wrap around are refused; JS recursion stops at ≈ 3000 frames; a deep call still allocates its native stack while it runs (≈ 42 MiB plus the doubling copies for 3000 frames) before the stack is released.
+
+### Ticket 15: Examples and README
+
+- **README** is the newcomer's entry point (quick start, contracts and `plg gen`, the three languages, storages, limits, HTTP, Host, reload, observability, CLI, performance). Its quick start is executable: marker comments tag its files, commands and expected output, and `examples/quickstart` copies them into a fresh module, runs the README's commands (only `mkdir` and `go get` are substituted, offline, pointing at this checkout) and compares the program's output with the README.
+- **`examples/` is its own module** (`replace` to the repo root, the only `replace` the lint config lets through) so aws-sdk-go-v2, pgx and testcontainers never enter the core `go.mod`/`go.sum` (asserted by a core test). It holds a pricing contract with a `Customers` Host, three rules (Go `bulk`, Lua `loyalty` calling the host, TypeScript `coupon` throwing), an HTTP service (tested in process and as a built binary stopped with SIGINT), an S3 storage (`plugin.json` layout under a prefix, tested against MinIO) and a Postgres storage (enabled plugins only, versions from a trigger-bumped revision, its own transactional migration, tested against Postgres). Both storage tests load the real Go, Lua and TS rules and reload them after changes.
+- **New API:** `plg.ParseManifest([]byte) (Descriptor, error)` so custom storages read `plugin.json` exactly as `FSStorage` does (errors wrap `ErrInvalidManifest`).
+- **Gates:** `make examples` (fmt, lint, `go mod tidy -diff`, `-race -tags integration` tests with the 95% coverage gate, `-count=10` repeat) is part of `make check` and CI; `make check` therefore needs Docker. The coverage gate skips `examples/service/main.go` like `cmd/plg/main.go`.
+- **Containers:** `minio/minio` is no longer pullable from Docker Hub here, so the tests use `alpine/minio:RELEASE.2025-10-15T17-29-55Z` (`server /tmp/data`, its default data dir is not writable) and `postgres:17-alpine`. MinIO rejects object keys like `a//b` that AWS S3 accepts, so one test wraps the client to produce such a key.
+- **Published ports:** under Docker Desktop (WSL here) the engine picks a published port in its VM without seeing this machine's listeners; a port another local process already held shadowed the container (observed: a WSL listener on the published port answered MinIO's health check with 404 until the 60 s readiness timeout, ≈ 1 in 10 `make check` runs while other agents' tests ran). `pricingtest.PublishOnFreePort` asks the local kernel for a free loopback port and binds the container there. Also: gci's third section is `prefix(github.com/heynemann/go-plg)` instead of `localmodule`, so the core and examples modules format the examples' imports identically (the same grouping for the core module).
+- **Guest compile times (`plg warm`, linux/amd64, cold / from the disk cache):** Go 4.3 s / 0.16 s, Lua 69 ms / 3.5 ms, TypeScript 0.28 s / 13 ms.

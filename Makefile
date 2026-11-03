@@ -82,10 +82,10 @@ TS_STACK := 2097152
 TS_GUEST := guest/typescript/typescript.wasm
 TS_SRC := guestsrc/typescript
 
-.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests go-guest lua-guest ts-guest \
-	verify-guests clean
+.PHONY: check fmt-check lint test coverage allocs budgets repeat examples bench symbols guests go-guest lua-guest \
+	ts-guest verify-guests clean
 
-check: fmt-check lint test coverage allocs budgets repeat
+check: fmt-check lint test coverage allocs budgets repeat examples
 
 # Formatting must leave no diff.
 fmt-check:
@@ -119,6 +119,20 @@ budgets:
 # Unit tests repeated to flush out flakiness and state leaking between runs (RULES.md §2).
 repeat:
 	go test -race -shuffle=on -count=10 ./...
+
+# The examples module (examples/go.mod), kept apart so the core's go.mod never gains its dependencies: formatting,
+# lint, tidy go.mod/go.sum, its unit and integration tests with the race detector (the storages against MinIO and
+# PostgreSQL containers, so Docker is required; the service and the README's quick start with real plugins), the
+# same coverage gate, and its unit tests repeated.
+examples:
+	cd examples && golangci-lint fmt ./...
+	git diff --exit-code -- 'examples/*.go'
+	cd examples && golangci-lint run --build-tags integration ./...
+	cd examples && go mod tidy -diff
+	cd examples && go test -race -shuffle=on -tags integration -covermode=atomic -coverpkg=./... \
+		-coverprofile=$(COVERAGE) ./...
+	cd examples && ../scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
+	cd examples && go test -race -shuffle=on -count=10 ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)
@@ -173,4 +187,4 @@ verify-guests: symbols guests
 	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST))"
 
 clean:
-	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT)
+	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT) examples/$(COVERAGE)
