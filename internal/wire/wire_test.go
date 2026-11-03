@@ -217,7 +217,7 @@ func TestStatusString(t *testing.T) {
 
 	tests := map[wire.Status]string{
 		wire.StatusOK: "ok", wire.StatusError: "error", wire.StatusPanic: "panic", wire.StatusLoad: "load",
-		wire.StatusABI: "abi", 0: "invalid", 200: "invalid",
+		wire.StatusABI: "abi", wire.StatusConvert: "convert", 0: "invalid", 200: "invalid",
 	}
 	for s, want := range tests {
 		assert.Equal(t, want, s.String())

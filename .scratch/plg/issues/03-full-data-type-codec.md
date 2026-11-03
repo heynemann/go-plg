@@ -4,10 +4,10 @@
 
 **Blocked by:** 02 (Tracer bullet)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Round-trip tests through a Go plugin cover every allowed type, including nil pointers, empty vs nil slices/maps, and nested structs
-- [ ] Out-of-range integers fail with a conversion error naming the field
-- [ ] Encoders are built once per type (verified by benchmark: no per-call plan construction)
-- [ ] Benchmarks record ns/op and allocs for a representative struct call
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] Round-trip tests through a Go plugin cover every allowed type, including nil pointers, empty vs nil slices/maps, and nested structs
+- [x] Out-of-range integers fail with a conversion error naming the field
+- [x] Encoders are built once per type (verified by benchmark: no per-call plan construction)
+- [x] Benchmarks record ns/op and allocs for a representative struct call
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

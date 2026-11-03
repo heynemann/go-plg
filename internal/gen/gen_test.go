@@ -33,7 +33,7 @@ func TestTestContractIsUpToDate(t *testing.T) {
 
 	dir := filepath.Join("..", "testcontract")
 
-	file, err := gen.Generate(dir, []string{"Fooer"})
+	file, err := gen.Generate(dir, []string{"Fooer", "Shaper"})
 	require.NoError(t, err)
 	assert.Equal(t, "fooer_plg.go", file.Name)
 

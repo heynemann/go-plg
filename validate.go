@@ -95,13 +95,19 @@ func checkMethod(m *reflect.Method) error {
 }
 
 // checkData accepts the data types: bool, integers, floats, string, time.Time, and slices, string-keyed maps,
-// structs with exported fields and struct pointers built from them. seen holds the struct types being
-// checked, so recursive types terminate.
+// structs with exported fields and struct pointers built from them. seen holds the types already being
+// checked, so recursive types (`type Tree map[string]Tree` as well as structs) terminate.
 func checkData(typ reflect.Type, seen map[reflect.Type]bool) error {
-	if typ == timeType {
+	if typ == timeType || seen[typ] {
 		return nil
 	}
 
+	seen[typ] = true
+
+	return checkKind(typ, seen)
+}
+
+func checkKind(typ reflect.Type, seen map[reflect.Type]bool) error {
 	switch typ.Kind() { //nolint:exhaustive // every other kind is rejected by the default branch
 	case reflect.Bool, reflect.String, reflect.Float32, reflect.Float64,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -129,12 +135,6 @@ func checkData(typ reflect.Type, seen map[reflect.Type]bool) error {
 }
 
 func checkStruct(typ reflect.Type, seen map[reflect.Type]bool) error {
-	if seen[typ] {
-		return nil
-	}
-
-	seen[typ] = true
-
 	for field := range typ.Fields() {
 		if !field.IsExported() {
 			return fmt.Errorf("%s %w: unexported field %s", typ, errNotData, field.Name)

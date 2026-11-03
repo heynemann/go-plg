@@ -11,6 +11,7 @@ import (
 	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/memfs"
+	"github.com/heynemann/go-plg/internal/wire"
 )
 
 // Contract is what plg needs to serve an interface, beyond its reflect type: Go cannot create a type with
@@ -110,10 +111,12 @@ func prepareContract(spec *Contract) (*contract, error) {
 
 	payload := goabi.InitPayload{GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath}
 
+	var planner wire.Planner // shared by the methods, so each type is planned once
+
 	for i, field := range fields {
 		var meth *method
 
-		meth, err = newMethod(spec.Interface, i, field)
+		meth, err = newMethod(&planner, spec.Interface, i, field)
 		if err != nil {
 			return nil, err
 		}

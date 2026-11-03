@@ -162,7 +162,7 @@ func parseResult(view []byte) (Result, error) {
 	switch status {
 	case wire.StatusOK:
 		return Result{Status: status, Body: view[1:]}, nil
-	case wire.StatusError, wire.StatusLoad, wire.StatusPanic, wire.StatusABI:
+	case wire.StatusError, wire.StatusLoad, wire.StatusPanic, wire.StatusABI, wire.StatusConvert:
 	default:
 		return Result{}, fmt.Errorf("%w: invalid status %d", ErrABI, view[0])
 	}

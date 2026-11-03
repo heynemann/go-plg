@@ -45,11 +45,12 @@ type Guest struct {
 }
 
 type method struct {
-	fn      reflect.Value
-	name    string
-	args    []reflect.Value // reused call arguments; args[0] is the context
-	argDec  []*wire.Codec   // one per args[1:]
-	results []*wire.Codec   // one per result except the final error
+	fn       reflect.Value
+	name     string
+	args     []reflect.Value // reused call arguments; args[0] is the context
+	argDec   []*wire.Codec   // one per args[1:]
+	results  []*wire.Codec   // one per result except the final error
+	variadic bool            // the last argument is the variadic slice
 }
 
 // New returns a Guest whose plugin writes to stdout and stderr.
@@ -170,7 +171,7 @@ func (g *Guest) invoke(index, size uint32) []byte {
 		return g.fail(wire.StatusABI, meth.name+": "+err.Error())
 	}
 
-	out := meth.fn.Call(meth.args)
+	out := meth.call()
 	if callErr, failed := reflect.TypeAssert[error](out[len(out)-1]); failed {
 		return g.fail(wire.StatusError, callErr.Error())
 	}
@@ -178,8 +179,8 @@ func (g *Guest) invoke(index, size uint32) []byte {
 	g.out = append(g.out[:0], byte(wire.StatusOK))
 
 	g.out, err = meth.appendResults(g.out, out)
-	if err != nil {
-		return g.fail(wire.StatusABI, meth.name+": "+err.Error())
+	if err != nil { // the plugin returned what cannot cross, such as an integer beyond ±2^53; the host names the method
+		return g.fail(wire.StatusConvert, err.Error())
 	}
 
 	return g.out
@@ -215,9 +216,11 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 		return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
 	}
 
+	var planner wire.Planner // shared by the methods, so each type is planned once
+
 	g.methods = make([]method, len(payload.Methods))
 	for i, name := range payload.Methods {
-		err = g.methods[i].resolve(interpreter, name)
+		err = g.methods[i].resolve(interpreter, &planner, name)
 		if err != nil {
 			return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
 		}
@@ -246,8 +249,10 @@ func checkCreate(interpreter *interp.Interpreter) error {
 	return nil
 }
 
-// resolve looks up the dispatcher function for the named method and builds its codecs.
-func (m *method) resolve(interpreter *interp.Interpreter, name string) error {
+// resolve looks up the dispatcher's variable holding the named method of the plugin instance (bound by
+// [goabi.InitFunc]; the value Eval returns refers to the variable, so it sees that binding) and builds its
+// codecs.
+func (m *method) resolve(interpreter *interp.Interpreter, planner *wire.Planner, name string) error {
 	fn, err := interpreter.Eval(dispatchAlias + "." + goabi.CallPrefix + name)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", name, err)
@@ -259,12 +264,12 @@ func (m *method) resolve(interpreter *interp.Interpreter, name string) error {
 		return fmt.Errorf("%w: %s has type %s", errCallType, name, typ)
 	}
 
-	m.name, m.fn = name, fn
+	m.name, m.fn, m.variadic = name, fn, typ.IsVariadic()
 
-	return m.buildCodecs(typ)
+	return m.buildCodecs(planner, typ)
 }
 
-func (m *method) buildCodecs(typ reflect.Type) error {
+func (m *method) buildCodecs(planner *wire.Planner, typ reflect.Type) error {
 	m.args = make([]reflect.Value, typ.NumIn())
 	m.args[0] = reflect.ValueOf(context.Background())
 	m.argDec = make([]*wire.Codec, typ.NumIn()-1)
@@ -272,7 +277,7 @@ func (m *method) buildCodecs(typ reflect.Type) error {
 	for k := 1; k < typ.NumIn(); k++ {
 		m.args[k] = reflect.New(typ.In(k)).Elem()
 
-		codec, err := wire.For(typ.In(k))
+		codec, err := planner.For(typ.In(k))
 		if err != nil {
 			return fmt.Errorf("%s argument %d: %w", m.name, k, err)
 		}
@@ -282,7 +287,7 @@ func (m *method) buildCodecs(typ reflect.Type) error {
 
 	m.results = make([]*wire.Codec, typ.NumOut()-1)
 	for k := range m.results {
-		codec, err := wire.For(typ.Out(k))
+		codec, err := planner.For(typ.Out(k))
 		if err != nil {
 			return fmt.Errorf("%s result %d: %w", m.name, k, err)
 		}
@@ -291,6 +296,16 @@ func (m *method) buildCodecs(typ reflect.Type) error {
 	}
 
 	return nil
+}
+
+// call calls the plugin's method with the decoded arguments; a variadic method gets its last argument as
+// the slice it was encoded from.
+func (m *method) call() []reflect.Value {
+	if m.variadic {
+		return m.fn.CallSlice(m.args)
+	}
+
+	return m.fn.Call(m.args)
 }
 
 // decodeArgs decodes payload into the reusable call arguments.

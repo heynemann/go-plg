@@ -153,7 +153,7 @@ type pair interface {
 func TestDecodeResultsRejectsMalformedBodies(t *testing.T) {
 	t.Parallel()
 
-	meth, err := newMethod(reflect.TypeFor[pair](), 0, 0)
+	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
 	require.NoError(t, err)
 
 	valid, err := wire.AppendString(nil, "x")

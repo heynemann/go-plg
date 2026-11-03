@@ -53,27 +53,32 @@ func pingerContract() plg.Contract {
 	}
 }
 
-// sliced takes and slicer returns a slice, which the codec does not encode yet.
+// clashIn takes and clashOut returns a struct whose fields share a name for other guest languages: the
+// interface contract accepts it, the codec does not.
 type (
-	sliced interface {
-		Ping(ctx context.Context, msgs []string) error
+	clash struct {
+		A string `json:"name"`
+		B string `json:"name,omitempty"` //nolint:revive,govet // struct-tag, structtag: the duplicate is the case under test
 	}
-	slicer interface {
-		Ping(ctx context.Context) ([]string, error)
+	clashIn interface {
+		Ping(ctx context.Context, c clash) error
+	}
+	clashOut interface {
+		Ping(ctx context.Context) ([]clash, error)
 	}
 )
 
 type (
-	slicedAdapter struct {
-		WPing func(context.Context, []string) error
+	clashInAdapter struct {
+		WPing func(context.Context, clash) error
 	}
-	slicerAdapter struct {
-		WPing func(context.Context) ([]string, error)
+	clashOutAdapter struct {
+		WPing func(context.Context) ([]clash, error)
 	}
 )
 
-func (a *slicedAdapter) Ping(ctx context.Context, msgs []string) error { return a.WPing(ctx, msgs) }
-func (a *slicerAdapter) Ping(ctx context.Context) ([]string, error)    { return a.WPing(ctx) }
+func (a *clashInAdapter) Ping(ctx context.Context, c clash) error    { return a.WPing(ctx, c) }
+func (a *clashOutAdapter) Ping(ctx context.Context) ([]clash, error) { return a.WPing(ctx) }
 
 var errStorage = errors.New("storage unavailable")
 
@@ -304,19 +309,22 @@ func reg[T any](ctx context.Context, ctr *plg.Container) error {
 	return plg.Register[T](ctx, ctr, "x", emptyStorage())
 }
 
-// Data types the interface contract accepts, including a recursive struct.
+// Data types the interface contract accepts, including recursive structs, slices and maps.
 type (
 	node struct {
 		Next     *node
 		Name     string
 		Children []node
 	}
+	nested   []nested
+	tree     map[string]tree
 	label    string
 	celsius  float64
 	allTypes interface {
 		Scalars(ctx context.Context, b bool, i int8, u uint64, f float32, s string, c celsius) error
 		Composite(ctx context.Context, b []byte, m map[string][]int, n *node, t time.Time, tp *time.Time) (
 			map[label]node, []*node, error)
+		Recursive(ctx context.Context, n nested) (tree, error)
 		Nothing(ctx context.Context) error
 	}
 )
@@ -556,15 +564,16 @@ func TestRegisterContractRejectsInvalidContracts(t *testing.T) {
 			contract: plg.Contract{Interface: iface, Adapter: adapter, Source: brokenFS{}},
 		},
 		{
-			name: "unsupported parameter codec", want: "parameter 1: wire: unsupported type",
+			name: "parameter with clashing field names", want: `parameter 1: wire: unsupported type: plg_test.clash: ` +
+				`fields A and B are both named "name"`,
 			contract: plg.Contract{
-				Interface: reflect.TypeFor[sliced](), Adapter: reflect.TypeFor[slicedAdapter](), Source: source,
+				Interface: reflect.TypeFor[clashIn](), Adapter: reflect.TypeFor[clashInAdapter](), Source: source,
 			},
 		},
 		{
-			name: "unsupported result codec", want: "result 0: wire: unsupported type",
+			name: "result with clashing field names", want: "result 0: wire: unsupported type: plg_test.clash",
 			contract: plg.Contract{
-				Interface: reflect.TypeFor[slicer](), Adapter: reflect.TypeFor[slicerAdapter](), Source: source,
+				Interface: reflect.TypeFor[clashOut](), Adapter: reflect.TypeFor[clashOutAdapter](), Source: source,
 			},
 		},
 		{name: "already registered", want: "already has a contract", contract: pingerContract()},

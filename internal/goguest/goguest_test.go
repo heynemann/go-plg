@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -266,16 +267,17 @@ func TestScalarsRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "extremes wrap like compiled Go",
+			name: "extremes wrap like compiled Go, within ±2^53 for 64-bit kinds",
 			args: []any{
-				true, math.MaxInt, int8(math.MaxInt8), int16(math.MaxInt16), int32(math.MaxInt32),
-				int64(math.MinInt64), uint(math.MaxUint), uint8(math.MaxUint8), uint16(math.MaxUint16),
-				uint32(math.MaxUint32), uint64(math.MaxUint64), float32(-1.5), math.SmallestNonzeroFloat64, "héllo",
+				true, wire.MaxSafeInt - 1, int8(math.MaxInt8), int16(math.MaxInt16), int32(math.MaxInt32),
+				int64(-wire.MaxSafeInt), uint(wire.MaxSafeInt - 1), uint8(math.MaxUint8), uint16(math.MaxUint16),
+				uint32(math.MaxUint32), uint64(wire.MaxSafeInt - 1), float32(-1.5), math.SmallestNonzeroFloat64,
+				"héllo",
 			},
 			want: []any{
-				false, math.MinInt, int8(math.MinInt8), int16(math.MinInt16), int32(math.MinInt32),
-				int64(math.MinInt64 + 1), uint(0), uint8(0), uint16(0), uint32(0), uint64(0), float32(-3),
-				2 * math.SmallestNonzeroFloat64, "HÉLLO",
+				false, wire.MaxSafeInt, int8(math.MinInt8), int16(math.MinInt16), int32(math.MinInt32),
+				int64(-wire.MaxSafeInt + 1), uint(wire.MaxSafeInt), uint8(0), uint16(0), uint32(0),
+				uint64(wire.MaxSafeInt), float32(-3), 2 * math.SmallestNonzeroFloat64, "HÉLLO",
 			},
 		},
 	}
@@ -285,6 +287,24 @@ func TestScalarsRoundTrip(t *testing.T) {
 		require.Equal(t, wire.StatusOK, res.status, res.msg)
 		assert.Equal(t, tc.want, decode(t, res.body, tc.want...), tc.name)
 	}
+}
+
+// A result the plugin computes beyond ±2^53 cannot cross: the call fails with StatusConvert naming the
+// result, and the instance keeps serving.
+func TestResultsBeyondTwoToThe53DoNotCross(t *testing.T) {
+	t.Parallel()
+
+	guest := loadOK(t, "fooer")
+
+	res := call(t, guest, "Scalars", false, wire.MaxSafeInt, int8(0), int16(0), int32(0), int64(0), uint(0),
+		uint8(0), uint16(0), uint32(0), uint64(0), float32(0), float64(0), "")
+	require.Equal(t, wire.StatusConvert, res.status, res.msg)
+	assert.True(t, strings.HasPrefix(res.msg, "result 1: "), res.msg)
+	assert.Contains(t, res.msg, strconv.Itoa(wire.MaxSafeInt+1))
+
+	res = call(t, guest, "Spin", 3)
+	require.Equal(t, wire.StatusOK, res.status, "the instance is not broken: %s", res.msg)
+	assert.Equal(t, 3, decode(t, res.body, 0)[0])
 }
 
 func TestNamedScalarCrossesByKind(t *testing.T) {
@@ -402,6 +422,35 @@ func TestStdlibAllowlist(t *testing.T) {
 	}
 }
 
+// A plugin may implement part of the interface by embedding it, as in compiled Go: its own methods work and
+// the others panic only when called (yaegi cannot bind them; the dispatcher forwards them instead).
+func TestPartialImplementationPanicsOnlyWhenCalled(t *testing.T) {
+	t.Parallel()
+
+	guest, res := load(t, map[string]string{"p.go": `package p
+
+import (
+	"context"
+
+	"github.com/heynemann/go-plg/internal/testcontract"
+)
+
+type partial struct{ testcontract.Fooer }
+
+func (partial) Foo(_ context.Context, name string) (string, error) { return "only " + name, nil }
+
+func Create() (testcontract.Fooer, error) { return partial{}, nil }
+`})
+	require.Equal(t, wire.StatusOK, res.status, res.msg)
+
+	res = call(t, guest, "Foo", "me")
+	require.Equal(t, wire.StatusOK, res.status, res.msg)
+	assert.Equal(t, "only me", decode(t, res.body, "")[0])
+
+	res = call(t, guest, "Count")
+	assert.Equal(t, wire.StatusPanic, res.status, "the unimplemented method panics on the call, like Go")
+}
+
 func TestABIViolations(t *testing.T) {
 	t.Parallel()
 
@@ -514,12 +563,12 @@ func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
 		{"call of a non-function", header + init + "var PlgCall_Foo = 3\n", "want func(context.Context"},
 		{
 			"unsupported argument",
-			header + init + "func PlgCall_Foo(ctx context.Context, s []string) error { return nil }\n",
+			header + init + "func PlgCall_Foo(ctx context.Context, c chan int) error { return nil }\n",
 			"argument 1",
 		},
 		{
 			"unsupported result",
-			header + init + "func PlgCall_Foo(ctx context.Context) ([]string, error) { return nil, nil }\n",
+			header + init + "func PlgCall_Foo(ctx context.Context) (map[int]string, error) { return nil, nil }\n",
 			"result 0",
 		},
 	}

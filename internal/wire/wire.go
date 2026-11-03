@@ -1,10 +1,28 @@
 // Package wire is the binary encoding shared by the plg host and its guests.
 //
-// Values are little-endian and length-prefixed: bool is one byte (0 or 1); every integer kind is eight bytes
-// (two's complement for signed kinds); every float kind is the eight-byte IEEE 754 binary64 bit pattern;
-// strings are a uint32 byte length followed by the bytes; an error is a presence byte followed, when present,
-// by its message as a string. A call's arguments (and a result's values) are the concatenation of their
-// encodings, without a count: both sides know the signature.
+// Values are little-endian and length-prefixed, and carry no type information: both sides know the signature.
+// A call's arguments (and a result's values) are the concatenation of their encodings, without a count.
+//
+//   - bool: one byte, 0 or 1.
+//   - Integers of every kind: eight bytes, two's complement for signed kinds. Only |n| <= 2^53 ([MaxSafeInt])
+//     crosses: Lua and JavaScript numbers represent no more integers exactly, so larger magnitudes fail to
+//     encode (and to decode) with [ErrPrecision] instead of losing precision in another guest language.
+//   - Floats of every kind: the eight-byte IEEE 754 binary64 bit pattern.
+//   - string: a uint32 byte length, then the bytes.
+//   - []byte (any slice of a uint8 kind): a uint32 length, then the bytes; the length 0xFFFFFFFF is a nil
+//     slice, so nil and empty stay distinct.
+//   - Other slices: a uint32 element count (0xFFFFFFFF for nil), then the elements.
+//   - Maps (string keys only): a uint32 entry count (0xFFFFFFFF for nil), then per entry the key as a string
+//     and the value. Entries are in map iteration order; a decoder rejects duplicate keys.
+//   - Pointers: a presence byte (0 for nil), then the pointee when present.
+//   - Structs: the encoded fields in declaration order, without names. A field tagged `json:"-"` is not
+//     encoded (and decodes as its zero value). Names live in the [Schema], for guests without Go types.
+//   - time.Time: Unix seconds then nanoseconds (0 to 999999999), two integers; the instant crosses, the
+//     location and monotonic reading do not, and it decodes in UTC.
+//   - error: a presence byte followed, when present, by its message as a string.
+//
+// Nesting deeper than [MaxDepth] fails, so a hostile encoding cannot exhaust the decoder's stack and a pointer
+// cycle cannot hang its encoder. A length prefix never makes a decoder allocate more than its input justifies.
 //
 // Every guest result buffer starts with a [Status] byte.
 package wire
@@ -33,6 +51,9 @@ const (
 	StatusLoad
 	// StatusABI means the guest rejected the request itself (malformed buffer, unknown method, bad state).
 	StatusABI
+	// StatusConvert means the plugin's results cannot be encoded (for example an integer beyond ±2^53); the
+	// body is the message, naming the result and field. The instance stays usable.
+	StatusConvert
 )
 
 // String returns the status name, for diagnostics.
@@ -48,14 +69,17 @@ func (s Status) String() string {
 		return "load"
 	case StatusABI:
 		return "abi"
+	case StatusConvert:
+		return "convert"
 	default:
 		return "invalid"
 	}
 }
 
-// Decoding errors. They are wrapped with context by the decoders.
+// Encoding and decoding errors. They are wrapped with context by the codecs.
 var (
-	// ErrTruncated reports input that ends before a complete value.
+	// ErrTruncated reports input that ends before a complete value, or a length prefix claiming more elements
+	// than the remaining input can hold.
 	ErrTruncated = errors.New("wire: truncated input")
 	// ErrTrailing reports bytes left over after the last expected value.
 	ErrTrailing = errors.New("wire: trailing bytes")
@@ -63,15 +87,27 @@ var (
 	ErrInvalid = errors.New("wire: invalid encoding")
 	// ErrOverflow reports a decoded number that does not fit the destination type.
 	ErrOverflow = errors.New("wire: value out of range")
+	// ErrPrecision reports an integer beyond ±2^53, which Lua and JavaScript numbers cannot represent exactly.
+	ErrPrecision = errors.New("wire: integer beyond ±2^53")
 	// ErrUnsupported reports a Go type the encoding cannot represent.
 	ErrUnsupported = errors.New("wire: unsupported type")
-	// ErrTooLong reports a string longer than the uint32 length prefix can describe.
+	// ErrTooLong reports a string or collection longer than the uint32 length prefix can describe.
 	ErrTooLong = errors.New("wire: value too long")
+	// ErrTooDeep reports a value nested deeper than [MaxDepth] (on encoding, usually a pointer cycle).
+	ErrTooDeep = errors.New("wire: value nested too deeply")
+)
+
+const (
+	// MaxSafeInt is the largest integer magnitude that crosses: 2^53, the integers every float64 holds exactly.
+	MaxSafeInt = 1 << 53
+	// MaxDepth bounds the nesting of slices, maps, pointers and structs inside one value.
+	MaxDepth = 10000
 )
 
 const (
 	wordSize   = 8
 	lengthSize = 4
+	nilLength  = math.MaxUint32 // the length prefix of a nil slice or map
 )
 
 // AppendBool appends the encoding of v.
@@ -111,6 +147,21 @@ func AppendString(b []byte, s string) ([]byte, error) {
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(s))) //nolint:gosec // G115: bounded by the check above
 
 	return append(b, s...), nil
+}
+
+// appendLength appends the length prefix of a non-nil slice or map of n elements. 0xFFFFFFFF is reserved for
+// nil, so n must be smaller. (Like AppendString's, that guard needs over 4 Gi elements to test.)
+func appendLength(b []byte, n int) ([]byte, error) {
+	if uint64(n) >= nilLength { //nolint:gosec // G115: n is a length, never negative
+		return b, ErrTooLong
+	}
+
+	return binary.LittleEndian.AppendUint32(b, uint32(n)), nil //nolint:gosec // G115: bounded by the check above
+}
+
+// appendNil appends the length prefix of a nil slice or map.
+func appendNil(b []byte) []byte {
+	return binary.LittleEndian.AppendUint32(b, nilLength)
 }
 
 // MaxMessage bounds the status messages a result buffer carries, so a hostile plugin's error text cannot
@@ -215,6 +266,21 @@ func (r *Reader) Text() (string, error) {
 	r.off += n
 
 	return string(r.buf[start:r.off]), nil
+}
+
+// length decodes the length prefix of a slice or map; a nil one has length -1.
+func (r *Reader) length() (int, error) {
+	p, err := r.next(lengthSize)
+	if err != nil {
+		return 0, err
+	}
+
+	prefix := binary.LittleEndian.Uint32(p)
+	if prefix == nilLength {
+		return -1, nil
+	}
+
+	return int(prefix), nil
 }
 
 func (r *Reader) next(n int) ([]byte, error) {

@@ -117,12 +117,19 @@ func TestRenderDispatcherForTheTestContract(t *testing.T) {
 		goabi.PluginImportPath:                          "plugin",
 	}, imports, "every package is aliased, so package names never matter")
 
-	s := string(src)
-	assert.Contains(t, s, "var create func() (p1.Fooer, error) = plugin.Create")
-	assert.Contains(t, s, "func PlgInit() (string, error) {")
-	assert.Contains(t, s, "func PlgCall_Foo(a0 p0.Context, a1 string) (string, error) {\n\treturn inst.Foo(a0, a1)\n}")
-	assert.Contains(t, s, "func PlgCall_Boil(a0 p0.Context, a1 p1.Celsius) (bool, float64, error) {")
-	assert.Contains(t, s, "func PlgCall_Fail(a0 p0.Context, a1 string) (error) {")
+	for _, want := range []string{
+		"var create func() (p1.Fooer, error) = plugin.Create",
+		"func PlgInit() (string, error) {",
+		"var PlgCall_Foo func(p0.Context, string) (string, error)\n",
+		"\tPlgCall_Foo = plgBind_Foo(v)\n", // PlgInit binds the instance's method
+		"func plgBind_Foo(v p1.Fooer) (f func(p0.Context, string) (string, error)) {",
+		// a method yaegi cannot bind is forwarded
+		"f = func(a0 p0.Context, a1 string) (string, error) { return v.Foo(a0, a1) }",
+		"var PlgCall_Boil func(p0.Context, p1.Celsius) (bool, float64, error)\n",
+		"var PlgCall_Fail func(p0.Context, string) error\n", // a single result is not parenthesized
+	} {
+		assert.Contains(t, string(src), want)
+	}
 
 	again, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer]())
 	require.NoError(t, err)
@@ -168,11 +175,14 @@ func TestRenderDispatcherTypeExpressions(t *testing.T) {
 	for _, want := range []string{
 		`p1 "github.com/heynemann/go-plg/internal/goabi_test"`,
 		`p2 "time"`,
-		"func PlgCall_Slices(a0 p0.Context, a1 []string, a2 [][]uint8, a3 [3]int) ([]p1.Point, error) {",
-		"func PlgCall_Maps(a0 p0.Context, a1 map[string]*p1.Point, a2 p2.Time) (map[string][]int, error) {",
-		"func PlgCall_Anonymous(a0 p0.Context, a1 struct{ p1.Inner; *p1.Point; Name string \"json:\\\"name\\\"\" }) (error) {",
-		"func PlgCall_Variadic(a0 p0.Context, a1 string, a2 ...int) (error) {\n\treturn inst.Variadic(a0, a1, a2...)\n}",
-		"func PlgCall_None() () {\n\tinst.None()\n}",
+		"var PlgCall_Slices func(p0.Context, []string, [][]uint8, [3]int) ([]p1.Point, error)\n",
+		"var PlgCall_Maps func(p0.Context, map[string]*p1.Point, p2.Time) (map[string][]int, error)\n",
+		"var PlgCall_Anonymous func(p0.Context, struct{ p1.Inner; *p1.Point; Name string \"json:\\\"name\\\"\" }) error\n",
+		"var PlgCall_Variadic func(p0.Context, string, ...int) error\n",
+		"var PlgCall_None func()\n",
+		"\tPlgCall_None = plgBind_None(v)\n",
+		"f = func() { v.None() }",
+		"f = func(a0 p0.Context, a1 string, a2 ...int) error { return v.Variadic(a0, a1, a2...) }",
 	} {
 		assert.Contains(t, text, want)
 	}

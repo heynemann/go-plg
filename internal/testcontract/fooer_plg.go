@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"reflect"
+	"time"
 
 	plg "github.com/heynemann/go-plg"
 )
@@ -52,10 +53,66 @@ func (a *plgFooer) Spin(p0 context.Context, p1 int) (int, error) {
 	return a.WSpin(p0, p1)
 }
 
+// plgShaper implements Shaper for plg, which fills each W field with a call into a plugin.
+type plgShaper struct {
+	WBump    func(context.Context, Order, int) (Order, error)
+	WEcho    func(context.Context, Order) (Order, error)
+	WEchoPtr func(context.Context, *Order) (*Order, error)
+	WGrow    func(context.Context, int, int) (*Tree, error)
+	WIndex   func(context.Context, []Line) (map[string][]Line, error)
+	WInspect func(context.Context, Order) (Inspection, error)
+	WLater   func(context.Context, time.Time, int) (time.Time, error)
+	WReverse func(context.Context, []byte) ([]byte, error)
+	WSum     func(context.Context, int, ...int) (int, error)
+}
+
+var _ Shaper = (*plgShaper)(nil)
+
+func (a *plgShaper) Bump(p0 context.Context, p1 Order, p2 int) (Order, error) {
+	return a.WBump(p0, p1, p2)
+}
+
+func (a *plgShaper) Echo(p0 context.Context, p1 Order) (Order, error) {
+	return a.WEcho(p0, p1)
+}
+
+func (a *plgShaper) EchoPtr(p0 context.Context, p1 *Order) (*Order, error) {
+	return a.WEchoPtr(p0, p1)
+}
+
+func (a *plgShaper) Grow(p0 context.Context, p1 int, p2 int) (*Tree, error) {
+	return a.WGrow(p0, p1, p2)
+}
+
+func (a *plgShaper) Index(p0 context.Context, p1 []Line) (map[string][]Line, error) {
+	return a.WIndex(p0, p1)
+}
+
+func (a *plgShaper) Inspect(p0 context.Context, p1 Order) (Inspection, error) {
+	return a.WInspect(p0, p1)
+}
+
+func (a *plgShaper) Later(p0 context.Context, p1 time.Time, p2 int) (time.Time, error) {
+	return a.WLater(p0, p1, p2)
+}
+
+func (a *plgShaper) Reverse(p0 context.Context, p1 []byte) ([]byte, error) {
+	return a.WReverse(p0, p1)
+}
+
+func (a *plgShaper) Sum(p0 context.Context, p1 int, p2 ...int) (int, error) {
+	return a.WSum(p0, p1, p2...)
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
 		Adapter:   reflect.TypeFor[plgFooer](),
+		Source:    plgFooerSource,
+	})
+	plg.MustRegisterContract(plg.Contract{
+		Interface: reflect.TypeFor[Shaper](),
+		Adapter:   reflect.TypeFor[plgShaper](),
 		Source:    plgFooerSource,
 	})
 }

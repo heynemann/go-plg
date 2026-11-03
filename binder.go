@@ -11,7 +11,7 @@ import (
 )
 
 // method is the call plan of one interface method, built once per contract: the codecs of its arguments
-// (after the context) and of its results (before the error).
+// (after the context) and of its results (before the error). Calls never plan a type again.
 type method struct {
 	typ     reflect.Type
 	name    string
@@ -22,7 +22,9 @@ type method struct {
 	index   uint32          // the method index of plg_call
 }
 
-func newMethod(iface reflect.Type, index, field int) (*method, error) {
+// newMethod plans the method with the given index; planner is shared by the contract's methods, so each type
+// of the contract is planned once.
+func newMethod(planner *wire.Planner, iface reflect.Type, index, field int) (*method, error) {
 	sig := iface.Method(index)
 	fn := sig.Type
 	plan := &method{
@@ -35,7 +37,7 @@ func newMethod(iface reflect.Type, index, field int) (*method, error) {
 	}
 
 	for k := 1; k < fn.NumIn(); k++ {
-		codec, err := wire.For(fn.In(k))
+		codec, err := planner.For(fn.In(k))
 		if err != nil {
 			return nil, fmt.Errorf("method %s: parameter %d: %w", sig.Name, k, err)
 		}
@@ -44,7 +46,7 @@ func newMethod(iface reflect.Type, index, field int) (*method, error) {
 	}
 
 	for k := range fn.NumOut() - 1 {
-		codec, err := wire.For(fn.Out(k))
+		codec, err := planner.For(fn.Out(k))
 		if err != nil {
 			return nil, fmt.Errorf("method %s: result %d: %w", sig.Name, k, err)
 		}
@@ -161,7 +163,7 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []
 
 	held.buf, err = meth.encodeArgs(held.buf[:0], args)
 	if err != nil {
-		return nil, false, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, err)
+		return nil, false, fmt.Errorf("%w: %s.%s: %w", ErrConversion, p.key, meth.name, err)
 	}
 
 	res, err := held.inst.Call(ctx, meth.index, held.buf)
@@ -179,6 +181,8 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []
 		return out, false, nil
 	case wire.StatusError:
 		return nil, false, &PluginError{Key: p.key, Method: meth.name, Message: res.Message}
+	case wire.StatusConvert:
+		return nil, false, fmt.Errorf("%w: %s.%s: %s", ErrConversion, p.key, meth.name, res.Message)
 	default:
 		return nil, true, fmt.Errorf("%w: %s.%s: guest status %s: %s", ErrCall, p.key, meth.name, res.Status,
 			res.Message)

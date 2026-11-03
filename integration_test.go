@@ -128,15 +128,15 @@ func TestCallsReachThePluginThroughItsInterface(t *testing.T) {
 		t.Parallel()
 
 		b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := ref.Scalars(t.Context(),
-			false, math.MaxInt-1, math.MaxInt8-1, math.MinInt16, math.MinInt32, math.MinInt64,
-			0, math.MaxUint8-1, math.MaxUint16-1, math.MaxUint32-1, math.MaxUint64-1, 1.5, -0.25, "ünï")
+			false, maxSafeInt-1, math.MaxInt8-1, math.MinInt16, math.MinInt32, -maxSafeInt,
+			0, math.MaxUint8-1, math.MaxUint16-1, math.MaxUint32-1, maxSafeInt-1, 1.5, -0.25, "ünï")
 		got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
 
 		require.NoError(t, err)
 		assert.Equal(t, []any{
-			true, math.MaxInt, int8(math.MaxInt8), int16(math.MinInt16 + 1), int32(math.MinInt32 + 1),
-			int64(math.MinInt64 + 1), uint(1), uint8(math.MaxUint8), uint16(math.MaxUint16),
-			uint32(math.MaxUint32), uint64(math.MaxUint64), float32(3), -0.5, "ÜNÏ",
+			true, maxSafeInt, int8(math.MaxInt8), int16(math.MinInt16 + 1), int32(math.MinInt32 + 1),
+			int64(-maxSafeInt + 1), uint(1), uint8(math.MaxUint8), uint16(math.MaxUint16),
+			uint32(math.MaxUint32), uint64(maxSafeInt), float32(3), -0.5, "ÜNÏ",
 		}, got, "each value transformed by the plugin")
 	})
 
@@ -144,14 +144,14 @@ func TestCallsReachThePluginThroughItsInterface(t *testing.T) {
 		t.Parallel()
 
 		b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := main.Scalars(t.Context(),
-			true, math.MinInt, math.MinInt8, math.MaxInt16, math.MaxInt32, math.MaxInt64,
-			math.MaxUint, 0, 0, 0, 0, math.MaxFloat32, math.SmallestNonzeroFloat64, "")
+			true, -maxSafeInt, math.MinInt8, math.MaxInt16, math.MaxInt32, maxSafeInt,
+			maxSafeInt, 0, 0, 0, 0, math.MaxFloat32, math.SmallestNonzeroFloat64, "")
 		got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
 
 		require.NoError(t, err)
 		assert.Equal(t, []any{
-			true, math.MinInt, int8(math.MinInt8), int16(math.MaxInt16), int32(math.MaxInt32),
-			int64(math.MaxInt64), uint(math.MaxUint), uint8(0), uint16(0), uint32(0), uint64(0),
+			true, -maxSafeInt, int8(math.MinInt8), int16(math.MaxInt16), int32(math.MaxInt32),
+			int64(maxSafeInt), uint(maxSafeInt), uint8(0), uint16(0), uint32(0), uint64(0),
 			float32(math.MaxFloat32), math.SmallestNonzeroFloat64, "",
 		}, got, "each value back unchanged")
 	})
@@ -224,7 +224,7 @@ func TestDeadlineStopsTheCallAndDiscardsTheInstance(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err = ref.Spin(ctx, math.MaxInt) // never finishes on its own
+	_, err = ref.Spin(ctx, maxSafeInt) // never finishes on its own
 	require.ErrorIs(t, err, plg.ErrCall)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the guest was stopped preemptively")
 

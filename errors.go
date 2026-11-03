@@ -40,6 +40,10 @@ var (
 	// ErrCall reports a call that failed outside the plugin's own code: the guest trapped, panicked, was
 	// stopped by its context or broke the guest ABI. The instance that served it is discarded.
 	ErrCall = errors.New("plg: plugin call failed")
+	// ErrConversion reports an argument or result that cannot cross the plugin boundary, such as an integer
+	// beyond ±2^53 (which Lua and JavaScript numbers cannot represent exactly) or a pointer cycle. The message
+	// names the parameter or result and the field inside it. The instance stays usable.
+	ErrConversion = errors.New("plg: value cannot cross the plugin boundary")
 )
 
 // PluginError is an error a plugin method returned. Only its message crosses the sandbox boundary, so Error

@@ -9,14 +9,16 @@ import (
 	"strings"
 )
 
-// initTemplate renders the plugin instance and [InitFunc]. yaegi's run-time interface assertions are
-// unreliable, so Create is assigned to a variable of the exact expected type: yaegi rejects a Create with any
-// other signature when it compiles the dispatcher. A nil instance is reported as a problem (a load failure),
-// apart from Create's own error.
-const initTemplate = `var inst %[1]s
+// initTemplate renders [InitFunc], which creates the plugin instance and binds its methods to the
+// [CallPrefix]+<Method> variables. yaegi's run-time interface assertions are unreliable, so Create is assigned
+// to a variable of the exact expected type: yaegi rejects a Create with any other signature when it compiles
+// the dispatcher. A nil instance is reported as a problem (a load failure), apart from Create's own error.
+//
+// The guest calls the bound method values directly: a forwarding function per method would cost a second
+// interpreted call and a dynamic method lookup on every call, about half of a small call's time in the guest.
+const initTemplate = `var create func() (%[1]s, error) = plugin.%[2]s
 
-var create func() (%[1]s, error) = plugin.%[2]s
-
+%[5]s
 func %[3]s() (string, error) {
 	v, err := create()
 	if err != nil {
@@ -27,19 +29,36 @@ func %[3]s() (string, error) {
 		return %[4]s, nil
 	}
 
-	inst = v
-
+%[6]s
 	return "", nil
 }
 `
 
+// bindTemplate renders the binder of one method. Binding a method that the instance promotes from a nil
+// embedded interface (a plugin implementing only part of the interface) panics in yaegi, where Go panics only
+// when the method is called: the binder then forwards each call instead, which panics like Go on the call.
+const bindTemplate = `
+func %[1]s%[2]s(v %[3]s) (f %[4]s) {
+	defer func() {
+		if recover() != nil {
+			f = func(%[5]s)%[6]s { %[7]sv.%[2]s(%[8]s) }
+		}
+	}()
+
+	return v.%[2]s
+}
+`
+
+// bindPrefix prefixes the dispatcher's binder of each method.
+const bindPrefix = "plgBind_"
+
 // ErrRender reports an interface the dispatcher cannot be rendered for.
 var ErrRender = errors.New("goabi: cannot render dispatcher")
 
-// RenderDispatcher returns the Go source of the dispatcher package for the named interface iface: it holds the
-// plugin instance returned by the plugin package's Create and forwards one [CallPrefix]+<Method> function to
-// each method. Every package a signature refers to is imported under a generated alias, so the output does
-// not depend on package names. The output is deterministic.
+// RenderDispatcher returns the Go source of the dispatcher package for the named interface iface: its
+// [InitFunc] calls the plugin package's Create and binds each method of the instance to a variable
+// [CallPrefix]+<Method> of the method's type. Every package a signature refers to is imported under a
+// generated alias, so the output does not depend on package names. The output is deterministic.
 func RenderDispatcher(iface reflect.Type) ([]byte, error) {
 	if iface.Kind() != reflect.Interface || iface.Name() == "" || iface.PkgPath() == "" {
 		return nil, fmt.Errorf("%w: %s is not a named interface type", ErrRender, iface)
@@ -167,32 +186,57 @@ func (r *renderer) render(iface reflect.Type) []byte {
 	}
 
 	r.printf("\tplugin %s\n)\n\n", strconv.Quote(PluginImportPath))
-	r.printf(initTemplate, r.typeExpr(iface), CreateFunc, InitFunc,
-		strconv.Quote(CreateFunc+" returned a nil "+iface.String()))
 
-	for m := range iface.Methods() {
-		r.renderMethod(&m)
+	ifaceExpr := r.typeExpr(iface)
+	sigs := make([]signature, iface.NumMethod())
+
+	var vars, binds strings.Builder
+
+	for i := range sigs {
+		name := iface.Method(i).Name
+		sigs[i] = r.signature(iface.Method(i).Type)
+		fmt.Fprintf(&vars, "var %s%s %s\n", CallPrefix, name, sigs[i].funcExpr())
+		fmt.Fprintf(&binds, "\t%s%s = %s%s(v)\n", CallPrefix, name, bindPrefix, name)
+	}
+
+	r.printf(initTemplate, ifaceExpr, CreateFunc, InitFunc,
+		strconv.Quote(CreateFunc+" returned a nil "+iface.String()), vars.String(), binds.String())
+
+	for i, sig := range sigs {
+		ret := ""
+		if sig.results != "" {
+			ret = "return "
+		}
+
+		r.printf(bindTemplate, bindPrefix, iface.Method(i).Name, ifaceExpr, sig.funcExpr(),
+			strings.Join(sig.params, ", "), sig.results, ret, strings.Join(sig.args, ", "))
 	}
 
 	return []byte(r.b.String())
 }
 
-func (r *renderer) renderMethod(method *reflect.Method) {
-	fn := method.Type
-	params := make([]string, 0, fn.NumIn())
-	args := make([]string, 0, fn.NumIn())
+// signature is a method signature written as Go source.
+type signature struct {
+	results string   // the result list, with its leading space; empty without results
+	types   []string // parameter types, the variadic one as ...T
+	params  []string // parameter declarations a0 T0, a1 T1, ...
+	args    []string // arguments forwarding the parameters: a0, a1, ..., the variadic one as aN...
+}
+
+func (r *renderer) signature(fn reflect.Type) signature {
+	var sig signature
 
 	for typ := range fn.Ins() {
-		arg := "a" + strconv.Itoa(len(args))
-		param := arg + " " + r.typeExpr(typ)
+		name := "a" + strconv.Itoa(len(sig.args))
+		expr, arg := r.typeExpr(typ), name
 
-		if fn.IsVariadic() && len(args) == fn.NumIn()-1 {
-			param = arg + " ..." + r.typeExpr(typ.Elem())
-			arg += "..."
+		if fn.IsVariadic() && len(sig.args) == fn.NumIn()-1 {
+			expr, arg = "..."+r.typeExpr(typ.Elem()), name+"..."
 		}
 
-		params = append(params, param)
-		args = append(args, arg)
+		sig.types = append(sig.types, expr)
+		sig.params = append(sig.params, name+" "+expr)
+		sig.args = append(sig.args, arg)
 	}
 
 	results := make([]string, 0, fn.NumOut())
@@ -200,13 +244,19 @@ func (r *renderer) renderMethod(method *reflect.Method) {
 		results = append(results, r.typeExpr(typ))
 	}
 
-	call := "inst." + method.Name + "(" + strings.Join(args, ", ") + ")"
-	if len(results) > 0 {
-		call = "return " + call
+	switch len(results) {
+	case 0:
+	case 1:
+		sig.results = " " + results[0]
+	default:
+		sig.results = " (" + strings.Join(results, ", ") + ")"
 	}
 
-	r.printf("\nfunc %s%s(%s) (%s) {\n\t%s\n}\n",
-		CallPrefix, method.Name, strings.Join(params, ", "), strings.Join(results, ", "), call)
+	return sig
+}
+
+func (s *signature) funcExpr() string {
+	return "func(" + strings.Join(s.types, ", ") + ")" + s.results
 }
 
 // typeExpr writes typ as a type expression; collect has validated it.

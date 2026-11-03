@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -19,6 +20,7 @@ type (
 	small   int8
 	flag    bool
 	count   uint16
+	bigID   int64
 )
 
 var (
@@ -35,23 +37,41 @@ func codecFor(tb testing.TB, typ reflect.Type) *wire.Codec {
 	return codec
 }
 
+func encodeValue(tb testing.TB, v any) []byte {
+	tb.Helper()
+
+	buf, err := codecFor(tb, reflect.TypeOf(v)).Append(nil, reflect.ValueOf(v))
+	require.NoError(tb, err)
+
+	return buf
+}
+
+// decodeInto decodes buf as one value of typ, requiring that it consumes buf.
+func decodeInto(tb testing.TB, typ reflect.Type, buf []byte) (any, error) {
+	tb.Helper()
+
+	reader := wire.NewReader(buf)
+	out := reflect.New(typ).Elem()
+
+	err := codecFor(tb, typ).Decode(&reader, out)
+	if err == nil {
+		err = reader.End()
+	}
+
+	return out.Interface(), err
+}
+
 // roundTrip encodes v with the codec of its type and decodes it into a fresh value of the same type.
 func roundTrip(t *testing.T, v any) any {
 	t.Helper()
 
 	typ := reflect.TypeOf(v)
-	codec := codecFor(t, typ)
-	assert.Equal(t, typ, codec.Type())
+	assert.Equal(t, typ, codecFor(t, typ).Type())
 
-	buf, err := codec.Append(nil, reflect.ValueOf(v))
+	out, err := decodeInto(t, typ, encodeValue(t, v))
 	require.NoError(t, err)
 
-	reader := wire.NewReader(buf)
-	out := reflect.New(typ).Elem()
-	require.NoError(t, codec.Decode(&reader, out))
-	require.NoError(t, reader.End())
-
-	return out.Interface()
+	return out
 }
 
 func TestScalarCodecsRoundTrip(t *testing.T) {
@@ -61,25 +81,24 @@ func TestScalarCodecsRoundTrip(t *testing.T) {
 		true,
 		false,
 		0,
-		math.MaxInt,
-		math.MinInt,
+		wire.MaxSafeInt,
+		-wire.MaxSafeInt,
 		int8(math.MinInt8),
 		int8(math.MaxInt8),
 		int16(math.MinInt16),
 		int32(math.MaxInt32),
-		int64(math.MinInt64),
-		uint(
-			math.MaxUint,
-		),
+		int64(-wire.MaxSafeInt),
+		uint(wire.MaxSafeInt),
 		uint8(math.MaxUint8),
 		uint16(math.MaxUint16),
 		uint32(math.MaxUint32),
-		uint64(math.MaxUint64),
+		uint64(wire.MaxSafeInt),
 		float32(math.MaxFloat32),
 		float32(-math.SmallestNonzeroFloat32),
 		float32(math.Inf(1)),
 		3.25,
 		math.Inf(-1),
+		math.MaxFloat64,
 		"",
 		"plg",
 		"h\u00e9llo",
@@ -88,6 +107,7 @@ func TestScalarCodecsRoundTrip(t *testing.T) {
 		small(-3),
 		flag(true),
 		count(65535),
+		bigID(-wire.MaxSafeInt),
 	}
 
 	for _, v := range values {
@@ -99,13 +119,37 @@ func TestScalarCodecsRoundTrip(t *testing.T) {
 func TestNamedTypesShareTheirKindsEncoding(t *testing.T) {
 	t.Parallel()
 
-	named, err := codecFor(t, reflect.TypeFor[celsius]()).Append(nil, reflect.ValueOf(celsius(21.5)))
+	got, err := decodeInto(t, reflect.TypeFor[float64](), encodeValue(t, celsius(21.5)))
 	require.NoError(t, err)
+	assert.InDelta(t, 21.5, got, 0)
+}
 
-	reader := wire.NewReader(named)
-	plain := reflect.New(reflect.TypeFor[float64]()).Elem()
-	require.NoError(t, codecFor(t, plain.Type()).Decode(&reader, plain))
-	assert.InDelta(t, 21.5, plain.Float(), 0)
+// Integers beyond ±2^53 cannot be represented exactly by Lua and JavaScript numbers: they fail on both sides
+// of the wire, so no guest language ever sees a rounded value.
+func TestIntegersBeyondTwoToThe53DoNotCross(t *testing.T) {
+	t.Parallel()
+
+	for _, v := range []any{
+		wire.MaxSafeInt + 1, -wire.MaxSafeInt - 1, math.MaxInt, math.MinInt, int64(math.MinInt64),
+		bigID(wire.MaxSafeInt + 1), uint(wire.MaxSafeInt + 1), uint64(math.MaxUint64),
+	} {
+		_, err := codecFor(t, reflect.TypeOf(v)).Append(nil, reflect.ValueOf(v))
+		require.ErrorIs(t, err, wire.ErrPrecision, "%T(%v)", v, v)
+		require.ErrorContains(t, err, fmt.Sprint(v), "the error names the value")
+	}
+
+	for _, tc := range []struct {
+		into reflect.Type
+		in   []byte
+	}{
+		{reflect.TypeFor[int](), wire.AppendInt(nil, wire.MaxSafeInt+1)},
+		{reflect.TypeFor[int64](), wire.AppendInt(nil, math.MinInt64)},
+		{reflect.TypeFor[uint](), wire.AppendUint(nil, wire.MaxSafeInt+1)},
+		{reflect.TypeFor[uint64](), wire.AppendUint(nil, math.MaxUint64)},
+	} {
+		_, err := decodeInto(t, tc.into, tc.in)
+		require.ErrorIs(t, err, wire.ErrPrecision, tc.into.String())
+	}
 }
 
 func TestDecodeRejectsOutOfRangeNumbers(t *testing.T) {
@@ -144,19 +188,14 @@ func TestDecodePropagatesReaderErrors(t *testing.T) {
 	}
 
 	for _, typ := range types {
-		reader := wire.NewReader(nil)
-		err := codecFor(t, typ).Decode(&reader, reflect.New(typ).Elem())
+		_, err := decodeInto(t, typ, nil)
 		require.ErrorIs(t, err, wire.ErrTruncated, typ.String())
 	}
 
-	errType := reflect.TypeFor[error]()
-	reader := wire.NewReader([]byte{1, 5, 0, 0, 0, 'x'})
-	err := codecFor(t, errType).Decode(&reader, reflect.New(errType).Elem())
+	_, err := decodeInto(t, reflect.TypeFor[error](), []byte{1, 5, 0, 0, 0, 'x'})
 	require.ErrorIs(t, err, wire.ErrTruncated, "an error's message is truncated")
 
-	boolType := reflect.TypeFor[bool]()
-	reader = wire.NewReader([]byte{3})
-	err = codecFor(t, boolType).Decode(&reader, reflect.New(boolType).Elem())
+	_, err = decodeInto(t, reflect.TypeFor[bool](), []byte{3})
 	require.ErrorIs(t, err, wire.ErrInvalid)
 }
 
@@ -201,22 +240,75 @@ func TestErrorCodec(t *testing.T) {
 	require.NoError(t, existing, "decoding nil clears the destination")
 }
 
+type (
+	unexported struct{ a int } //nolint:unused // the unexported field is the case under test
+	clashing   struct {
+		A int `json:"X"` //nolint:tagliatelle // the clash with X's Go name is the case under test
+		X int
+	}
+	empty      struct{}
+	hiddenOnly struct {
+		H int `json:"-"`
+	}
+	withFunc struct {
+		F    func()
+		Name string
+	}
+	// selfAndFunc is recursive and unsupported: planning it fails after its slice plan referred back to it.
+	selfAndFunc struct {
+		F    func()
+		Kids []selfAndFunc
+	}
+)
+
 func TestUnsupportedTypes(t *testing.T) {
 	t.Parallel()
 
-	types := []reflect.Type{
-		reflect.TypeFor[complex128](), reflect.TypeFor[uintptr](), reflect.TypeFor[chan int](),
-		reflect.TypeFor[func()](), reflect.TypeFor[any](), reflect.TypeFor[[2]int](),
-		// Structured types arrive with the full codec (ticket 03).
-		reflect.TypeFor[[]byte](), reflect.TypeFor[[]string](), reflect.TypeFor[map[string]int](),
-		reflect.TypeFor[struct{ A int }](), reflect.TypeFor[*int](), reflect.TypeFor[time.Time](),
+	tests := []struct {
+		typ  reflect.Type
+		want string
+	}{
+		{reflect.TypeFor[complex128](), "complex128"},
+		{reflect.TypeFor[uintptr](), "uintptr"},
+		{reflect.TypeFor[chan int](), "chan int"},
+		{reflect.TypeFor[func()](), "func()"},
+		{reflect.TypeFor[any](), "interface {}"},
+		{reflect.TypeFor[[2]int](), "[2]int"},
+		{reflect.TypeFor[[]any](), "interface {}"},
+		{reflect.TypeFor[*chan int](), "chan int"},
+		{reflect.TypeFor[map[int]string](), "map[int]string: map keys must be strings"},
+		{reflect.TypeFor[map[string]func()](), "func()"},
+		{reflect.TypeFor[unexported](), "unexported field a"},
+		{reflect.TypeFor[clashing](), `fields A and X are both named "X"`},
+		{reflect.TypeFor[[]empty](), "[]wire_test.empty: its elements encode as nothing"},
+		{reflect.TypeFor[[]hiddenOnly](), "[]wire_test.hiddenOnly: its elements encode as nothing"},
+		{reflect.TypeFor[withFunc](), "field wire_test.withFunc.F: wire: unsupported type: func()"},
+		{reflect.TypeFor[selfAndFunc](), "field wire_test.selfAndFunc.F"},
 	}
 
-	for _, typ := range types {
-		_, err := wire.For(typ)
-		require.ErrorIs(t, err, wire.ErrUnsupported, typ.String())
-		require.ErrorContains(t, err, typ.String())
+	for _, tc := range tests {
+		_, err := wire.For(tc.typ)
+		require.ErrorIs(t, err, wire.ErrUnsupported, tc.typ.String())
+		require.ErrorContains(t, err, tc.want)
 	}
+}
+
+// A Planner forgets everything a failed For planned: a later codec must not pick up a plan that refers to a
+// type left half planned.
+func TestPlannerForgetsFailedPlans(t *testing.T) {
+	t.Parallel()
+
+	var planner wire.Planner
+
+	_, err := planner.For(reflect.TypeFor[selfAndFunc]())
+	require.ErrorIs(t, err, wire.ErrUnsupported)
+
+	_, err = planner.For(reflect.TypeFor[[]selfAndFunc]())
+	require.ErrorIs(t, err, wire.ErrUnsupported, "its element is still unsupported, not half planned")
+
+	codec, err := planner.For(reflect.TypeFor[[]string]())
+	require.NoError(t, err, "the planner stays usable")
+	assert.Equal(t, reflect.TypeFor[[]string](), codec.Type())
 }
 
 // signature is a scalar method signature, as the host and guest codecs see it.
@@ -228,7 +320,7 @@ func signature() []reflect.Type {
 }
 
 // FuzzDecode feeds arbitrary bytes to the codecs of a scalar signature: decoding untrusted guest output must
-// never panic, and whatever decodes cleanly re-encodes to the same bytes (the encoding is canonical).
+// never panic, and whatever decodes cleanly re-encodes to the same bytes (the scalar encoding is canonical).
 func FuzzDecode(f *testing.F) {
 	types := signature()
 
@@ -241,7 +333,7 @@ func FuzzDecode(f *testing.F) {
 	seed = wire.AppendInt(seed, -7)
 	seed = wire.AppendInt(seed, 100)
 	seed = wire.AppendUint(seed, 65535)
-	seed = wire.AppendUint(seed, math.MaxUint64)
+	seed = wire.AppendUint(seed, wire.MaxSafeInt)
 	seed = wire.AppendFloat(seed, math.Pi)
 	seed = append(seed, 4, 0, 0, 0, 's', 'e', 'e', 'd', 1, 3, 0, 0, 0, 'e', 'r', 'r')
 
@@ -278,6 +370,14 @@ func FuzzDecode(f *testing.F) {
 
 		assert.Equal(t, input, out)
 	})
+}
+
+// TestTimeUsesUnixSecondsAndNanoseconds pins time.Time's layout, which other guests implement.
+func TestTimeUsesUnixSecondsAndNanoseconds(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, wire.AppendInt(wire.AppendInt(nil, -2), 999999999),
+		encodeValue(t, time.Unix(-2, 999999999)), "before 1970: seconds round down, nanoseconds stay positive")
 }
 
 func BenchmarkScalarCall(b *testing.B) {
