@@ -458,7 +458,7 @@ func (c *Container) open(ctx context.Context, key string, src *source) (fs.FS, e
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
-	files, err := snapshotFiles(opened)
+	files, err := snapshotFiles(ctx, opened)
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
 	}

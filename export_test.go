@@ -108,7 +108,7 @@ func LoadedVersion(ctx context.Context, store Storage, desc Descriptor) (string,
 		return "", fmt.Errorf("opening: %w", err)
 	}
 
-	frozen, err := snapshotFiles(files)
+	frozen, err := snapshotFiles(ctx, files)
 	if err != nil {
 		return "", err
 	}

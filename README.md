@@ -400,6 +400,12 @@ any storage: a link that stays inside the plugin's files is skipped as if it wer
 import or `require` it), and a link whose target is absolute or leads out of the plugin's files (or cannot be
 read) fails the plugin's load with an error naming it.
 
+The copy is bounded, in every storage: a regular file over `plg.MaxPluginFileSize` (16 MiB), or regular files
+over `plg.MaxPluginSize` (64 MiB) together, fail the load with `plg.ErrPluginTooLarge`, naming the plugin and
+the file, before they are read (every file counts, used by the plugin's language or not); a file growing while
+it is read is read up to what is left of the limits only. Ending Register's context stops the copy at the next
+file or read. `MemoryStorage.Put` and the FS storage's `Open` copy by the same rules.
+
 Built in:
 
 - `plg.NewFSStorage(dir)` and `plg.NewFSStorageFromFS(name, fsys)` (any `fs.FS`: an `embed.FS`, `fs.Sub` of one,

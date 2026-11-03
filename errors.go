@@ -45,6 +45,9 @@ var (
 	// ErrInvalidManifest reports a plugin.json that is missing or malformed: in a plugin directory of an
 	// [FSStorage], or given to [ParseManifest].
 	ErrInvalidManifest = errors.New("plg: invalid plugin.json")
+	// ErrPluginTooLarge reports a plugin with a file over [MaxPluginFileSize] bytes or files over [MaxPluginSize]
+	// bytes together; the message names the file.
+	ErrPluginTooLarge = errors.New("plg: plugin files too large")
 	// ErrDuplicateKey reports a plugin key listed twice by the storages of one Register call.
 	ErrDuplicateKey = errors.New("plg: duplicate plugin key")
 	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run.

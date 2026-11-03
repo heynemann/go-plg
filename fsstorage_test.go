@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -316,6 +317,8 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 		"unopenable file":     unreadableFS{files: files, broken: "p/plugin.go"},
 		"unlistable dir":      unreadableFS{files: files, broken: "p/sub"},
 		"unreadable contents": failingReadFS{files: files, broken: "p/sub/x.go"},
+		"unclosable file":     failingReadFS{files: files, broken: "p/sub/x.go", close: true},
+		"unstatable entry":    unstatableFS{files: files, broken: "p/sub/x.go"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -333,10 +336,12 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 	}
 }
 
-// failingReadFS is files, except that reading the contents of the file named broken fails.
+// failingReadFS is files, except that reading the contents of the file named broken fails, or closing it with
+// close.
 type failingReadFS struct {
 	files  fstest.MapFS
 	broken string
+	close  bool
 }
 
 func (f failingReadFS) Open(name string) (fs.File, error) {
@@ -345,11 +350,14 @@ func (f failingReadFS) Open(name string) (fs.File, error) {
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
-	if name == f.broken {
+	switch {
+	case name != f.broken:
+		return file, nil
+	case f.close:
+		return failingClose{file}, nil
+	default:
 		return failingRead{file}, nil
 	}
-
-	return file, nil
 }
 
 type failingRead struct {
@@ -357,6 +365,49 @@ type failingRead struct {
 }
 
 func (failingRead) Read([]byte) (int, error) { return 0, errStorage }
+
+type failingClose struct {
+	fs.File
+}
+
+func (failingClose) Close() error { return errStorage }
+
+// unstatableFS is files, except that the directory entry of the file named broken cannot give its information,
+// as when the file is removed while its directory is read.
+type unstatableFS struct {
+	files  fstest.MapFS
+	broken string
+}
+
+func (f unstatableFS) Open(name string) (fs.File, error) {
+	file, err := f.files.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("opening: %w", err)
+	}
+
+	return file, nil
+}
+
+func (f unstatableFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := f.files.ReadDir(name)
+	if err != nil {
+		return nil, fmt.Errorf("reading the directory: %w", err)
+	}
+
+	for i, entry := range entries {
+		if path.Join(name, entry.Name()) == f.broken {
+			entries[i] = unstatableEntry{entry}
+		}
+	}
+
+	return entries, nil
+}
+
+type unstatableEntry struct {
+	fs.DirEntry
+}
+
+func (unstatableEntry) Info() (fs.FileInfo, error) { return nil, errStorage }
 
 func TestFSStorageOpen(t *testing.T) {
 	t.Parallel()

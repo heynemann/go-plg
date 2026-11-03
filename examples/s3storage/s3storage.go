@@ -86,7 +86,8 @@ func WithPrefix(prefix string) Option {
 }
 
 // WithMaxPluginSize sets how many bytes of a plugin's objects Open downloads at most; a larger plugin fails to
-// open. The default is [DefaultMaxPluginSize].
+// open. The default is [DefaultMaxPluginSize]. Register refuses more than [plg.MaxPluginSize] bytes (and an object
+// over [plg.MaxPluginFileSize]) whatever this is, so a larger n only downloads plugins that cannot load.
 func WithMaxPluginSize(n int64) Option {
 	return func(s *Storage) {
 		s.maxPluginSize = n

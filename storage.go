@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path"
 	"path/filepath"
@@ -47,7 +48,8 @@ const LanguageTypeScript Language = "typescript"
 //
 // Register reads an opened plugin's files exactly once, into an in-memory snapshot it hashes (for an empty
 // Version), bundles and loads, so the files cannot change between those steps. The snapshot holds every regular
-// file. Symbolic links (as fs.ReadDir reports them) are never followed: one that stays inside the plugin's files
+// file, within [MaxPluginFileSize] and [MaxPluginSize], and the copy stops when Register's context ends. Symbolic
+// links (as fs.ReadDir reports them) are never followed: one that stays inside the plugin's files
 // is skipped, as if it were not there, and one whose target is absolute, leads out of the plugin's files or
 // cannot be read (the fs.FS is no fs.ReadLinkFS) fails the load, naming it. Other irregular files are skipped.
 type Storage interface {
@@ -59,6 +61,15 @@ type Storage interface {
 	// the tree once, as described above, before using it.
 	Open(ctx context.Context, d Descriptor) (fs.FS, error)
 }
+
+// The limits of a plugin's files, which Register copies into memory (see [Storage]): a regular file of more than
+// MaxPluginFileSize bytes, or regular files of more than MaxPluginSize bytes together, fail the load with
+// [ErrPluginTooLarge] before they are read, and a file that grows while it is read is read up to the limit only.
+// [FSStorage] and [MemoryStorage] copy plugins by the same rules.
+const (
+	MaxPluginFileSize = 16 << 20
+	MaxPluginSize     = 64 << 20
+)
 
 // Descriptor describes one plugin of a [Storage].
 type Descriptor struct {
@@ -102,13 +113,14 @@ func (s *MemoryStorage) Name() string {
 }
 
 // Put adds the plugin desc, or replaces the plugin with the same key. It copies files as Register does (see
-// [Storage]), failing on a symbolic link out of them, so later changes to files are not seen.
+// [Storage]), failing on a symbolic link out of them or files over the size limits, so later changes to files are
+// not seen.
 func (s *MemoryStorage) Put(desc Descriptor, files fs.FS) error {
 	if desc.Key == "" {
 		return fmt.Errorf("%w: memory storage %s: empty key", ErrInvalidDescriptor, s.name)
 	}
 
-	copied, err := snapshotFiles(files)
+	copied, err := snapshotFiles(context.Background(), files)
 	if err != nil {
 		return fmt.Errorf("plg: memory storage %s: plugin %s: %w", s.name, desc.Key, err)
 	}
@@ -149,42 +161,170 @@ func (s *MemoryStorage) Open(_ context.Context, d Descriptor) (fs.FS, error) {
 // cannot be read.
 var errSymlinkOut = errors.New("symbolic link out of the plugin's files")
 
-// snapshotFiles returns an immutable copy of a plugin's files, as [Storage] describes. A [memfs.FS], which the
-// built-in storages return, is one already.
-func snapshotFiles(files fs.FS) (*memfs.FS, error) {
+// snapshotFiles returns an immutable copy of a plugin's files, as [Storage] describes, failing when ctx ends. A
+// [memfs.FS], which the built-in storages return, is one already.
+func snapshotFiles(ctx context.Context, files fs.FS) (*memfs.FS, error) {
 	if frozen, ok := files.(*memfs.FS); ok {
 		return frozen, nil
 	}
 
 	var tree memfs.Builder
 
+	regular, stated, err := listFiles(ctx, files)
+	if err == nil {
+		err = copyFiles(ctx, files, &tree, regular, stated)
+	}
+
+	var copied *memfs.FS
+
+	if err == nil {
+		copied, err = tree.Build()
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("copying the plugin's files: %w", err)
+	}
+
+	return copied, nil
+}
+
+// copyFiles reads the regular files of a plugin's files, whose stated sizes add up to stated, into tree.
+func copyFiles(ctx context.Context, files fs.FS, tree *memfs.Builder, regular []sizedFile, stated int) error {
+	read := 0
+
+	for _, file := range regular {
+		// What is left for this file: the plugin's limit, less what was read and what the other files state.
+		stated -= file.size
+
+		data, err := readFile(ctx, files, file, min(MaxPluginFileSize, MaxPluginSize-read-stated))
+		if err == nil {
+			read += len(data)
+			err = tree.Add(file.name, data)
+		}
+
+		if err != nil {
+			return err //nolint:wrapcheck // readFile's errors name the file, as memfs's do; snapshotFiles wraps it
+		}
+	}
+
+	return nil
+}
+
+// sizedFile is a regular file of a plugin's files and the size its directory entry states.
+type sizedFile struct {
+	name string
+	size int
+}
+
+// listFiles walks a plugin's files, checking their symbolic links, and returns their regular files and the sum of
+// their stated sizes. It fails before anything is read when a file states more than [MaxPluginFileSize] bytes or
+// the files more than [MaxPluginSize] together, and when ctx ends.
+func listFiles(ctx context.Context, files fs.FS) ([]sizedFile, int, error) {
+	var (
+		regular []sizedFile
+		stated  int
+	)
+
 	err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
 		switch {
 		case err != nil:
 			return err
+		case ctx.Err() != nil:
+			return fmt.Errorf("listing %s: %w", name, ctx.Err())
 		case entry.Type().IsRegular():
-			data, readErr := fs.ReadFile(files, name)
-			if readErr != nil {
-				return fmt.Errorf("reading %s: %w", name, readErr)
+			info, err := entry.Info()
+			if err != nil {
+				return err //nolint:wrapcheck // the walk's error, naming the file like the walk's others
 			}
 
-			return tree.Add(name, data)
+			size := max(info.Size(), 0)
+			if size > MaxPluginFileSize {
+				return fileTooLarge(name)
+			}
+
+			stated += int(size)
+			if stated > MaxPluginSize {
+				return pluginTooLarge(name)
+			}
+
+			regular = append(regular, sizedFile{name: name, size: int(size)})
+
+			return nil
 		case entry.Type()&fs.ModeSymlink != 0:
 			return checkLink(files, name)
 		default:
 			return nil
 		}
 	})
+
+	return regular, stated, err //nolint:wrapcheck // snapshotFiles wraps it
+}
+
+// fileTooLarge reports the file name of a plugin, over [MaxPluginFileSize].
+func fileTooLarge(name string) error {
+	return fmt.Errorf("%w: %s is over %d bytes", ErrPluginTooLarge, name, MaxPluginFileSize)
+}
+
+// pluginTooLarge reports the file name of a plugin, bringing the plugin's files over [MaxPluginSize].
+func pluginTooLarge(name string) error {
+	return fmt.Errorf("%w: %s brings the plugin's files over %d bytes", ErrPluginTooLarge, name, MaxPluginSize)
+}
+
+// readFile reads a regular file of files, of at most limit bytes: what is left for it, since it may have grown
+// after its size was stated. It fails when ctx ends.
+func readFile(ctx context.Context, files fs.FS, file sizedFile, limit int) ([]byte, error) {
+	opened, err := files.Open(file.name)
 	if err != nil {
-		return nil, fmt.Errorf("copying the plugin's files: %w", err)
+		return nil, fmt.Errorf("reading %s: %w", file.name, err)
 	}
 
-	copied, err := tree.Build()
-	if err != nil {
-		return nil, fmt.Errorf("copying the plugin's files: %w", err)
+	data, err := readUpTo(ctx, opened, file.size, limit+1)
+
+	closeErr := opened.Close()
+	if err == nil && closeErr != nil {
+		err = fmt.Errorf("closing: %w", closeErr)
 	}
 
-	return copied, nil
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("reading %s: %w", file.name, err)
+	case len(data) > limit && limit < MaxPluginFileSize:
+		return nil, pluginTooLarge(file.name)
+	case len(data) > limit:
+		return nil, fileTooLarge(file.name)
+	default:
+		return data, nil
+	}
+}
+
+// readUpTo reads src to its end, or to most bytes, into a buffer first sized for size bytes (so a file that keeps
+// its stated size is read without growing it), failing when ctx ends.
+func readUpTo(ctx context.Context, src io.Reader, size, most int) ([]byte, error) {
+	data := make([]byte, 0, min(size+1, most))
+
+	for len(data) < most {
+		err := ctx.Err()
+		if err != nil {
+			return nil, err //nolint:wrapcheck // readFile wraps it, naming the file
+		}
+
+		if len(data) == cap(data) {
+			data = slices.Grow(data, 1)
+		}
+
+		n, err := src.Read(data[len(data):min(cap(data), most)])
+		data = data[:len(data)+n]
+
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return nil, err //nolint:wrapcheck // readFile wraps it, naming the file
+		}
+	}
+
+	return data, nil
 }
 
 // checkLink accepts the symbolic link name of files when its target stays inside files, judged by the target's

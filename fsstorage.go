@@ -64,8 +64,10 @@ const contentVersionPrefix = "sha256:"
 //
 // Open copies the plugin directory into memory, as Register copies every storage's files (see [Storage]):
 // symbolic links are never followed; a link that stays inside the plugin directory is skipped, and one whose
-// target is absolute or leads out of the plugin directory fails the load, naming it. The plugin then runs from
-// that copy, so a file changed during the load cannot be half seen.
+// target is absolute or leads out of the plugin directory fails the load, naming it. A file over
+// [MaxPluginFileSize] bytes, or files over [MaxPluginSize] bytes together, fail it with [ErrPluginTooLarge]
+// before they are read, and the copy stops when Open's context ends. The plugin then runs from that copy, so a
+// file changed during the load cannot be half seen.
 //
 // An FSStorage is safe for concurrent use when its file tree is.
 type FSStorage struct {
@@ -137,7 +139,7 @@ func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 var errPluginKey = errors.New("a plugin key is a directory name")
 
 // Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
-func (s *FSStorage) Open(_ context.Context, desc Descriptor) (fs.FS, error) {
+func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
 	key := desc.Key
 	if key == "." || strings.Contains(key, "/") || !fs.ValidPath(key) {
 		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, errPluginKey)
@@ -157,7 +159,7 @@ func (s *FSStorage) Open(_ context.Context, desc Descriptor) (fs.FS, error) {
 
 			dir, err = fs.Sub(fsys, key)
 			if err == nil {
-				files, err = snapshotFiles(dir)
+				files, err = snapshotFiles(ctx, dir)
 			}
 		}
 
