@@ -31,6 +31,7 @@
 IMPORT("host_call") uint32_t plg_host_call(uint32_t method, uint32_t ptr, uint32_t len);
 IMPORT("http_roundtrip") uint32_t plg_http_roundtrip(uint32_t ptr, uint32_t len);
 IMPORT("take_result") void plg_take_result(uint32_t ptr, uint32_t len);
+IMPORT("http_start") uint32_t plg_http_start(uint32_t call, uint32_t ptr, uint32_t len);
 
 // The prelude: a function expression taking the natives object (prelude.js).
 static const char prelude[] = {
@@ -1102,8 +1103,90 @@ static JSValue native_write(JSContext *c, JSValueConst this_val, int argc, JSVal
   return JS_UNDEFINED;
 }
 
+// ---- multiplexed steps: state ----
+
+// In a multiplexed step (plg_start, plg_resume), fetch hands its request to the host with http_start and gets a
+// Promise, settled by the plg_resume step that delivers the answer; meanwhile the instance serves other calls.
+// A request belongs to the call whose step made it: the call started, or the one whose answer was delivered.
+typedef struct pending_call {
+  JSValue promise; // what the method returned
+  uint32_t call, method;
+} pending_call;
+
+typedef struct pending_request {
+  JSValue resolve, reject;
+  uint32_t id, call;
+} pending_request;
+
+static bool stepping;          // a multiplexed step is running
+static uint32_t current_call;  // the call the running step belongs to
+static pending_call *calls;    // calls waiting for their Promise to settle
+static uint32_t ncalls, capcalls;
+static pending_request *requests; // requests waiting for their answer
+static uint32_t nrequests, caprequests;
+
+// http_answer turns an http_roundtrip answer into [status, [[name, value]...], body Uint8Array], or throws a
+// TypeError with the host's reason for a refused or failed request.
+static JSValue http_answer(JSContext *c, rd_t *r) {
+  uint8_t status;
+  const char *s;
+  uint32_t sn;
+  if (!rd_u8(r, &status)) return JS_ThrowInternalError(c, "plg: empty HTTP answer");
+  if (status != ST_OK) {
+    if (!rd_str(r, &s, &sn)) return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
+    return JS_Throw(c, error_value("TypeError", s, sn));
+  }
+  uint64_t code, count;
+  if (!rd_u64(r, &code) || !rd_u64(r, &count) || count > (r->len - r->off) / 8)
+    return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
+  JSValue headers = JS_NewArray(c);
+  for (uint64_t i = 0; i < count && !JS_IsException(headers); i++) {
+    const char *ns, *vs;
+    uint32_t nn, vn;
+    if (!rd_str(r, &ns, &nn) || !rd_str(r, &vs, &vn)) {
+      JS_FreeValue(c, headers);
+      return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
+    }
+    JSValue pair[2] = {JS_NewStringLen(c, ns, nn), JS_NewStringLen(c, vs, vn)};
+    JSValue p = JS_NewArrayFrom(c, 2, pair);
+    if (JS_IsException(p) || JS_DefinePropertyValueUint32(c, headers, (uint32_t)i, p, JS_PROP_C_W_E) < 0) {
+      JS_FreeValue(c, headers);
+      headers = JS_EXCEPTION;
+    }
+  }
+  if (JS_IsException(headers)) return headers;
+  JSValue parts[3] = {
+      JS_NewInt64(c, (int64_t)code),
+      headers,
+      JS_NewUint8ArrayCopy(c, r->p + r->off, r->len - r->off),
+  };
+  if (JS_IsException(parts[2])) {
+    JS_FreeValue(c, headers);
+    return JS_EXCEPTION;
+  }
+  return JS_NewArrayFrom(c, 3, parts);
+}
+
+// http_async starts the request in req with http_start and returns a Promise of its answer.
+static JSValue http_async(JSContext *c) {
+  if (nrequests == caprequests) {
+    uint32_t cap = caprequests ? 2 * caprequests : 16;
+    pending_request *grown = realloc(requests, cap * sizeof *grown);
+    if (!grown) return JS_ThrowOutOfMemory(c);
+    requests = grown;
+    caprequests = cap;
+  }
+  JSValue funcs[2];
+  JSValue p = JS_NewPromiseCapability(c, funcs);
+  if (JS_IsException(p)) return p;
+  uint32_t id = plg_http_start(current_call, (uint32_t)(uintptr_t)req.p, (uint32_t)req.len);
+  requests[nrequests++] = (pending_request){.resolve = funcs[0], .reject = funcs[1], .id = id, .call = current_call};
+  return p;
+}
+
 // http(method, url, [[name, value]...], body Uint8Array | null) makes a request through the host and returns
-// [status, [[name, value]...], body Uint8Array]; a refused or failed request throws a TypeError, as fetch does.
+// [status, [[name, value]...], body Uint8Array], or a Promise of it in a multiplexed step; a refused or failed
+// request throws (rejects with) a TypeError, as fetch does.
 static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
   (void)this_val;
   if (argc < 4 || !JS_IsArray(argv[2])) return JS_ThrowTypeError(c, "plg: http: bad arguments");
@@ -1142,46 +1225,11 @@ static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValu
     put(&req, p, n);
   }
   if (req.failed) return JS_ThrowOutOfMemory(c);
+  if (stepping) return http_async(c);
   uint32_t n = plg_http_roundtrip((uint32_t)(uintptr_t)req.p, (uint32_t)req.len);
   if (!take(n)) return JS_ThrowOutOfMemory(c);
   rd_t r = {answer.p, answer.len, 0};
-  uint8_t status;
-  const char *s;
-  uint32_t sn;
-  if (!rd_u8(&r, &status)) return JS_ThrowInternalError(c, "plg: empty HTTP answer");
-  if (status != ST_OK) {
-    if (!rd_str(&r, &s, &sn)) return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
-    return JS_Throw(c, error_value("TypeError", s, sn));
-  }
-  uint64_t code, count;
-  if (!rd_u64(&r, &code) || !rd_u64(&r, &count) || count > (r.len - r.off) / 8)
-    return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
-  JSValue headers = JS_NewArray(c);
-  for (uint64_t i = 0; i < count && !JS_IsException(headers); i++) {
-    const char *ns, *vs;
-    uint32_t nn, vn;
-    if (!rd_str(&r, &ns, &nn) || !rd_str(&r, &vs, &vn)) {
-      JS_FreeValue(c, headers);
-      return JS_ThrowInternalError(c, "plg: malformed HTTP answer");
-    }
-    JSValue pair[2] = {JS_NewStringLen(c, ns, nn), JS_NewStringLen(c, vs, vn)};
-    JSValue p = JS_NewArrayFrom(c, 2, pair);
-    if (JS_IsException(p) || JS_DefinePropertyValueUint32(c, headers, (uint32_t)i, p, JS_PROP_C_W_E) < 0) {
-      JS_FreeValue(c, headers);
-      headers = JS_EXCEPTION;
-    }
-  }
-  if (JS_IsException(headers)) return headers;
-  JSValue parts[3] = {
-      JS_NewInt64(c, (int64_t)code),
-      headers,
-      JS_NewUint8ArrayCopy(c, r.p + r.off, r.len - r.off),
-  };
-  if (JS_IsException(parts[2])) {
-    JS_FreeValue(c, headers);
-    return JS_EXCEPTION;
-  }
-  return JS_NewArrayFrom(c, 3, parts);
+  return http_answer(c, &r);
 }
 
 // utf8Decode(bytes) returns the text of UTF-8 bytes.
@@ -1353,7 +1401,10 @@ static uint64_t encode_result(const method_t *m, JSValue v) {
   return packed();
 }
 
-EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
+// invoke decodes the arguments of the interface method with the given index from the input buffer and calls the
+// method: it returns 0 with what the method returned (a value, a Promise or an exception) in *v, or the result of
+// a request that breaks the ABI.
+static uint64_t invoke(uint32_t method, uint32_t len, JSValue *v) {
   if (!rt || JS_IsUndefined(inst) || closed) return message(ST_ABI, "plugin not loaded", 17);
   if (method >= nplugin) return message(ST_ABI, "unknown method", 14);
   if (len > in.cap) return message(ST_ABI, "arguments beyond the input buffer", 33);
@@ -1376,23 +1427,186 @@ EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
     return failure(ST_ABI, "plg: decoding the arguments: ");
   }
   JSValue fn = JS_GetProperty(ctx, inst, m->atom);
-  JSValue v;
   if (JS_IsFunction(ctx, fn)) {
-    v = JS_Call(ctx, fn, inst, (int)m->nparams, args);
+    *v = JS_Call(ctx, fn, inst, (int)m->nparams, args);
   } else if (JS_IsException(fn)) {
-    v = JS_EXCEPTION;
+    *v = JS_EXCEPTION;
   } else {
-    v = JS_ThrowTypeError(ctx, "the plugin's %s is not a function", m->name);
+    *v = JS_ThrowTypeError(ctx, "the plugin's %s is not a function", m->name);
   }
   JS_FreeValue(ctx, fn);
   for (uint32_t k = 0; k < m->nparams; k++) JS_FreeValue(ctx, args[k]);
   free(args);
+  return 0;
+}
+
+EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
+  JSValue v;
+  uint64_t bad = invoke(method, len, &v);
+  if (bad) return bad;
   v = settle(v);
   if (JS_IsException(v)) return failure(ST_ERROR, NULL);
-  uint64_t res = encode_result(m, v);
+  uint64_t res = encode_result(&methods[method], v);
   JS_FreeValue(ctx, v);
   if (out.failed) oom = true;
   return res;
+}
+
+// ---- multiplexed steps: plg_start and plg_resume ----
+
+// A step runs the call it starts (or the code a request's answer resumes) and every pending job, then lists the
+// calls whose Promise settled meanwhile, possibly several (calls may await one another's work).
+
+static buf_t steps;       // the result buffer of steps
+static uint32_t finished; // calls the step in progress finished
+static bool step_deep;    // a finished call's result carried the deep-stack flag
+
+static const char never_settles[] = "the returned promise never settles: no pending job or HTTP request is left";
+
+static void begin_step(uint32_t call) {
+  steps.len = 0;
+  steps.failed = false;
+  put_u8(&steps, ST_OK);
+  put_u32(&steps, 0);
+  finished = 0;
+  step_deep = false;
+  oom = false;
+  stepping = true;
+  current_call = call;
+}
+
+static uint64_t end_step(void) {
+  stepping = false;
+  if (steps.failed) return ((uint64_t)(uintptr_t)oom_result << 32) | sizeof oom_result;
+  memcpy(steps.p + 1, &finished, sizeof finished);
+  if (ran_deep() || step_deep) steps.p[0] |= ST_DEEP_STACK;
+  return ((uint64_t)(uintptr_t)steps.p << 32) | steps.len;
+}
+
+// complete lists call as finished with the result buffer res (packed ptr<<32 | len); a deep-stack flag on the
+// call's status moves to the step's.
+static void complete(uint32_t call, uint64_t res) {
+  uint32_t n = (uint32_t)res;
+  put_u32(&steps, call);
+  put_u32(&steps, n);
+  size_t at = steps.len;
+  put(&steps, (const void *)(uintptr_t)(res >> 32), n);
+  if (!steps.failed && n > 0 && (steps.p[at] & ST_DEEP_STACK)) {
+    steps.p[at] &= (uint8_t)~ST_DEEP_STACK;
+    step_deep = true;
+  }
+  finished++;
+}
+
+// conclude finishes a call whose method returned v (taken over), unless v is a pending Promise: then the call
+// waits in calls (which has room: plg_start made it).
+static void conclude(uint32_t call, uint32_t method, JSValue v) {
+  const method_t *m = &methods[method];
+  if (JS_IsException(v)) {
+    complete(call, failure(ST_ERROR, NULL));
+    return;
+  }
+  if (JS_IsPromise(v)) {
+    switch (JS_PromiseState(ctx, v)) {
+    case JS_PROMISE_PENDING:
+      calls[ncalls++] = (pending_call){.promise = v, .call = call, .method = method};
+      return;
+    case JS_PROMISE_REJECTED:
+      JS_PromiseMarkAsHandled(ctx, v);
+      JS_Throw(ctx, JS_PromiseResult(ctx, v));
+      JS_FreeValue(ctx, v);
+      complete(call, failure(ST_ERROR, NULL));
+      return;
+    default: {
+      JSValue res = JS_PromiseResult(ctx, v);
+      JS_FreeValue(ctx, v);
+      v = res;
+    }
+    }
+  }
+  complete(call, encode_result(m, v));
+  JS_FreeValue(ctx, v);
+  if (out.failed) oom = true;
+}
+
+// harvest finishes the waiting calls whose Promise settled, reporting whether there were any.
+static bool harvest(void) {
+  bool any = false;
+  for (uint32_t i = 0; i < ncalls;) {
+    pending_call pc = calls[i];
+    if (JS_PromiseState(ctx, pc.promise) == JS_PROMISE_PENDING) {
+      i++;
+      continue;
+    }
+    calls[i] = calls[--ncalls];
+    current_call = pc.call;
+    conclude(pc.call, pc.method, pc.promise);
+    any = true;
+  }
+  return any;
+}
+
+// advance runs pending jobs and finishes the calls whose Promise settled, until nothing moves. With no request
+// in flight, a call still waiting can never be answered: it fails, as plg_call's would.
+static void advance(void) {
+  do {
+    drain(JS_UNDEFINED);
+  } while (harvest());
+  if (nrequests > 0) return;
+  while (ncalls > 0) {
+    pending_call pc = calls[--ncalls];
+    JS_FreeValue(ctx, pc.promise);
+    complete(pc.call, message(ST_ERROR, never_settles, sizeof never_settles - 1));
+  }
+}
+
+// plg_start starts call number call of the interface method with the given index (arguments as for plg_call).
+EXPORT("plg_start") uint64_t plg_start(uint32_t call, uint32_t method, uint32_t len) {
+  for (uint32_t i = 0; i < ncalls; i++)
+    if (calls[i].call == call) return message(ST_ABI, "call number already in flight", 29);
+  if (ncalls == capcalls) {
+    uint32_t cap = capcalls ? 2 * capcalls : 16;
+    pending_call *grown = realloc(calls, cap * sizeof *grown);
+    if (!grown) return message(ST_PANIC, "out of memory", 13);
+    calls = grown;
+    capcalls = cap;
+  }
+  begin_step(call);
+  JSValue v;
+  uint64_t bad = invoke(method, len, &v);
+  if (bad) {
+    stepping = false;
+    return bad;
+  }
+  conclude(call, method, v);
+  advance();
+  return end_step();
+}
+
+// plg_resume delivers the answer to request number request (an http_roundtrip answer) to the fetch waiting for
+// it.
+EXPORT("plg_resume") uint64_t plg_resume(uint32_t request, uint32_t len) {
+  if (!rt || JS_IsUndefined(inst) || closed) return message(ST_ABI, "plugin not loaded", 17);
+  if (len > in.cap) return message(ST_ABI, "answer beyond the input buffer", 30);
+  uint32_t i = 0;
+  while (i < nrequests && requests[i].id != request) i++;
+  if (i == nrequests) return message(ST_ABI, "no call waits for this request", 30);
+  pending_request pr = requests[i];
+  requests[i] = requests[--nrequests];
+  begin_step(pr.call);
+  rd_t r = {in.p, len, 0};
+  JSValue v = http_answer(ctx, &r);
+  JSValue fn = pr.resolve;
+  if (JS_IsException(v)) {
+    v = JS_GetException(ctx);
+    fn = pr.reject;
+  }
+  JS_FreeValue(ctx, JS_Call(ctx, fn, JS_UNDEFINED, 1, (JSValueConst *)&v));
+  JS_FreeValue(ctx, v);
+  JS_FreeValue(ctx, pr.resolve);
+  JS_FreeValue(ctx, pr.reject);
+  advance();
+  return end_step();
 }
 
 // plg_close calls the plugin's optional Close method, awaiting it when it returns a Promise.

@@ -30,6 +30,8 @@ func (luaLoader) guestImport() string { return "github.com/heynemann/go-plg/gues
 
 func (luaLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
+func (luaLoader) multiplexes() bool { return true }
+
 func (luaLoader) prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error) {
 	tree, err := luaSourceTree(files, entrypoint)
 	if err != nil {

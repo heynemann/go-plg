@@ -42,7 +42,7 @@ func HoldInstance(ctx context.Context, c *Container, key string) (Held, error) {
 	return Held{
 		ID: held.id,
 		Release: func() {
-			gen.pool.release(held)
+			gen.pool.release(context.WithoutCancel(ctx), held)
 			gen.leave()
 		},
 		Discard: func() {
@@ -73,6 +73,12 @@ func MemoryInUse(c *Container) uint64 {
 // MemoryReserved returns the worst cases of every plugin version the container holds, added up.
 func MemoryReserved(c *Container) uint64 {
 	return c.budget.reserved.Load()
+}
+
+// InstanceMemory returns the linear memory of the live instances of the plugin with the given key, as last
+// sampled by its pool.
+func InstanceMemory(c *Container, key string) uint64 {
+	return uint64(c.catalogue.Load().plugins[key].pool.memory.Load()) //nolint:gosec // G115: never negative
 }
 
 // Generation identifies the version of the plugin c serves under key; nil when there is none.

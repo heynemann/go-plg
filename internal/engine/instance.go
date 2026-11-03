@@ -51,10 +51,12 @@ type Instance struct {
 	mod                      api.Module
 	mem                      api.Memory
 	alloc, init, call, close api.Function
+	start, resume            api.Function // nil unless the guest multiplexes (step.go)
 	host                     *hostState
 	hosts                    *xsync.Map[string, *hostState] // the runtime's registry host lives in
+	done                     []Completion                   // reused by every step
 	inPtr, inCap             uint32
-	stack                    [2]uint64
+	stack                    [3]uint64
 	broken                   bool
 }
 
@@ -70,14 +72,16 @@ func newInstance(ctx context.Context, mod api.Module, host *hostState, hosts *xs
 	*Instance, error,
 ) {
 	inst := &Instance{
-		mod:   mod,
-		mem:   mod.Memory(),
-		alloc: mod.ExportedFunction(exportAlloc),
-		init:  mod.ExportedFunction(exportInit),
-		call:  mod.ExportedFunction(exportCall),
-		close: mod.ExportedFunction(exportClose),
-		host:  host,
-		hosts: hosts,
+		mod:    mod,
+		mem:    mod.Memory(),
+		alloc:  mod.ExportedFunction(exportAlloc),
+		init:   mod.ExportedFunction(exportInit),
+		call:   mod.ExportedFunction(exportCall),
+		close:  mod.ExportedFunction(exportClose),
+		start:  mod.ExportedFunction(exportStart),
+		resume: mod.ExportedFunction(exportResume),
+		host:   host,
+		hosts:  hosts,
 	}
 
 	if inst.mem == nil || inst.alloc == nil || inst.init == nil || inst.call == nil || inst.close == nil {

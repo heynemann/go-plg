@@ -21,6 +21,8 @@ type loader interface {
 	// memoryLimit is the default per-instance memory limit of the language's plugins, for a Register without
 	// [WithMemoryLimit].
 	memoryLimit() uint64
+	// multiplexes reports whether the language's guest can serve several calls at once ([WithConcurrentCalls]).
+	multiplexes() bool
 	// prepare turns an opened plugin's files into what each of its instances starts from: the init payload and
 	// the file trees mounted read-only into the guest. It fails when the plugin cannot load (a missing
 	// entrypoint, source the host rejects).
@@ -146,6 +148,26 @@ type guestInstance struct {
 
 	launcher *launcher
 	out      *guestout.Capture
+}
+
+// Start starts a call on a multiplexing guest, capturing the step's output like a call's.
+func (g *guestInstance) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
+	g.out.Begin()
+
+	step, err := g.Instance.Start(ctx, call, method, args)
+	g.out.End(ctx)
+
+	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
+}
+
+// Resume delivers an HTTP answer to a multiplexing guest, capturing the step's output like a call's.
+func (g *guestInstance) Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error) {
+	g.out.Begin()
+
+	step, err := g.Instance.Resume(ctx, request, answer)
+	g.out.End(ctx)
+
+	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
 
 func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {

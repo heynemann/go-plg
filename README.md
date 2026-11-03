@@ -429,8 +429,9 @@ plg.Register[pricing.Rule](ctx, c, "pricing",
   each plugin's worst case (`max × limit`) and fails with `plg.ErrMemoryBudget` when it does not fit; pools never
   grow past the budget.
 
-Size pools for I/O: an instance making an HTTP request or a Host call is busy until it returns. Idle instances
-are cheap for Lua (≈ 0.2 MiB) and TypeScript (≈ 0.5 MiB), heavy for Go (≈ 29 MiB).
+Size pools for I/O: an instance making an HTTP request or a Host call is busy until it returns, unless
+`WithConcurrentCalls` lets it serve other calls meanwhile (see [HTTP](#http)). A Lua or TypeScript instance costs
+about 3 MiB of host memory (its linear memory starts with a 2 MiB stack); a Go instance ≈ 29 MiB.
 
 ## HTTP
 
@@ -451,6 +452,36 @@ wildcards, IPs, optional ports; http and https only), refuses private, loopback,
 addresses after DNS resolution (`BlockPrivateNetworks`; set it to `new(false)` to reach them), never uses an
 environment proxy, bounds sizes and time (never past the call's `ctx`), and logs and counts each request with the
 plugin's key. Redirects are followed by the plugin's side, each hop checked like the first.
+
+### Many I/O-bound calls on one instance: `WithConcurrentCalls`
+
+By default an instance serves one call at a time, so a call waiting 100 ms for a response holds a whole instance.
+For Lua and TypeScript plugins, `plg.WithConcurrentCalls(n)` (per Register, 1 to 4096; default 1) lets each
+instance serve up to `n` calls at once: while a call awaits a `fetch` or waits in `http.request` (which yields its
+coroutine), the instance runs other calls. With 256 callers each awaiting a 100 ms response, one instance with
+`WithConcurrentCalls(256)` served as many calls per second as a pool of 256 blocking instances (≈ 2,350/s) with
+about 1/67 of the host memory (≈ 12 MiB instead of ≈ 800 MiB). Go plugins ignore the option.
+
+```go
+plg.Register[pricing.Rule](ctx, c, "pricing",
+	plg.WithStorage(storage),
+	plg.WithPool(1, 4),
+	plg.WithConcurrentCalls(64), // up to 4 × 64 calls in flight; an instance counts once in the pool and budget
+	plg.WithHTTP(policy),
+)
+```
+
+Calls on one instance share it as concurrent requests share a Node.js process:
+
+- They never see each other's arguments or results, and each keeps its own `MaxRequestsPerCall`.
+- They **do share the plugin's global state** (module-level variables in TypeScript, globals and upvalues in Lua,
+  whatever `Create` built), which may change while a call waits, and the instance's memory limit.
+- Each call keeps its own `ctx`: one that ends while the call waits for a response fails alone with the
+  context's error; the instance serves on (the plugin sees the request fail and gets 250 ms to finish).
+- A call that traps, runs out of memory, panics or is stopped while running discards the instance: it fails
+  with a `PanicError`, every other call on that instance with `plg.ErrInstanceLost` (safe to retry).
+- Only HTTP requests let other calls run; a Host call, and a Lua request made where the call cannot yield (inside
+  the plugin's own coroutine or a C callback such as `table.sort`'s comparator), block the instance as before.
 
 For gRPC or anything else, expose the operation as a [Host](#calling-back-into-the-service-the-host-interface)
 method.
@@ -587,7 +618,8 @@ the history).
 | Call making one HTTP request (loopback) | 0.82–0.89 ms | 0.21 ms | 0.39–0.40 ms |
 | Throughput per call, 32 goroutines, `WithPool(32, 32)` | 4.5–4.7 µs | 1.5 µs | 1.2–1.3 µs |
 | Allocations per call (host side) | 10 | 11 | 10 |
-| Memory of an idle instance | ≈ 29 MiB | ≈ 0.2 MiB | ≈ 0.5 MiB |
+| Memory of an instance (host heap) | ≈ 29 MiB | ≈ 3 MiB | ≈ 3 MiB |
+| 256 callers awaiting a 100 ms HTTP response | — (one call per instance) | 2,360 calls/s in 11 MiB (1 instance, `WithConcurrentCalls(256)`) vs 2,360/s in 760 MiB (256 blocking) | 2,330/s in 12 MiB vs 2,430/s in 800 MiB |
 | Starting an instance | 40–60 ms | < 1 ms | ≈ 2 ms |
 | Guest compile, cold / from the disk cache | 4.3–5.1 s / 0.16–0.22 s | 70–85 ms / 4 ms | 0.28 s / 13 ms |
 
@@ -596,7 +628,7 @@ the history).
 | `plg.Get` | 11–13 ns, 0 allocations (budget ≤ 50 ns, enforced in CI) |
 | `plg.All`, two plugins | 18–25 ns, 0 allocations (enforced in CI) |
 
-Go plugins are interpreted inside WebAssembly with the CPU cap on: about 20–50× slower per call and 60–150×
+Go plugins are interpreted inside WebAssembly with the CPU cap on: about 20–50× slower per call and about 10×
 heavier per instance than Lua or TypeScript. Prefer Lua or TypeScript for hot paths; Go plugins suit plugin
 authors who want Go, at a call rate where 0.1 ms per call is acceptable.
 
@@ -618,6 +650,11 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
 - **TypeScript:** bundles are not source-mapped (stack traces point into the bundle); recursion stops at about
   3000 frames with a `RangeError`; a variadic parameter arrives as one array; a response header's values are
   joined into one, as in `fetch`.
+- **`WithConcurrentCalls`:** interleaved calls share the plugin's global state and memory limit; a call abandoned
+  at its deadline still runs its remaining code (250 ms per step, beyond that the instance is discarded); a Lua
+  request that falls back to blocking counts against `MaxRequestsPerCall` per step rather than per call; in
+  TypeScript a request belongs to the call whose step made it, so a promise shared between calls through global
+  state is attributed to the call that started it.
 - **Rebuilds:** the guest artifacts must be rebuilt and re-verified (`make verify-guests`) whenever wazero,
   wasi-sdk, Lua, QuickJS-ng, yaegi or Go are upgraded.
 

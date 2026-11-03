@@ -41,6 +41,7 @@ err := plg.Register[contract.Fooer](ctx, c, "fooer",
     plg.WithMemoryLimit(64 << 20), // per instance
     plg.WithPollInterval(30*time.Second),
     plg.WithHost[contract.Host](hostImpl),
+    plg.WithConcurrentCalls(64), // Lua/TS: calls one instance serves at once while they await HTTP (default 1)
     plg.WithHTTP(plg.HTTPPolicy{AllowedHosts: []string{"api.example.com"}}),
 )
 
@@ -195,7 +196,7 @@ How each language reaches it:
 - **TS** uses `fetch()`; **Lua** uses `http.request{...}`.
 - **Every request** is logged and counted in metrics (status, latency, bytes) by plugin key.
 
-Requests block the instance for their duration (one call per instance), so size pools for I/O: Lua/TS instances are 0.2–0.5 MiB; Go instances are ≈ 29 MiB.
+By default a request blocks its instance for its duration (one call per instance), so size pools for I/O: a Lua/TS instance costs ≈ 3 MiB of host memory (its linear memory starts with a 2 MiB stack; see ticket 17), a Go instance ≈ 29 MiB. With `WithConcurrentCalls(n)` a Lua/TS instance serves up to n calls at once, running others while a call awaits `fetch`/`http.request` (ticket 17).
 
 **gRPC:** for now, expose gRPC-backed operations as typed `Host` methods implemented with your own grpc-go clients. A generic gRPC capability will be designed when it's needed.
 
@@ -207,8 +208,8 @@ Requests block the instance for their duration (one call per instance), so size 
 
 | Guest | Per call | Memory per instance | Instantiate |
 |---|---|---|---|
-| QuickJS-ng | 3.1 / 1.05 µs | 0.5 MiB | 1.7 ms |
-| C Lua 5.4 | 7.5 / 3.7 µs | 0.2 MiB | < 1 ms |
+| QuickJS-ng | 3.1 / 1.05 µs | ≈ 3 MiB (2 MiB of it the wasm stack; the spike's 0.5 MiB had a small stack) | 1.7 ms |
+| C Lua 5.4 | 7.5 / 3.7 µs | ≈ 3 MiB (likewise; spike 0.2 MiB) | < 1 ms |
 | yaegi | 78 / 19 µs | ≈ 29 MiB | 38–59 ms |
 
 - **Budgets:** Get/All 0 allocations and Get ≤ 50 ns, enforced in CI. Call costs are tracked with benchstat but don't fail the build.
@@ -306,7 +307,7 @@ Each milestone is implemented, tested with `go test -race`, smoke-run against re
 
 ## Known risks
 
-- Go plugins are ≈ 80× slower per call and ≈ 60× heavier per instance than Lua/TS in this design. This was accepted for full isolation.
+- Go plugins are ≈ 20–50× slower per call and ≈ 10× heavier per instance than Lua/TS in this design. This was accepted for full isolation.
 - wazero's exception-handling feature (needed by Lua) is experimental.
 - The yaegi guest's cold compile (≈ 3–4 s, ≈ 0.15 s from the disk cache; see tickets 01 and 15) depends on the disk cache and `plg warm` for fast startups.
 - The guest `.wasm` artifacts must be rebuilt and re-verified whenever wazero, wasi-sdk, Lua, QuickJS, yaegi or Go are upgraded.
@@ -505,3 +506,21 @@ Each milestone is implemented, tested with `go test -race`, smoke-run against re
 - **Containers:** `minio/minio` is no longer pullable from Docker Hub here, so the tests use `alpine/minio:RELEASE.2025-10-15T17-29-55Z` (`server /tmp/data`, its default data dir is not writable) and `postgres:17-alpine`. MinIO rejects object keys like `a//b` that AWS S3 accepts, so one test wraps the client to produce such a key.
 - **Published ports:** under Docker Desktop (WSL here) the engine picks a published port in its VM without seeing this machine's listeners; a port another local process already held shadowed the container (observed: a WSL listener on the published port answered MinIO's health check with 404 until the 60 s readiness timeout, ≈ 1 in 10 `make check` runs while other agents' tests ran). `pricingtest.PublishOnFreePort` asks the local kernel for a free loopback port and binds the container there. Also: gci's third section is `prefix(github.com/heynemann/go-plg)` instead of `localmodule`, so the core and examples modules format the examples' imports identically (the same grouping for the core module).
 - **Guest compile times (`plg warm`, linux/amd64, cold / from the disk cache):** Go 4.3 s / 0.16 s, Lua 69 ms / 3.5 ms, TypeScript 0.28 s / 13 ms.
+
+### Ticket 17: Multiplexed async I/O for TS and Lua
+
+- **API:** Register option `WithConcurrentCalls(n)` (1–4096, default 1 = blocking as before; `n × pool max ≤ 1048576`, else `ErrInvalidOption`); Go plugins ignore it. New sentinel `ErrInstanceLost`. An instance counts once in `WithPool` and the memory budget however many calls it serves.
+- **Guests:** two new exports (start a call, deliver an HTTP answer) and a non-blocking host import that starts a request; each step returns the calls it finished and the requests it started (`internal/engine/step.go`). Lua runs each call in its own coroutine; where a call cannot yield (a `table.sort` comparator, a coroutine of the plugin's own) `http.request` falls back to blocking. TS `fetch` returns a pending promise settled by a later step.
+- **Host (`mux.go`):** one owner goroutine per instance runs every step; each concurrent call holds a lane (a pool slot) with its own argument and result buffers, so interleaved calls cannot see each other's arguments or results through plg. A call whose ctx ends while waiting fails alone with the ctx's error and the instance serves on (its pending requests fail; the guest finishes the call on borrowed time, 250 ms per step, else the instance is discarded). A trap, OOM, panic, ABI break or stop while running fails that call with a `PanicError` and every other call on the instance with `ErrInstanceLost`; the instance is replaced. `MaxRequestsPerCall` is per call. The pool skips broken lanes and an instance closes with its last lane; instances given back after `pool.close` timed out are now closed at once (without the plugin's `Close`) so owner goroutines cannot leak.
+- **Benchmark (`BenchmarkHTTPLatency`, 256 concurrent callers, each awaiting one request answered after 100 ms; Ryzen 9 9950X3D, no race detector):**
+
+| Mode | calls/s | live heap (MiB) | wasm memory (MiB) |
+|---|---|---|---|
+| Lua blocking, pool 1 / 16 / 64 / 256 | 9.9 / 152 / 588 / 2358 | 3 / 44 / 176 / 760 | 2.1 / 34 / 136 / 544 |
+| TS blocking, pool 1 / 16 / 64 / 256 | 9.9 / 150 / 584 / 2427 | 3.2 / 50 / 196 / 799 | 2.4 / 38 / 152 / 608 |
+| Lua multiplexed, 1 instance × 256 calls | 2361 | 11.4 | 3.1 |
+| TS multiplexed, 1 instance × 256 calls | 2325 | 12.0 | 3.2 |
+
+- **Ship criterion (set before measuring):** keep multiplexing if one instance reaches ≥ 90% of the blocking pool=256 throughput with ≤ ¼ of its live heap. **Decision: shipped.** It reaches 96–100% of the throughput with ≈ 1/67 of the heap; at equal pool size it is ≈ 240× the throughput. Blocking throughput is pool ÷ latency at ≈ 3 MiB per waiting call (which also corrected PLAN's "0.2–0.5 MiB per instance": each Lua/TS instance's memory starts with a 2 MiB stack). `BenchmarkCall{Lua,TypeScript}Multiplexed[Parallel]` track the CPU-bound cost.
+- **Isolation:** calls on one instance never observe each other's arguments or results through plg: `TestMuxInterleavesCallsOnOneInstance` (scripted guest; three calls, answers delivered in reverse order, each call gets exactly its own arguments and answer) and `TestConcurrentCallsShareOneInstance` (real Lua/TS, 8 overlapping calls on one instance, each gets its own answer); `TestMuxAbandonsACallAtItsDeadline` checks an abandoned call's result reaches nobody. Plugin-owned global state and the memory limit are shared, exactly as per-instance state is shared by successive calls, and documented as such.
+- **Limitations:** shared global state and memory limit between interleaved calls; an abandoned call still runs its remaining code (≤ 250 ms per step); Lua's blocking fallback counts requests per step rather than per call; in TS a request belongs to the call whose step made it, so a promise shared between calls can be attributed to the wrong call; Host calls never yield (they block the instance).

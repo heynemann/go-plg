@@ -141,4 +141,16 @@ int luaopen_plg_json(lua_State *L);
 /* Pushes the values of a status-OK body of method m's results: nothing, one value or an array table. */
 const char *plg_push_results(lua_State *L, const plg_method *m, plg_reader *r, int *pushed);
 
+/*
+** Multiplexed steps (glue.c). While a step runs a call's coroutine, plg_call_thread is that coroutine and
+** plg_call_id the host's number for the call (otherwise plg_call_thread is NULL). http.request started there
+** hands its request to the host with http_start, sets plg_wait_request to the request's number and yields
+** &plg_yield_key; the step that resumes it sets plg_answer to the host's answer.
+*/
+extern lua_State *plg_call_thread;
+extern uint32_t plg_call_id;
+extern uint32_t plg_wait_request;
+extern plg_reader plg_answer;
+extern char plg_yield_key;
+
 #endif

@@ -419,6 +419,16 @@ func TestRegisterArguments(t *testing.T) {
 		{name: "limit-small", opts: withEmpty(plg.WithMemoryLimit(64<<10 - 1)), want: plg.ErrInvalidOption},
 		{name: "limit-huge", opts: withEmpty(plg.WithMemoryLimit(4<<30 + 1)), want: plg.ErrInvalidOption},
 		{
+			name: "calls-zero", opts: withEmpty(plg.WithConcurrentCalls(0)), want: plg.ErrInvalidOption,
+			msg: "WithConcurrentCalls(0): want 1 to 4096",
+		},
+		{name: "calls-negative", opts: withEmpty(plg.WithConcurrentCalls(-1)), want: plg.ErrInvalidOption},
+		{name: "calls-huge", opts: withEmpty(plg.WithConcurrentCalls(4097)), want: plg.ErrInvalidOption},
+		{
+			name: "calls-too-many-in-all", want: plg.ErrInvalidOption, msg: "up to 257 instances: want at most 1048576",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithPool(1, 257), plg.WithConcurrentCalls(4096)},
+		},
+		{
 			name: "desc-limit-small", want: plg.ErrInvalidDescriptor, msg: `"k" with a memory limit of 65535 bytes`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
 				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 64<<10 - 1},
@@ -489,6 +499,7 @@ func TestRegisterAcceptsTheLimitsOfPoolsAndMemory(t *testing.T) {
 
 	for i, opt := range []plg.RegisterOption{
 		plg.WithPool(1, 1), plg.WithPool(4096, 4096), plg.WithMemoryLimit(64 << 10), plg.WithMemoryLimit(4 << 30),
+		plg.WithConcurrentCalls(1), plg.WithConcurrentCalls(4096),
 	} {
 		require.NoError(t, plg.Register[pinger](t.Context(), ctr, "opt"+strconv.Itoa(i), withEmpty(opt)...))
 	}

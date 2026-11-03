@@ -26,6 +26,8 @@ func (goLoader) guestImport() string { return "github.com/heynemann/go-plg/guest
 
 func (goLoader) memoryLimit() uint64 { return goMemoryLimit }
 
+func (goLoader) multiplexes() bool { return false }
+
 func (goLoader) prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error) {
 	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, entrypoint)
 	if err != nil {

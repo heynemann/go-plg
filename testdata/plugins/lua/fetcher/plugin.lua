@@ -4,6 +4,10 @@
 --   POST <url> <n>        one POST with an n-byte body
 --   REPEAT <n> <url>      n GETs in a row
 --   HOST <url> <host>     one GET with the Host header overridden
+--   SORTGET <url>         one GET from inside table.sort's comparator, where the call cannot yield
+--   LOOP -                loops forever
+--   HOG -                 allocates until it runs out of memory
+--   YIELD -               yields from the method itself
 --
 -- and returns "<status code>|<X-Reply header>|<body>" of the last response.
 local function get(url, hostname)
@@ -53,6 +57,26 @@ function Fetcher:Foo(cmd)
       out = got
     end
     return out
+  elseif verb == "SORTGET" then
+    local resp, err
+    local pair = { 2, 1 }
+    table.sort(pair, function(a, b)
+      if resp == nil and err == nil then
+        resp, err = get(args[2])
+      end
+      return a < b
+    end)
+    return describe(resp, err)
+  elseif verb == "LOOP" then
+    while true do
+    end
+  elseif verb == "HOG" then
+    local kept = {}
+    while true do
+      kept[#kept + 1] = string.rep("x", 1 << 20) .. #kept
+    end
+  elseif verb == "YIELD" then
+    coroutine.yield()
   end
   return nil, "unknown command " .. verb
 end

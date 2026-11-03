@@ -47,6 +47,7 @@ var (
 type poolConfig struct {
 	panics  *panicReporter
 	spawn   func(context.Context) (instance, error) // starts an instance, running the plugin's Create
+	http    engine.HTTPFunc                         // makes the requests of multiplexed instances
 	budget  *memoryBudget
 	meters  *pluginMeters
 	key     string
@@ -54,6 +55,7 @@ type poolConfig struct {
 	limit   uint64 // memory limit of each instance, charged to the budget while it lives
 	minSize int32
 	maxSize int32
+	lanes   int32 // calls each instance serves at once (see mux.go); 1 for instances that do not multiplex
 }
 
 // pool serves a plugin's calls from minSize to maxSize instances. A caller takes an idle instance; with none
@@ -62,40 +64,51 @@ type poolConfig struct {
 // maxSize), retrying a failing Create with exponential backoff. Broken instances are closed, never reused. A
 // panic while starting or closing an instance, or in the refiller, is recovered and reported.
 //
+// An instance that multiplexes (lanes > 1, a script guest) serves up to lanes calls at once: it is handed out as
+// that many slots, its lanes, which move through the pool like instances. Closing a lane closes the instance only
+// when it is the last; until then the others serve on, or, when the instance broke, are discarded as callers
+// take them.
+//
 // size counts the places taken, by instances alive or being started; a place is reserved (size and budget)
 // before an instance starts and given back (retire) when it fails to start or is closed. The idle channel has
-// room for maxSize slots, so giving an instance back never blocks.
+// room for maxSize × lanes slots, so giving an instance back never blocks.
 type pool struct {
-	logger  *slog.Logger
-	panics  *panicReporter
-	spawn   func(context.Context) (instance, error)
-	budget  *memoryBudget
-	meters  *pluginMeters
-	stop    context.CancelFunc // ends the refiller's context
-	idle    chan *slot
-	wake    chan struct{} // one pending signal for the refiller (and close): an instance retired
-	done    chan struct{} // closed by close
-	stopped chan struct{} // closed when the refiller returns
-	key     string
-	lang    Language
-	limit   uint64
-	ids     atomic.Uint64
-	refills atomic.Uint64 // instances the refiller started
-	grows   atomic.Uint64 // instances callers started
-	memory  atomic.Int64  // linear memory of the live instances, as last sampled: at start and on each release
-	minSize int32
-	maxSize int32
-	size    atomic.Int32
-	busy    atomic.Int32 // instances handed out to callers
-	waiting atomic.Int32 // callers blocked on the idle channel
-	closed  atomic.Bool
+	logger    *slog.Logger
+	panics    *panicReporter
+	spawn     func(context.Context) (instance, error)
+	http      engine.HTTPFunc
+	budget    *memoryBudget
+	meters    *pluginMeters
+	stop      context.CancelFunc // ends the refiller's context
+	idle      chan *slot
+	wake      chan struct{} // one pending signal for the refiller (and close): an instance retired
+	done      chan struct{} // closed by close
+	stopped   chan struct{} // closed when the refiller returns
+	key       string
+	lang      Language
+	limit     uint64
+	ids       atomic.Uint64
+	refills   atomic.Uint64 // instances the refiller started
+	grows     atomic.Uint64 // instances callers started
+	memory    atomic.Int64  // linear memory of the live instances, as last sampled: at start and on each release
+	minSize   int32
+	maxSize   int32
+	lanes     int32
+	size      atomic.Int32
+	busy      atomic.Int32 // slots handed out to callers: calls in flight
+	waiting   atomic.Int32 // callers blocked on the idle channel
+	closed    atomic.Bool
+	abandoned atomic.Bool // close gave up waiting: slots given back are closed at once
 }
 
 func newPool(cfg *poolConfig) *pool {
+	lanes := max(cfg.lanes, 1)
+
 	return &pool{
 		logger:  cfg.panics.logger,
 		panics:  cfg.panics,
 		spawn:   cfg.spawn,
+		http:    cfg.http,
 		budget:  cfg.budget,
 		meters:  cfg.meters,
 		key:     cfg.key,
@@ -103,7 +116,8 @@ func newPool(cfg *poolConfig) *pool {
 		limit:   cfg.limit,
 		minSize: cfg.minSize,
 		maxSize: cfg.maxSize,
-		idle:    make(chan *slot, cfg.maxSize),
+		lanes:   lanes,
+		idle:    make(chan *slot, cfg.maxSize*lanes),
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
@@ -147,17 +161,30 @@ func (p *pool) warm(ctx context.Context) error {
 }
 
 // acquire takes an instance for one call: an idle one, a new one while the pool may grow, or the next one
-// given back, waiting on ctx.
+// given back, waiting on ctx. Lanes of a multiplexed instance that broke meanwhile are discarded on the way.
 func (p *pool) acquire(ctx context.Context) (*slot, error) {
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("waiting for an instance: %w", context.Cause(ctx))
-	}
+	for {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("waiting for an instance: %w", context.Cause(ctx))
+		}
 
-	select {
-	case held := <-p.idle:
-		return p.open(held)
-	default:
-		return p.await(ctx)
+		var (
+			held *slot
+			err  error
+		)
+
+		select {
+		case held = <-p.idle:
+			held, err = p.open(ctx, held)
+		default:
+			held, err = p.await(ctx)
+		}
+
+		if err != nil || !held.inst.Broken() {
+			return held, err
+		}
+
+		p.discard(ctx, held)
 	}
 }
 
@@ -181,7 +208,7 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 
 		p.grows.Add(1)
 
-		return p.open(held)
+		return p.open(ctx, held)
 	}
 
 	defer p.waiting.Add(-1)
@@ -190,7 +217,7 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 
 	select {
 	case held := <-p.idle:
-		return p.open(held)
+		return p.open(ctx, held)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("waiting for an instance: %w", context.Cause(ctx))
 	case <-p.done:
@@ -198,10 +225,13 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 	}
 }
 
-// open hands held out, unless the pool closed meanwhile: then it gives held back for close to collect.
-func (p *pool) open(held *slot) (*slot, error) {
+// open hands held out, unless the pool closed meanwhile: then it gives held back for close to collect (or closes
+// it, once close gave up waiting).
+func (p *pool) open(ctx context.Context, held *slot) (*slot, error) {
 	if p.closed.Load() {
 		p.idle <- held
+
+		p.closeAbandoned(ctx)
 
 		return nil, ErrClosed
 	}
@@ -211,8 +241,9 @@ func (p *pool) open(held *slot) (*slot, error) {
 	return held, nil
 }
 
-// release gives an instance back for the next call, sampling its memory first: memory grows during calls.
-func (p *pool) release(held *slot) {
+// release gives an instance back for the next call, sampling its memory first: memory grows during calls. Once
+// close gave up waiting for it, the instance is closed instead.
+func (p *pool) release(ctx context.Context, held *slot) {
 	if mem := held.inst.Memory(); mem != held.mem {
 		p.memory.Add(int64(mem) - int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
 
@@ -222,11 +253,18 @@ func (p *pool) release(held *slot) {
 	p.busy.Add(-1)
 
 	p.idle <- held
+
+	p.closeAbandoned(ctx)
 }
 
-// discard closes a broken instance and gives its place back; the refiller replaces it.
+// discard closes a broken instance and gives its place back; the refiller replaces it. A lane of a multiplexed
+// instance breaks the instance, failing the other calls on it; the instance closes with its last lane.
 func (p *pool) discard(ctx context.Context, held *slot) {
 	p.busy.Add(-1)
+
+	if lane, ok := held.inst.(*muxLane); ok && !lane.Broken() {
+		lane.discard()
+	}
 
 	err := p.closeInstance(context.WithoutCancel(ctx), held)
 	if err != nil {
@@ -235,10 +273,14 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 	}
 }
 
-// closeInstance closes an instance and gives its place back. A panic meanwhile is reported as a [PanicError]
-// in [PhaseClose] and returned.
+// closeInstance closes an instance and gives its place back; a lane of a multiplexed instance closes it only
+// when it is the last. A panic meanwhile is reported as a [PanicError] in [PhaseClose] and returned.
 func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	p.memory.Add(-int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
+
+	if lane, ok := held.inst.(*muxLane); ok && !lane.release() {
+		return nil
+	}
 
 	defer p.retire()
 	defer func() {
@@ -256,6 +298,34 @@ func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	}
 
 	return nil
+}
+
+// closeIdle closes the instances idle now.
+func (p *pool) closeIdle(ctx context.Context) {
+	for {
+		select {
+		case held := <-p.idle:
+			err := p.closeInstance(ctx, held)
+			if err != nil {
+				p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
+					slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+			}
+		default:
+			return
+		}
+	}
+}
+
+// closeAbandoned closes the instances idle now once close gave up waiting for them. They close under an ended
+// context, so without the plugin's Close, which nobody waits for any more.
+func (p *pool) closeAbandoned(ctx context.Context) {
+	if !p.abandoned.Load() {
+		return
+	}
+
+	ended, cancel := context.WithCancel(ctx)
+	cancel()
+	p.closeIdle(ended)
 }
 
 // reserve takes a place for a new instance: [errPoolFull] at the pool's maximum, [errBudgetFull] when the
@@ -294,6 +364,15 @@ func (p *pool) start(ctx context.Context, phase Phase) (*slot, error) {
 
 	held := &slot{inst: inst, id: p.ids.Add(1), mem: inst.Memory()}
 	p.memory.Add(int64(held.mem)) //nolint:gosec // G115: wasm32 memory is at most 4 GiB
+
+	if st, ok := inst.(stepper); ok && p.lanes > 1 && st.Multiplexes() {
+		lanes := newMux(p, st, int(p.lanes)) //nolint:contextcheck // the owner outlives this call; it serves many
+		held.inst = lanes[0]
+
+		for _, lane := range lanes[1:] {
+			p.idle <- &slot{inst: lane, id: held.id}
+		}
+	}
 
 	return held, nil
 }
@@ -454,8 +533,9 @@ func sleep(ctx context.Context, d time.Duration) bool {
 }
 
 // close stops serving calls and the refiller, then closes every instance, waiting on ctx for those in use to
-// be given back. Instances still in use when ctx ends are left to the runtime, which closes them with itself.
-// It must be called once, after a successful warm.
+// be given back. When ctx ends first, the instances still in use are closed as they are given back, without
+// the plugin's Close (the runtime frees those never given back with itself). It must be called once, after a
+// successful warm.
 func (p *pool) close(ctx context.Context) error {
 	p.closed.Store(true)
 	close(p.done)
@@ -470,6 +550,9 @@ func (p *pool) close(ctx context.Context) error {
 			errs = append(errs, p.closeInstance(ctx, held))
 		case <-p.wake: // an instance in use was discarded
 		case <-ctx.Done():
+			p.abandoned.Store(true)
+			p.closeIdle(ctx) // what release gave back before it could see abandoned
+
 			return fmt.Errorf("plg: draining %s: %w", p.key, context.Cause(ctx))
 		}
 	}

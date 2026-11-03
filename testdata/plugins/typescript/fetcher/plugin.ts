@@ -5,6 +5,9 @@
 //   POST <url> <n>        one POST with an n-byte body
 //   REPEAT <n> <url>      n GETs in a row
 //   HOST <url> <host>     one GET with the Host header overridden
+//   LOOP -                loops forever
+//   HOG -                 allocates until it runs out of memory
+//   HANG -                awaits a promise nothing settles
 //
 // and returns "<status code>|<X-Reply header>|<body>" of the last response.
 async function get(url: string, host?: string): Promise<string> {
@@ -44,6 +47,18 @@ export function Create() {
           }
           return out;
         }
+        case "LOOP":
+          for (;;) {
+            // spins until the call's deadline stops it
+          }
+        case "HOG": {
+          const kept: Uint8Array[] = [];
+          for (;;) {
+            kept.push(new Uint8Array(1 << 20));
+          }
+        }
+        case "HANG":
+          return new Promise<string>(() => {});
         default:
           throw new Error("unknown command " + args[0]);
       }

@@ -48,7 +48,7 @@ func TestTheArtifactSpeaksTheGuestABIAndImportsNothingElse(t *testing.T) {
 	require.NoError(t, err)
 
 	exports := mod.ExportedFunctions()
-	for _, name := range []string{"_initialize", "plg_alloc", "plg_init", "plg_call", "plg_close"} {
+	for _, name := range []string{"_initialize", "plg_alloc", "plg_init", "plg_call", "plg_close", "plg_start", "plg_resume"} {
 		assert.Contains(t, exports, name)
 	}
 
@@ -68,7 +68,7 @@ func TestTheArtifactSpeaksTheGuestABIAndImportsNothingElse(t *testing.T) {
 	}
 
 	slices.Sort(plgImports)
-	assert.Equal(t, []string{"host_call", "http_roundtrip", "take_result"}, plgImports)
+	assert.Equal(t, []string{"host_call", "http_roundtrip", "http_start", "take_result"}, plgImports)
 }
 
 // TestTheArtifactNeedsExceptionHandling pins why every plg runtime enables wazero's experimental exception

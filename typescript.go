@@ -16,6 +16,8 @@ func (tsLoader) guestImport() string { return "github.com/heynemann/go-plg/guest
 
 func (tsLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
+func (tsLoader) multiplexes() bool { return true }
+
 func (tsLoader) prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error) {
 	bundle, err := tsbundle.Bundle(files, entrypoint)
 	if err != nil {

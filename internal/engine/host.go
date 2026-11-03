@@ -50,11 +50,14 @@ type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) 
 // hostState is what the host imports know about one instance. Only the goroutine calling the instance touches
 // it: a guest calls its imports synchronously.
 type hostState struct {
-	http     HTTPFunc
-	host     HostFunc
-	pending  []byte // the result take_result hands over
-	requests int    // http_roundtrip calls in the current plg_init or plg_call
-	ready    bool   // pending holds a result not taken yet
+	http        HTTPFunc
+	host        HostFunc
+	pending     []byte    // the result take_result hands over
+	started     []Request // the requests http_start took during the current step
+	requests    int       // http_roundtrip calls in the current plg_init, plg_call or step
+	lastRequest uint32    // the number of the last request http_start took
+	ready       bool      // pending holds a result not taken yet
+	stepping    bool      // a multiplexed step is running: http_start is allowed
 }
 
 // begin resets the per-call state before a plg_init or plg_call.
@@ -76,6 +79,9 @@ func (r *Runtime) instantiateHostModule(ctx context.Context, rt wazero.Runtime) 
 		NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(r.takeResult), []api.ValueType{i32, i32}, nil).
 		Export(importTake).
+		NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(r.httpStart), []api.ValueType{i32, i32, i32}, []api.ValueType{i32}).
+		Export(importHTTPStart).
 		Instantiate(ctx)
 	if err != nil { // only a programming error in the definitions above, on a fresh runtime
 		panic(fmt.Sprintf("engine: instantiating the %s host module: %v", hostModule, err))

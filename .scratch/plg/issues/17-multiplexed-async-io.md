@@ -4,10 +4,10 @@
 
 **Blocked by:** 12 (TypeScript plugins), 13 (Lua plugins), 14 (OTel metrics and benchmark budgets)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A benchmark with high-latency HTTP calls shows throughput and memory for blocking vs multiplexed
-- [ ] Calls interleaved on one instance can't observe each other's arguments or results (tests)
-- [ ] Deadlines, traps and discard rules still apply per call; one failing call discards the instance and fails only the calls running on it, with clear errors
-- [ ] If there's no clear win, the ticket closes with the data and blocking stays
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A benchmark with high-latency HTTP calls shows throughput and memory for blocking vs multiplexed
+- [x] Calls interleaved on one instance can't observe each other's arguments or results (tests)
+- [x] Deadlines, traps and discard rules still apply per call; one failing call discards the instance and fails only the calls running on it, with clear errors
+- [x] If there's no clear win, the ticket closes with the data and blocking stays (there was a clear win: shipped, data in PLAN.md)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

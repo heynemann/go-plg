@@ -177,7 +177,8 @@
     const mode = init.redirect ?? "follow";
 
     for (let hops = 0; ; hops++) {
-      const [status, pairs, bytes] = http(method, url, headers.pairs(), body);
+      // A Promise in a multiplexed step (the instance serves other calls meanwhile), the answer itself otherwise.
+      const [status, pairs, bytes] = await http(method, url, headers.pairs(), body);
       const response = new Response(bytes, { status, headers: pairs, url, redirected: hops > 0 });
       const location = response.headers.get("location");
       if (mode === "manual" || !redirects.has(status) || location === null) return response;

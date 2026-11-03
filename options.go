@@ -84,19 +84,28 @@ type RegisterOption func(*registerConfig)
 // instances, so the bound keeps a mistyped maximum from allocating gigabytes.
 const maxPoolSize = 4096
 
+// maxConcurrentCalls bounds [WithConcurrentCalls], and maxLanes the calls a plugin's whole pool may serve at once
+// (pool maximum × concurrent calls): the pool keeps room for that many idle slots, 8 bytes each.
+const (
+	maxConcurrentCalls = 4096
+	maxLanes           = 1 << 20
+)
+
 type registerConfig struct {
-	http         *HTTPPolicy     // nil: HTTP refused
-	goGuest      *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
-	storages     []Storage
-	languages    []Language    // enabled languages; empty enables every language
-	hosts        []hostSpec    // WithHost options; at most one is valid
-	goGuests     [][]byte      // WithGoGuest options; at most one is valid
-	memoryLimit  uint64        // per-instance limit, whole pages
-	pollInterval time.Duration // zero: no polling
-	poolMin      int
-	poolMax      int
-	poolSet      bool
-	limitSet     bool
+	http          *HTTPPolicy     // nil: HTTP refused
+	goGuest       *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
+	storages      []Storage
+	languages     []Language    // enabled languages; empty enables every language
+	hosts         []hostSpec    // WithHost options; at most one is valid
+	goGuests      [][]byte      // WithGoGuest options; at most one is valid
+	memoryLimit   uint64        // per-instance limit, whole pages
+	pollInterval  time.Duration // zero: no polling
+	poolMin       int
+	poolMax       int
+	concurrent    int // WithConcurrentCalls
+	poolSet       bool
+	limitSet      bool
+	concurrentSet bool
 }
 
 // enabled reports whether the Register runs plugins in lang.
@@ -135,8 +144,9 @@ func registerOptions(name string, opts []RegisterOption) (*registerConfig, error
 	return cfg, nil
 }
 
-// settle validates the pool and memory options and fills in the pool's default, 1 to GOMAXPROCS instances.
-// Without WithMemoryLimit, each plugin gets its language's default limit ([registerConfig.limit]).
+// settle validates the pool and memory options and fills in the pool's default, 1 to GOMAXPROCS instances, and
+// one call per instance. Without WithMemoryLimit, each plugin gets its language's default limit
+// ([registerConfig.limit]).
 func (c *registerConfig) settle() error {
 	switch {
 	case !c.poolSet:
@@ -147,6 +157,11 @@ func (c *registerConfig) settle() error {
 	default: // the pool given is valid
 	}
 
+	err := c.settleConcurrentCalls()
+	if err != nil {
+		return err
+	}
+
 	if c.limitSet {
 		if c.memoryLimit < engine.PageSize || c.memoryLimit > maxMemoryLimit {
 			return fmt.Errorf("%w: WithMemoryLimit(%d): want from one %d-byte page to 4 GiB", ErrInvalidOption,
@@ -154,6 +169,24 @@ func (c *registerConfig) settle() error {
 		}
 
 		c.memoryLimit = wholePages(c.memoryLimit)
+	}
+
+	return nil
+}
+
+// settleConcurrentCalls validates WithConcurrentCalls against the pool's maximum, by default one call per
+// instance.
+func (c *registerConfig) settleConcurrentCalls() error {
+	switch {
+	case !c.concurrentSet:
+		c.concurrent = 1
+	case c.concurrent < 1 || c.concurrent > maxConcurrentCalls:
+		return fmt.Errorf("%w: WithConcurrentCalls(%d): want 1 to %d", ErrInvalidOption, c.concurrent,
+			maxConcurrentCalls)
+	case c.concurrent*c.poolMax > maxLanes:
+		return fmt.Errorf("%w: WithConcurrentCalls(%d) with a pool of up to %d instances: want at most %d calls "+
+			"at once in all", ErrInvalidOption, c.concurrent, c.poolMax, maxLanes)
+	default: // the number of calls given is valid
 	}
 
 	return nil
@@ -204,6 +237,31 @@ func WithPollInterval(interval time.Duration) RegisterOption {
 func WithPool(minimum, maximum int) RegisterOption {
 	return func(c *registerConfig) {
 		c.poolMin, c.poolMax, c.poolSet = minimum, maximum, true
+	}
+}
+
+// WithConcurrentCalls lets each instance of the Register's Lua and TypeScript plugins serve up to n calls at
+// once. While a call waits for an HTTP request (an awaited fetch in TypeScript, http.request in Lua), its instance
+// runs other calls instead of idling, so a few instances serve many I/O-bound calls: a Lua or TypeScript instance
+// costs about 3 MiB of host memory (its linear memory starts with a 2 MiB stack), an extra call in flight on it a
+// few KiB. Go plugins always serve one call per instance; the option does not apply to them. With the option, an
+// instance counts as one in [WithPool] and in the memory budget however many calls it serves.
+//
+// The calls on one instance share it as concurrent requests share a Node.js process: they never see each other's
+// arguments or results, but they do see the plugin's global state, which may change while a call waits (in Lua,
+// while http.request yields), and they share the instance's memory limit. Each call keeps its own context: when it
+// ends while the call waits for its requests, the call fails with the context's error and the instance serves on
+// (the plugin sees the requests fail, and the code it runs afterwards gets 250 ms per step). A call that traps,
+// runs out of memory, panics, breaks the guest ABI or is stopped at its deadline while running discards the
+// instance: it fails with a [PanicError] as usual, and every other call on the instance with [ErrInstanceLost].
+// A Lua plugin's request made where its call cannot yield (inside a coroutine of the plugin's own, or a callback
+// of a C function such as table.sort's comparator) blocks the instance, as without the option.
+//
+// n must be from 1 (the default: one call per instance) to 4096, and n times the pool's maximum at most 1048576
+// (the pool keeps room for that many calls), otherwise Register fails with [ErrInvalidOption].
+func WithConcurrentCalls(n int) RegisterOption {
+	return func(c *registerConfig) {
+		c.concurrent, c.concurrentSet = n, true
 	}
 }
 

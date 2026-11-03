@@ -209,7 +209,7 @@ func (p *plugin) callInstance(ctx context.Context, meth *method, args []reflect.
 	if discard || held.inst.Broken() { // never reuse a broken instance: wazero would answer with garbage
 		p.pool.discard(ctx, held)
 	} else {
-		p.pool.release(held)
+		p.pool.release(ctx, held)
 	}
 
 	return out, err
@@ -255,6 +255,10 @@ func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, args [
 	}
 
 	res, err := held.inst.Call(ctx, meth.index, held.buf)
+	if lost, ok := errors.AsType[*muxError](err); ok { // no guest failure of its own: nothing to report
+		return nil, lost.discard, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, lost)
+	}
+
 	if err != nil {
 		return nil, true, p.failed(ctx, held, meth, err)
 	}

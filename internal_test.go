@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
 	"github.com/heynemann/go-plg/internal/wire"
 )
@@ -454,11 +456,11 @@ func TestPoolGrowsToItsMaximumThenWaits(t *testing.T) {
 		got := acquireLater(t, instances)
 
 		synctest.Wait()
-		instances.release(held[1])
+		instances.release(t.Context(), held[1])
 		assert.Same(t, held[1], <-got, "a waiting caller gets the next instance given back")
 
 		for _, h := range held {
-			instances.release(h)
+			instances.release(t.Context(), h)
 		}
 
 		require.NoError(t, instances.close(t.Context()))
@@ -485,8 +487,8 @@ func TestPoolCallerStartFailureGivesThePlaceBack(t *testing.T) {
 		next := acquireN(t, instances, 1)[0]
 		assert.Equal(t, uint64(2), next.id, "the next caller starts an instance in the place given back")
 
-		instances.release(held)
-		instances.release(next)
+		instances.release(t.Context(), held)
+		instances.release(t.Context(), next)
 		require.NoError(t, instances.close(t.Context()))
 	})
 }
@@ -528,8 +530,8 @@ func TestPoolStartsAnInstanceForWaitingCallers(t *testing.T) {
 		assert.Equal(t, uint64(3), next.id)
 		assert.Equal(t, uint64(1), instances.stats().Refills)
 
-		instances.release(next)
-		instances.release(held[1])
+		instances.release(t.Context(), next)
+		instances.release(t.Context(), held[1])
 		require.NoError(t, instances.close(t.Context()))
 	})
 }
@@ -624,7 +626,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 		other := newPool(otherCfg)
 		require.NoError(t, other.warm(t.Context()))
 
-		instances.release(held[1])
+		instances.release(t.Context(), held[1])
 		require.NoError(t, instances.close(t.Context()))
 		require.NoError(t, other.close(t.Context()))
 		assert.Zero(t, budget.used.Load())
@@ -681,7 +683,7 @@ func TestPoolCloseWaitsForInstancesInUse(t *testing.T) {
 		held := acquireN(t, instances, 1)[0]
 		done := closeLater(t, instances)
 
-		instances.release(held)
+		instances.release(t.Context(), held)
 		require.NoError(t, <-done)
 		assert.Equal(t, int32(2), spawner.closed.Load())
 
@@ -715,8 +717,11 @@ func TestPoolCloseGivesUpWaitingWhenItsContextEnds(t *testing.T) {
 		defer cancel()
 
 		require.ErrorIs(t, instances.close(ctx), context.DeadlineExceeded)
-		instances.release(held)
-		assert.Zero(t, spawner.closed.Load(), "the runtime closes what is left")
+		assert.Zero(t, spawner.closed.Load(), "the instance is in use")
+
+		instances.release(t.Context(), held)
+		assert.Equal(t, int32(1), spawner.closed.Load(), "given back, it is closed at once")
+		assert.Equal(t, PoolStats{}, instances.stats())
 	})
 }
 
@@ -738,7 +743,7 @@ func TestPoolCloseFailsWaitingCallers(t *testing.T) {
 		done := closeLater(t, instances)
 
 		require.ErrorIs(t, <-failed, ErrClosed)
-		instances.release(held)
+		instances.release(t.Context(), held)
 		require.NoError(t, <-done)
 	})
 }
@@ -760,7 +765,7 @@ func TestPoolCloseCollectsAnInstanceACallerStartedMeanwhile(t *testing.T) {
 		}()
 
 		synctest.Wait()
-		instances.release(held)
+		instances.release(t.Context(), held)
 
 		done := closeLater(t, instances)
 
@@ -877,7 +882,7 @@ func hammerPool(ctx context.Context, instances *pool, rounds int) error {
 		if round%97 == 0 {
 			instances.discard(ctx, held)
 		} else {
-			instances.release(held)
+			instances.release(ctx, held)
 		}
 	}
 
@@ -922,7 +927,7 @@ func BenchmarkPoolAcquireRelease(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		instances.release(held)
+		instances.release(ctx, held)
 	}
 }
 
@@ -946,7 +951,7 @@ func BenchmarkPoolAcquireReleaseParallel(b *testing.B) {
 						return
 					}
 
-					instances.release(held)
+					instances.release(ctx, held)
 				}
 			})
 		})
@@ -1918,7 +1923,7 @@ func TestPoolMeasurements(t *testing.T) {
 		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 1, "memory": 3 * engine.PageSize}, gauges())
 
 		spawner.memory.Store(5 * engine.PageSize) // the call grew the instance's memory
-		instances.release(held)
+		instances.release(t.Context(), held)
 		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 0, "memory": 5 * engine.PageSize}, gauges(),
 			"memory is sampled when the instance comes back")
 
@@ -2086,7 +2091,7 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 			return
 		}
 
-		instances.release(held)
+		instances.release(ctx, held)
 		meters.called(ctx, 0, time.Millisecond, nil)
 		meters.called(ctx, 0, time.Millisecond, pluginErr)
 		meters.requested(ctx, ok)
@@ -2095,4 +2100,551 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 	assert.Zero(t, allocs)
 	assert.Zero(t, failures)
 	require.NoError(t, instances.close(ctx))
+}
+
+// scriptedGuest is a multiplexing fake guest whose steps the test plays: each Start and Resume hands the test a
+// guestStep and waits for its reply.
+type scriptedGuest struct {
+	steps  chan *guestStep
+	output string // what Guest returns
+	closed atomic.Int32
+}
+
+// guestStep is one step of a scriptedGuest: Start's call, method and arguments, or Resume's request and answer.
+type guestStep struct {
+	deadline time.Time       // the step's context's deadline; zero without one
+	done     <-chan struct{} // the step's context's Done
+	reply    chan stepReply
+	args     []byte
+	call     uint32
+	method   uint32
+	request  uint32 // zero for Start
+}
+
+// stepReply is how the test ends a step: with its outcome, or with a panic of the guest's driver.
+type stepReply struct {
+	err   error
+	step  engine.Step
+	panic bool
+}
+
+const scriptedMemory = 3 * engine.PageSize
+
+func newScriptedGuest() *scriptedGuest {
+	return &scriptedGuest{steps: make(chan *guestStep)}
+}
+
+func (g *scriptedGuest) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
+	return g.play(ctx, &guestStep{call: call, method: method, args: slices.Clone(args)})
+}
+
+func (g *scriptedGuest) Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error) {
+	return g.play(ctx, &guestStep{request: request, args: slices.Clone(answer)})
+}
+
+func (*scriptedGuest) Multiplexes() bool { return true }
+
+func (*scriptedGuest) Call(context.Context, uint32, []byte) (engine.Result, error) {
+	return engine.Result{}, errFake // a multiplexed instance is only stepped
+}
+
+func (*scriptedGuest) Broken() bool { return false }
+
+func (g *scriptedGuest) Close(context.Context) error {
+	g.closed.Add(1)
+
+	return nil
+}
+
+func (g *scriptedGuest) Guest() string { return g.output }
+
+func (*scriptedGuest) Memory() uint64 { return scriptedMemory }
+
+func (g *scriptedGuest) play(ctx context.Context, s *guestStep) (engine.Step, error) {
+	s.done, s.reply = ctx.Done(), make(chan stepReply, 1)
+	s.deadline, _ = ctx.Deadline()
+
+	g.steps <- s
+
+	r := <-s.reply
+	if r.panic {
+		panic("driver bug")
+	}
+
+	return r.step, r.err
+}
+
+// next takes the guest's next step.
+func (g *scriptedGuest) next() *guestStep {
+	return <-g.steps
+}
+
+// wait ends a Start by making the call wait for a request numbered id.
+func (s *guestStep) wait(id uint32) {
+	s.reply <- stepReply{step: engine.Step{Requests: []engine.Request{{Call: s.call, ID: id, Body: s.args}}}}
+}
+
+// finish ends a step by finishing call with an OK result of body.
+func (s *guestStep) finish(call uint32, body string) {
+	s.reply <- stepReply{step: engine.Step{Done: []engine.Completion{
+		{Call: call, Result: engine.Result{Status: wire.StatusOK, Body: []byte(body)}},
+	}}}
+}
+
+// fakeWeb serves the HTTP requests of multiplexed instances as the test answers them.
+type fakeWeb struct {
+	requests chan *webRequest
+}
+
+type webRequest struct {
+	done   <-chan struct{} // the request's context's Done
+	answer chan string
+	body   []byte
+	n      int
+}
+
+func newFakeWeb() *fakeWeb {
+	return &fakeWeb{requests: make(chan *webRequest, 16)}
+}
+
+// serve answers a request with what the test sends, or "ended" once its context ends.
+func (w *fakeWeb) serve(ctx context.Context, dst, req []byte, n int) []byte {
+	r := &webRequest{done: ctx.Done(), answer: make(chan string, 1), body: slices.Clone(req), n: n}
+	w.requests <- r
+
+	select {
+	case answer := <-r.answer:
+		return append(dst, answer...)
+	case <-ctx.Done():
+		return append(dst, "ended"...)
+	}
+}
+
+// muxPool returns a warm pool of at most one guest instance serving lanes calls at once, closed with the test.
+func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFunc, panics *panicReporter) *pool {
+	t.Helper()
+
+	cfg := &poolConfig{
+		spawn: func(context.Context) (instance, error) { return guest, nil }, http: web, panics: panics,
+		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1,
+		lanes: lanes,
+	}
+	if cfg.panics == nil {
+		cfg.panics = reporting(slog.DiscardHandler)
+	}
+
+	cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, reflect.TypeFor[testIface]())
+
+	instances := newPool(cfg)
+	require.NoError(t, instances.warm(t.Context()))
+	t.Cleanup(func() { assert.NoError(t, instances.close(context.Background())) })
+
+	return instances
+}
+
+// laneResult is what a call on a lane returned.
+type laneResult struct {
+	err error
+	res engine.Result
+}
+
+// callLane calls held's instance in the background.
+func callLane(ctx context.Context, held *slot, args string) <-chan laneResult {
+	done := make(chan laneResult, 1)
+
+	go func() {
+		res, err := held.inst.Call(ctx, 0, []byte(args))
+		done <- laneResult{res: res, err: err}
+	}()
+
+	return done
+}
+
+func TestMuxInterleavesCallsOnOneInstance(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	instances := muxPool(t, guest, 3, web.serve, nil)
+	assert.Equal(t, PoolStats{Size: 1, Idle: 3}, instances.stats(), "one instance, three lanes")
+	assert.Equal(t, int64(scriptedMemory), instances.memory.Load(), "an instance's memory is counted once")
+
+	held := acquireN(t, instances, 3)
+	assert.Equal(t, []uint64{1, 1, 1}, []uint64{held[0].id, held[1].id, held[2].id})
+
+	results := make([]<-chan laneResult, len(held))
+	for i, lane := range held {
+		results[i] = callLane(t.Context(), lane, string(rune('a'+i)))
+	}
+
+	// The guest starts every call, each waiting for a request of its own, numbered after the call.
+	args := map[uint32]string{}
+
+	for range held {
+		s := guest.next()
+		args[s.call] = string(s.args)
+		s.wait(10 * s.call)
+	}
+
+	// The requests are answered in the reverse order of their arrival; each answer resumes its own call, which
+	// the guest finishes with its own arguments and answer.
+	requests := []*webRequest{<-web.requests, <-web.requests, <-web.requests}
+	for _, request := range slices.Backward(requests) {
+		assert.Equal(t, 1, request.n, "the first request of its call")
+
+		request.answer <- "answer-" + string(request.body)
+	}
+
+	for range held {
+		s := guest.next()
+		call := s.request / 10
+		s.finish(call, args[call]+"+"+string(s.args))
+	}
+
+	for i, result := range results {
+		got := <-result
+		require.NoError(t, got.err)
+		assert.Equal(t, fmt.Sprintf("%c+answer-%c", 'a'+i, 'a'+i), string(got.res.Body))
+		instances.release(t.Context(), held[i])
+	}
+
+	assert.Equal(t, int64(scriptedMemory), instances.memory.Load())
+}
+
+var errLate = errors.New("too late")
+
+func TestMuxAbandonsACallAtItsDeadline(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	instances := muxPool(t, guest, 2, web.serve, nil)
+	held := acquireN(t, instances, 2)
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	late := callLane(ctx, held[0], "late")
+
+	step := guest.next()
+	abandoned := step.call
+	step.wait(1)
+
+	request := <-web.requests
+
+	cancel(errLate)
+
+	got := <-late
+	require.ErrorIs(t, got.err, errLate)
+
+	lost, ok := errors.AsType[*muxError](got.err)
+	require.True(t, ok)
+	assert.False(t, lost.discard, "the instance serves on")
+	<-request.done // its request ends with it
+
+	// The failed request still reaches the guest, which runs the rest of the call on borrowed time.
+	step = guest.next()
+	assert.Equal(t, uint32(1), step.request)
+	assert.Equal(t, "ended", string(step.args))
+	assert.WithinDuration(t, time.Now().Add(muxGrace), step.deadline, muxGrace)
+	step.finish(abandoned, "nobody reads this")
+
+	// Both lanes serve on, each call with its own result.
+	for _, lane := range held {
+		next := callLane(t.Context(), lane, "next")
+
+		step = guest.next()
+		step.finish(step.call, "for "+string(step.args)+" "+strconv.FormatUint(uint64(step.call), 10))
+
+		got = <-next
+		require.NoError(t, got.err)
+		assert.NotContains(t, string(got.res.Body), "nobody", "an abandoned call's result reaches nobody")
+		assert.False(t, lane.inst.Broken())
+		instances.release(t.Context(), lane)
+	}
+}
+
+func TestMuxFailingStepFailsEveryCallOnTheInstance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		reply   func(s *guestStep) stepReply
+		check   func(t *testing.T, got laneResult)
+		name    string
+		reports int // PanicErrors the mux itself reports
+	}{
+		{
+			name:  "trap",
+			reply: func(*guestStep) stepReply { return stepReply{err: errFake} },
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, errFake)
+			},
+		},
+		{
+			name: "failed step",
+			reply: func(*guestStep) stepReply {
+				return stepReply{step: engine.Step{Failure: engine.Result{Status: wire.StatusPanic, Message: "oom"}}}
+			},
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.NoError(t, got.err)
+				assert.Equal(t, engine.Result{Status: wire.StatusPanic, Message: "oom"}, got.res)
+			},
+		},
+		{
+			name: "panicking call",
+			reply: func(s *guestStep) stepReply {
+				return stepReply{step: engine.Step{Done: []engine.Completion{
+					{Call: s.call, Result: engine.Result{Status: wire.StatusABI, Message: "bad"}},
+				}}}
+			},
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.NoError(t, got.err)
+				assert.Equal(t, wire.StatusABI, got.res.Status)
+			},
+		},
+		{
+			name: "request of a call not in flight",
+			reply: func(*guestStep) stepReply {
+				return stepReply{step: engine.Step{Requests: []engine.Request{{Call: 999, ID: 5}}}}
+			},
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, engine.ErrABI)
+				require.ErrorContains(t, got.err, "a request of call 999")
+			},
+		},
+		{
+			name: "finished call not in flight",
+			reply: func(*guestStep) stepReply {
+				return stepReply{step: engine.Step{Done: []engine.Completion{{Call: 999}}}}
+			},
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, engine.ErrABI)
+				require.ErrorContains(t, got.err, "finished call 999")
+			},
+		},
+		{
+			name:    "host panic",
+			reports: 1,
+			reply:   func(*guestStep) stepReply { return stepReply{panic: true} },
+			check: func(t *testing.T, got laneResult) {
+				t.Helper()
+				require.ErrorIs(t, got.err, ErrInstanceLost, "no call is to blame for the host's own panic")
+				require.ErrorContains(t, got.err, errMuxPanic.Error())
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			guest, web, rec := newScriptedGuest(), newFakeWeb(), newRecorder()
+			guest.output = "trace"
+			instances := muxPool(t, guest, 3, web.serve, reporting(rec))
+			held := acquireN(t, instances, 3)
+
+			waiting := make([]<-chan laneResult, 0, 2)
+
+			for _, lane := range held[:2] {
+				waiting = append(waiting, callLane(t.Context(), lane, "wait"))
+
+				s := guest.next()
+				s.wait(s.call)
+			}
+
+			culprit := callLane(t.Context(), held[2], "fail")
+
+			s := guest.next()
+			s.reply <- tc.reply(s)
+
+			got := <-culprit
+			tc.check(t, got)
+
+			if tc.reports == 0 {
+				assert.Equal(t, "trace", held[2].inst.Guest(), "the failing call gets the guest's output")
+			}
+
+			for _, result := range waiting {
+				got := <-result
+				require.ErrorIs(t, got.err, ErrInstanceLost)
+				require.ErrorContains(t, got.err, "another call on its instance failed")
+
+				lost, ok := errors.AsType[*muxError](got.err)
+				require.True(t, ok)
+				assert.True(t, lost.discard)
+				<-(<-web.requests).done // their requests end
+			}
+
+			assert.Len(t, instances.panics.history.recent(), tc.reports)
+
+			for _, lane := range held {
+				assert.True(t, lane.inst.Broken())
+				instances.discard(t.Context(), lane)
+			}
+
+			assert.Equal(t, int32(1), guest.closed.Load(), "the last lane closes the instance")
+		})
+	}
+}
+
+func TestMuxReportsAFailureNobodyWaitsFor(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	guest.output = "trace"
+	instances := muxPool(t, guest, 2, web.serve, reporting(slog.DiscardHandler))
+	held := acquireN(t, instances, 1)
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	late := callLane(ctx, held[0], "late")
+
+	guest.next().wait(1)
+
+	request := <-web.requests
+
+	cancel(errLate)
+	require.ErrorIs(t, (<-late).err, errLate)
+	<-request.done
+
+	guest.next().reply <- stepReply{err: errFake} // the rest of the abandoned call traps
+
+	// The owner runs one operation at a time: by the time it answers this call, it has handled the trap.
+	require.ErrorIs(t, (<-callLane(t.Context(), held[0], "after")).err, ErrInstanceLost)
+	instances.release(t.Context(), held[0])
+
+	next, err := instances.acquire(t.Context()) // the broken instance is discarded, its replacement serves
+	require.NoError(t, err)
+	assert.False(t, next.inst.Broken())
+	instances.release(t.Context(), next)
+
+	panics := instances.panics.history.recent()
+	require.Len(t, panics, 1)
+	assert.Equal(t, PhaseCall, panics[0].Phase)
+	assert.Equal(t, errFake, panics[0].Value)
+	assert.Equal(t, "trace", panics[0].Guest)
+}
+
+func TestMuxPoolDiscardBreaksTheInstance(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	instances := muxPool(t, guest, 3, web.serve, nil)
+	held := acquireN(t, instances, 3)
+
+	waiting := callLane(t.Context(), held[0], "wait")
+
+	guest.next().wait(1)
+
+	<-web.requests
+
+	instances.discard(t.Context(), held[1]) // its result did not decode, say
+
+	got := <-waiting
+	require.ErrorIs(t, got.err, ErrInstanceLost)
+	require.ErrorContains(t, got.err, errMuxDiscarded.Error())
+
+	got = <-callLane(t.Context(), held[2], "late")
+	require.ErrorIs(t, got.err, ErrInstanceLost, "a broken instance answers at once")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got = <-callLane(ctx, held[2], "cancelled")
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	for _, lane := range []*slot{held[0], held[2]} {
+		instances.discard(t.Context(), lane)
+	}
+
+	assert.Equal(t, int32(1), guest.closed.Load())
+}
+
+func TestMuxCallWithAnEndedContextIsNotStarted(t *testing.T) {
+	t.Parallel()
+
+	instances := muxPool(t, newScriptedGuest(), 2, nil, nil)
+	held := acquireN(t, instances, 1)
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(errLate)
+
+	got := <-callLane(ctx, held[0], "never")
+	require.ErrorIs(t, got.err, errLate)
+	require.ErrorContains(t, got.err, "waiting for its instance")
+	assert.False(t, held[0].inst.Broken())
+	instances.release(t.Context(), held[0])
+}
+
+func TestMuxCallNumbersSkipCallsInFlight(t *testing.T) {
+	t.Parallel()
+
+	guest, web := newScriptedGuest(), newFakeWeb()
+	instances := muxPool(t, guest, 2, web.serve, nil)
+	held := acquireN(t, instances, 2)
+	lane, ok := held[0].inst.(*muxLane)
+	require.True(t, ok, "the pool made lanes")
+
+	mux := lane.m
+
+	first := callLane(t.Context(), held[0], "first")
+	step := guest.next()
+	require.Equal(t, uint32(1), step.call)
+	step.wait(1)
+
+	request := <-web.requests
+
+	mux.ops <- func() { mux.last = math.MaxUint32 } // the next number wraps around to 0, then 1: both taken
+
+	second := callLane(t.Context(), held[1], "second")
+	step = guest.next()
+	assert.Equal(t, uint32(2), step.call)
+	step.finish(step.call, "second")
+	require.NoError(t, (<-second).err)
+
+	request.answer <- "ok"
+
+	guest.next().finish(1, "first")
+	require.NoError(t, (<-first).err)
+	instances.release(t.Context(), held[0])
+	instances.release(t.Context(), held[1])
+}
+
+func TestMuxWithoutHTTPRefusesRequests(t *testing.T) {
+	t.Parallel()
+
+	guest := newScriptedGuest()
+	instances := muxPool(t, guest, 2, nil, nil)
+	held := acquireN(t, instances, 1)
+
+	result := callLane(t.Context(), held[0], "fetch")
+
+	guest.next().wait(1)
+
+	s := guest.next()
+	assert.Equal(t, httpabi.AppendFailure(nil, engine.ErrHTTPDisabled.Error()), s.args)
+	s.finish(1, "refused")
+	require.NoError(t, (<-result).err)
+	instances.release(t.Context(), held[0])
+}
+
+// TestPoolClosesAnInstanceAcquiredAfterItsCloseGaveUp: an instance a caller took from the idle ones as close
+// started goes back for close to collect; once close gave up, it is closed there and then.
+func TestPoolClosesAnInstanceAcquiredAfterItsCloseGaveUp(t *testing.T) {
+	t.Parallel()
+
+	spawner := &fakeSpawner{}
+	instances := warmPool(t, spawner, &poolConfig{minSize: 1, maxSize: 1})
+	held := acquireN(t, instances, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, instances.close(ctx), context.Canceled)
+
+	instances.idle <- held[0] // as if a caller had taken it before close started
+
+	_, err := instances.acquire(t.Context())
+	require.ErrorIs(t, err, ErrClosed)
+	assert.Equal(t, int32(1), spawner.closed.Load())
+	assert.Equal(t, PoolStats{}, instances.stats())
 }

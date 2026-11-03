@@ -21,6 +21,7 @@
 IMPORT("host_call") uint32_t plg_host_call(uint32_t method, uint32_t ptr, uint32_t len);
 IMPORT("http_roundtrip") uint32_t plg_http_roundtrip(uint32_t ptr, uint32_t len);
 IMPORT("take_result") void plg_take_result(uint32_t ptr, uint32_t len);
+IMPORT("http_start") uint32_t plg_http_start(uint32_t call, uint32_t ptr, uint32_t len);
 
 /* The request being sent and the answer being read; neither runs Lua code while in use, so one each is enough. */
 static plg_buf request, answer;
@@ -177,9 +178,24 @@ static int push_response(lua_State *L, plg_reader *r) {
   return 1;
 }
 
+/* answered returns http.request's values for an answer: the response table, or nil and the host's reason. */
+static int answered(lua_State *L, plg_reader *r) {
+  uint8_t status = *r->p++;
+  if (status == PLG_OK) return push_response(L, r);
+  const char *msg;
+  size_t len;
+  if (!plg_read_str(r, &msg, &len)) return luaL_error(L, "http.request: malformed answer");
+  luaL_pushfail(L);
+  lua_pushlstring(L, msg, len);
+  return 2;
+}
+
+static int roundtrip_answered(lua_State *L, int status, lua_KContext k);
+
 /*
 ** roundtrip(method, url, headers, body) makes one request through the host: the prelude below has checked the
-** arguments' types (headers is a table or nil, body a string or nil).
+** arguments' types (headers is a table or nil, body a string or nil). In a multiplexed step it yields until the
+** answer arrives, letting the instance serve other calls meanwhile; elsewhere it blocks.
 */
 static int roundtrip(lua_State *L) {
   size_t mlen, ulen, blen = 0;
@@ -201,15 +217,22 @@ static int roundtrip(lua_State *L) {
   plg_buf_put(&request, body, blen);
   check_request(L);
 
+  if (L == plg_call_thread && lua_isyieldable(L)) {
+    plg_wait_request = plg_http_start(plg_call_id, addr(request.data), (uint32_t)request.len);
+    lua_pushlightuserdata(L, &plg_yield_key);
+    return lua_yieldk(L, 1, 0, roundtrip_answered);
+  }
   plg_reader r = take(L, plg_http_roundtrip(addr(request.data), (uint32_t)request.len));
-  uint8_t status = *r.p++;
-  if (status == PLG_OK) return push_response(L, &r);
-  const char *msg;
-  size_t len;
-  if (!plg_read_str(&r, &msg, &len)) return luaL_error(L, "http.request: malformed answer");
-  luaL_pushfail(L);
-  lua_pushlstring(L, msg, len);
-  return 2;
+  return answered(L, &r);
+}
+
+/* roundtrip_answered continues a roundtrip that yielded for its answer, which the resuming step put in plg_answer. */
+static int roundtrip_answered(lua_State *L, int status, lua_KContext k) {
+  (void)status;
+  (void)k;
+  plg_reader r = plg_answer;
+  if (r.p == r.end) return luaL_error(L, "http.request: malformed answer");
+  return answered(L, &r);
 }
 
 /*

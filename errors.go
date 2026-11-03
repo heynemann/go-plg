@@ -65,6 +65,12 @@ var (
 	// stopped by its context or broke the guest ABI, or the host panicked serving it. The error is a
 	// [*PanicError] in [PhaseCall]; the instance that served it is discarded.
 	ErrCall = errors.New("plg: plugin call failed")
+	// ErrInstanceLost reports a call that failed because another call on the same instance broke it: with
+	// [WithConcurrentCalls], an instance serves several calls at once, and one that traps, runs out of memory,
+	// panics or is stopped at its deadline discards the instance with every call on it. That call fails with a
+	// [*PanicError]; the others with ErrInstanceLost, naming the failure. The instance is replaced, so retrying
+	// is safe.
+	ErrInstanceLost = errors.New("plg: call lost with its instance")
 	// ErrConversion reports an argument or result that cannot cross the plugin boundary, such as an integer
 	// beyond ±2^53 (which Lua and JavaScript numbers cannot represent exactly) or a pointer cycle. The message
 	// names the parameter or result and the field inside it. The instance stays usable.

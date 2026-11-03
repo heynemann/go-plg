@@ -409,6 +409,23 @@ static int encode_results(lua_State *L, const plg_method *m, int base, int n) {
   return 0;
 }
 
+/*
+** call_finish ends a method call whose results start at index 2 (the instance is at 1): Lua's `nil, err`
+** failure convention raises err, anything else is encoded. It is also the continuation of a call that yielded
+** for an HTTP request (k is the method's index).
+*/
+static int call_finish(lua_State *L, int status, lua_KContext k) {
+  (void)status;
+  const plg_method *m = &plg_the_schema.methods[k];
+  int n = lua_gettop(L) - 1;
+  if (is_failure(L, 2, n)) {
+    lua_pushvalue(L, 3);
+    return lua_error(L);
+  }
+  return encode_results(L, m, 2, n);
+}
+
+/* call_protected calls inst:<method calling>(args...); in a multiplexed step it is the body of the call's coroutine. */
 static int call_protected(lua_State *L) {
   const plg_method *m = &plg_the_schema.methods[calling];
   fail_status = PLG_ABI;
@@ -422,13 +439,8 @@ static int call_protected(lua_State *L) {
   }
   if (args.p != args.end) return luaL_error(L, "trailing bytes after the arguments");
   fail_status = PLG_ERROR;
-  lua_call(L, (int)m->nparams + 1, LUA_MULTRET);
-  int n = lua_gettop(L) - 1;
-  if (is_failure(L, 2, n)) {
-    lua_pushvalue(L, 3);
-    return lua_error(L);
-  }
-  return encode_results(L, m, 2, n);
+  lua_callk(L, (int)m->nparams + 1, LUA_MULTRET, (lua_KContext)calling, call_finish);
+  return call_finish(L, LUA_OK, (lua_KContext)calling);
 }
 
 EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
@@ -444,6 +456,139 @@ EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
   lua_settop(L, 0);
   collect_if_starved();
   return res;
+}
+
+/* ---- multiplexed steps: plg_start and plg_resume ---- */
+
+/*
+** In a multiplexed step every call runs in a coroutine of its own. http.request (capi.c) hands its request to
+** the host with http_start and yields; plg_resume resumes the coroutine with the answer. A step runs one
+** coroutine, so it finishes at most one call. Where the call's coroutine cannot yield (Create and Close run
+** outside steps, a coroutine of the plugin's own, a C function such as table.sort's comparator in between),
+** http.request blocks the instance as in plg_call.
+*/
+typedef struct waiting {
+  lua_State *thread;
+  int ref;          /* anchors thread in the registry */
+  uint32_t call;    /* the host's number for the call */
+  uint32_t request; /* the request the call waits for */
+} waiting;
+
+static waiting *waits; /* the calls in flight */
+static size_t nwaits, capwaits;
+static plg_buf steps;     /* the result buffer of steps */
+static uint32_t finished; /* calls the step in progress finished */
+static lua_State *new_thread;
+static int new_ref;
+
+lua_State *plg_call_thread;
+uint32_t plg_call_id;
+uint32_t plg_wait_request;
+plg_reader plg_answer;
+char plg_yield_key;
+
+static void begin_step(void) {
+  steps.len = 0;
+  steps.oom = 0;
+  plg_buf_put(&steps, &(uint8_t){PLG_OK}, 1);
+  plg_buf_u32(&steps, 0);
+  finished = 0;
+}
+
+static uint64_t end_step(void) {
+  lua_settop(L, 0);
+  collect_if_starved();
+  if (steps.oom) return packed(oom_result, sizeof oom_result);
+  plg_buf_patch_u32(&steps, 1, finished);
+  return packed(steps.data, steps.len);
+}
+
+/* complete lists call as finished with the result buffer res (packed ptr<<32 | len). */
+static void complete(uint32_t call, uint64_t res) {
+  plg_buf_u32(&steps, call);
+  plg_buf_u32(&steps, (uint32_t)res);
+  plg_buf_put(&steps, (const uint8_t *)(uintptr_t)(res >> 32), (uint32_t)res);
+  finished++;
+}
+
+/* new_call_protected creates a coroutine running call_protected and anchors it in the registry. */
+static int new_call_protected(lua_State *L) {
+  new_thread = lua_newthread(L);
+  new_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  lua_pushcfunction(new_thread, call_protected);
+  return 0;
+}
+
+/* run resumes the coroutine of waits[i] until it waits for a request or ends; an ended call is listed. */
+static void run(size_t i) {
+  lua_State *thread = waits[i].thread;
+  uint32_t call = waits[i].call;
+  plg_call_thread = thread;
+  plg_call_id = call;
+  plg_wait_request = 0;
+  fail_status = PLG_ERROR;
+  int nres = 0;
+  int code = lua_resume(thread, L, 0, &nres);
+  plg_call_thread = NULL;
+  if (code == LUA_YIELD && nres == 1 && lua_touserdata(thread, -1) == &plg_yield_key && plg_wait_request != 0) {
+    lua_pop(thread, 1);
+    waits[i].request = plg_wait_request;
+    return;
+  }
+  lua_settop(L, 0);
+  if (code == LUA_YIELD) {
+    complete(call, cmessage(PLG_ERROR, "attempt to yield from outside a coroutine"));
+  } else if (code == LUA_OK) {
+    complete(call, finish());
+  } else {
+    lua_xmove(thread, L, 1);
+    complete(call, failed(code));
+  }
+  luaL_unref(L, LUA_REGISTRYINDEX, waits[i].ref);
+  waits[i] = waits[--nwaits];
+}
+
+/* plg_start starts call number call of the interface method with the given index (arguments as for plg_call). */
+EXPORT("plg_start") uint64_t plg_start(uint32_t call, uint32_t method, uint32_t len) {
+  if (!initialized) return cmessage(PLG_ABI, "plg_start before a successful plg_init");
+  if (method >= plg_iface_methods) return cmessage(PLG_ABI, "unknown method");
+  if (len > incap) return cmessage(PLG_ABI, "arguments beyond the input buffer");
+  for (size_t i = 0; i < nwaits; i++)
+    if (waits[i].call == call) return cmessage(PLG_ABI, "call number already in flight");
+  if (nwaits == capwaits) {
+    size_t cap = capwaits ? 2 * capwaits : 16;
+    waiting *grown = realloc(waits, cap * sizeof *grown);
+    if (grown == NULL) return cmessage(PLG_PANIC, "not enough memory");
+    waits = grown;
+    capwaits = cap;
+  }
+  begin_step();
+  args = (plg_reader){inbuf, inbuf + len};
+  calling = method;
+  lua_settop(L, 0);
+  lua_pushcfunction(L, new_call_protected);
+  int code = lua_pcall(L, 0, 0, 0);
+  if (code != LUA_OK) {
+    complete(call, failed(code));
+    return end_step();
+  }
+  waits[nwaits++] = (waiting){.thread = new_thread, .ref = new_ref, .call = call};
+  run(nwaits - 1);
+  return end_step();
+}
+
+/* plg_resume delivers the answer to request number request (an http_roundtrip answer) to the call waiting for it. */
+EXPORT("plg_resume") uint64_t plg_resume(uint32_t request, uint32_t len) {
+  if (!initialized) return cmessage(PLG_ABI, "plg_resume before a successful plg_init");
+  if (len > incap) return cmessage(PLG_ABI, "answer beyond the input buffer");
+  size_t i = 0;
+  while (i < nwaits && waits[i].request != request) i++;
+  if (request == 0 || i == nwaits) return cmessage(PLG_ABI, "no call waits for this request");
+  begin_step();
+  plg_answer = (plg_reader){inbuf, inbuf + len};
+  waits[i].request = 0;
+  run(i);
+  return end_step();
 }
 
 static int close_protected(lua_State *L) {

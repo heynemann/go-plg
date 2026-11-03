@@ -27,7 +27,7 @@ func signatureOf(export string) [2][]byte {
 		return [2][]byte{{i32}, {i32}}
 	case "plg_init":
 		return [2][]byte{{i32}, {i64}}
-	case "plg_call":
+	case "plg_call", "plg_resume":
 		return [2][]byte{{i32, i32}, {i64}}
 	case "plg_close":
 		return [2][]byte{nil, {i64}}
@@ -35,8 +35,10 @@ func signatureOf(export string) [2][]byte {
 		return [2][]byte{{i32, i32}, {i32}}
 	case "take_result":
 		return [2][]byte{{i32, i32}, nil}
-	case "host_call":
+	case "host_call", "http_start":
 		return [2][]byte{{i32, i32, i32}, {i32}}
+	case "plg_start":
+		return [2][]byte{{i32, i32, i32}, {i64}}
 	default: // _initialize
 		return [2][]byte{}
 	}

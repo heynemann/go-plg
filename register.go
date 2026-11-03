@@ -491,7 +491,8 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	}
 
 	meters := newPluginMeters(c.meters, key, src.desc.Language, reg.contr.iface)
-	instances := c.pluginPool(reg, key, src, meters, c.newLauncher(reg, key, src, spec, mod, meters).start)
+	launch := c.newLauncher(reg, key, src, spec, mod, meters)
+	instances := c.pluginPool(reg, key, src, meters, launch.start, launch.opts.HTTP)
 
 	err = instances.warm(ctx)
 	if err != nil {
@@ -535,12 +536,20 @@ func (c *Container) newLauncher(reg *registration, key string, src *source, spec
 }
 
 // pluginPool returns the (not yet warm) pool of a plugin's instances, started by spawn and measured in meters.
+// Instances of a language whose guest multiplexes serve up to the Register's [WithConcurrentCalls] calls at
+// once, making their HTTP requests through httpFn.
 func (c *Container) pluginPool(reg *registration, key string, src *source, meters *pluginMeters,
-	spawn func(context.Context) (instance, error),
+	spawn func(context.Context) (instance, error), httpFn engine.HTTPFunc,
 ) *pool {
+	lanes := 1
+	if src.loader.multiplexes() {
+		lanes = reg.cfg.concurrent
+	}
+
 	return newPool(&poolConfig{
 		panics:  c.panics,
 		spawn:   spawn,
+		http:    httpFn,
 		budget:  &c.budget,
 		meters:  meters,
 		key:     key,
@@ -548,6 +557,7 @@ func (c *Container) pluginPool(reg *registration, key string, src *source, meter
 		limit:   src.limit,
 		minSize: int32(reg.cfg.poolMin), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
 		maxSize: int32(reg.cfg.poolMax), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
+		lanes:   int32(lanes),
 	})
 }
 
