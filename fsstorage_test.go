@@ -438,7 +438,21 @@ func TestFSStorageOpen(t *testing.T) {
 		t.Parallel()
 
 		_, err := store.Open(t.Context(), plg.Descriptor{Key: "README.md"})
-		require.ErrorContains(t, err, "plugin directory README.md")
+		require.ErrorContains(t, err, "plugin directory README.md: a plugin key is a directory name")
+	})
+
+	t.Run("over an fs.FS", func(t *testing.T) {
+		t.Parallel()
+
+		tree := plg.NewFSStorageFromFS("tree", fstest.MapFS{"f": {}, "l": link("p"), "p/a.go": {}})
+
+		_, err := tree.Open(t.Context(), plg.Descriptor{Key: "missing"})
+		require.ErrorIs(t, err, fs.ErrNotExist)
+
+		for _, key := range []string{"f", "l"} {
+			_, err = tree.Open(t.Context(), plg.Descriptor{Key: key})
+			require.ErrorContains(t, err, "plugin directory "+key+": a plugin key is a directory name")
+		}
 	})
 }
 

@@ -3,6 +3,7 @@ package plg
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"time"
 
@@ -114,6 +115,12 @@ func LoadedVersion(ctx context.Context, store Storage, desc Descriptor) (string,
 	}
 
 	return contentVersion(frozen, ".")
+}
+
+// OpenSwapping opens the plugin directory desc names as s.Open does, calling beforeOpen with the
+// plugin-relative name of each directory and file right before the copy opens it, once the walk listed them.
+func OpenSwapping(ctx context.Context, s *FSStorage, desc Descriptor, beforeOpen func(name string)) (fs.FS, error) {
+	return s.copyPlugin(ctx, desc, beforeOpen)
 }
 
 // Retired returns how many replaced or removed plugin versions are not closed yet.

@@ -69,6 +69,12 @@ const contentVersionPrefix = "sha256:"
 // before they are read, and the copy stops when Open's context ends. The plugin then runs from that copy, so a
 // file changed during the load cannot be half seen.
 //
+// Over a directory ([NewFSStorage]) these rules hold even while others write to it: the plugin directory, then
+// each directory and file below it, is opened relative to its open parent and must then be the very entry that
+// parent holds under its name, so an entry swapped for a link during the copy is judged as a link (left out, or
+// failing the load, never followed), and one replaced otherwise fails the load. Over an fs.FS
+// ([NewFSStorageFromFS]) the copy can only trust what the fs.FS reports, as [Storage] describes.
+//
 // An FSStorage is safe for concurrent use when its file tree is.
 type FSStorage struct {
 	fsys fs.FS  // the file tree, nil for dir
@@ -79,14 +85,17 @@ type FSStorage struct {
 var _ Storage = (*FSStorage)(nil)
 
 // NewFSStorage returns a storage over the plugin directories in dir, named dir. List and Open read dir through
-// an [os.Root], so neither a path nor a symbolic link can lead them out of dir, even when a file is replaced by
-// a link while they read. Each opens dir anew: a directory moved into dir's place is seen by the next call.
+// an [os.Root], so neither a path nor a symbolic link can lead them out of dir, and Open's copy of a plugin
+// directory follows no link, even one swapped in while it copies (see [FSStorage]). Each opens dir anew: a
+// directory moved into dir's place is seen by the next call.
 func NewFSStorage(dir string) *FSStorage {
 	return &FSStorage{dir: dir, name: dir}
 }
 
 // NewFSStorageFromFS returns a storage named name over the plugin directories at the root of fsys, such as an
-// embed.FS (use [fs.Sub] to pick one of its directories).
+// embed.FS (use [fs.Sub] to pick one of its directories). Open copies a plugin directory through fsys's own
+// interface, so a link swapped into fsys during the copy is followed if fsys follows it (see [Storage]): use
+// [NewFSStorage], not an [os.DirFS], for a directory others can write to.
 func NewFSStorageFromFS(name string, fsys fs.FS) *FSStorage {
 	return &FSStorage{fsys: fsys, name: name}
 }
@@ -101,7 +110,7 @@ func (s *FSStorage) Name() string {
 func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 	var descs []Descriptor
 
-	err := s.withTree(func(fsys fs.FS) error {
+	err := s.withTree(func(fsys fs.FS, _ *os.Root) error {
 		entries, err := fs.ReadDir(fsys, ".")
 		if err != nil {
 			return fmt.Errorf("plg: reading the plugin directories: %w", err)
@@ -140,6 +149,11 @@ var errPluginKey = errors.New("a plugin key is a directory name")
 
 // Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
 func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
+	return s.copyPlugin(ctx, desc, nil)
+}
+
+// copyPlugin is Open; beforeOpen, when not nil, is called as snapshotDir describes.
+func (s *FSStorage) copyPlugin(ctx context.Context, desc Descriptor, beforeOpen func(name string)) (fs.FS, error) {
 	key := desc.Key
 	if key == "." || strings.Contains(key, "/") || !fs.ValidPath(key) {
 		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, errPluginKey)
@@ -147,20 +161,13 @@ func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
 
 	var files *memfs.FS
 
-	err := s.withTree(func(fsys fs.FS) error {
-		// Lstat: a link to a directory is not a plugin, as List does not list it.
-		info, err := fs.Lstat(fsys, key)
-		if err == nil && !info.IsDir() {
-			err = errPluginKey
-		}
+	err := s.withTree(func(fsys fs.FS, root *os.Root) error {
+		var err error
 
-		if err == nil {
-			var dir fs.FS
-
-			dir, err = fs.Sub(fsys, key)
-			if err == nil {
-				files, err = snapshotFiles(ctx, dir)
-			}
+		if root != nil {
+			files, err = snapshotDir(ctx, root, key, beforeOpen)
+		} else {
+			files, err = snapshotSub(ctx, fsys, key)
 		}
 
 		if err != nil {
@@ -176,11 +183,32 @@ func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
 	return files, nil
 }
 
-// withTree calls use with the storage's file tree: its fs.FS, or its directory opened as an [os.Root], closed
-// once use returns.
-func (s *FSStorage) withTree(use func(fsys fs.FS) error) error {
+// snapshotSub copies the plugin directory key of fsys, through fsys's own interface (see [Storage]).
+func snapshotSub(ctx context.Context, fsys fs.FS, key string) (*memfs.FS, error) {
+	// Lstat: a link to a directory is not a plugin, as List does not list it.
+	info, err := fs.Lstat(fsys, key)
+	if err == nil && !info.IsDir() {
+		err = errPluginKey
+	}
+
+	var dir fs.FS
+
+	if err == nil {
+		dir, err = fs.Sub(fsys, key)
+	}
+
+	if err != nil {
+		return nil, err //nolint:wrapcheck // copyPlugin wraps it, naming the plugin directory
+	}
+
+	return snapshotFiles(ctx, dir)
+}
+
+// withTree calls use with the storage's file tree: its fs.FS, with a nil root, or its directory opened as an
+// [os.Root] and that root's fs.FS, closed once use returns.
+func (s *FSStorage) withTree(use func(fsys fs.FS, root *os.Root) error) error {
 	if s.fsys != nil {
-		return use(s.fsys)
+		return use(s.fsys, nil)
 	}
 
 	root, err := os.OpenRoot(s.dir)
@@ -188,7 +216,7 @@ func (s *FSStorage) withTree(use func(fsys fs.FS) error) error {
 		return fmt.Errorf("plg: opening the plugin directories: %w", err)
 	}
 
-	err = use(root.FS())
+	err = use(root.FS(), root)
 
 	closeErr := root.Close()
 	if closeErr != nil {

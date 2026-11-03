@@ -420,7 +420,12 @@ Built in:
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
   drops a limit. A `plugin.json` must be a regular file of at most `plg.MaxManifestSize` (64 KiB) bytes, else
   it is `plg.ErrInvalidManifest` too (a FIFO or a link to a device is never read). Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an
-  `os.Root`, so no path or link leads it out of `dir`, not even a file swapped for a link mid-read.
+  `os.Root`, so no path or link leads it out of `dir`, and it copies a plugin directory entry by entry, each opened
+  relative to its parent and checked to be that very entry: a file or directory swapped for a link mid-copy is
+  never followed, out of the plugin or inside it. `NewFSStorageFromFS`, `MemoryStorage.Put` and your own storages
+  are copied through the `fs.FS` interface, which opens a file by name: a tree that follows links (an `os.DirFS`,
+  anywhere on the host) can be led out of the plugin by a link swapped in mid-copy, so serve directories others
+  can write to with `NewFSStorage`.
 - `plg.NewMemoryStorage(name)` with `Put(desc, files)` and `Delete(key)`: plugins a program builds itself, and
   tests.
 

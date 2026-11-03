@@ -52,6 +52,14 @@ const LanguageTypeScript Language = "typescript"
 // links (as fs.ReadDir reports them) are never followed: one that stays inside the plugin's files
 // is skipped, as if it were not there, and one whose target is absolute, leads out of the plugin's files or
 // cannot be read (the fs.FS is no fs.ReadLinkFS) fails the load, naming it. Other irregular files are skipped.
+//
+// Register copies an fs.FS through its own interface only: it walks the tree, judging links by the walk's
+// directory entries, then opens each regular file the walk listed by its name. It cannot tell a file the tree
+// replaced by a link in between, so the rules above hold for a tree nobody changes during the copy (an embed.FS,
+// an fstest.MapFS, the copies [FSStorage] and [MemoryStorage] return); an fs.FS that follows links when it opens
+// a file can be led out of the plugin's files by someone writing to the tree while it is copied ([os.DirFS]
+// follows them anywhere on the host). A storage over a directory others can write to should return the copy an
+// [FSStorage] from [NewFSStorage] opens: that one follows no link, whatever changes while it copies.
 type Storage interface {
 	// Name identifies the storage in errors and logs.
 	Name() string
@@ -168,11 +176,25 @@ func snapshotFiles(ctx context.Context, files fs.FS) (*memfs.FS, error) {
 		return frozen, nil
 	}
 
+	return copySnapshot(ctx, files, func(name string) (fs.File, error) {
+		file, err := files.Open(name)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", name, err)
+		}
+
+		return file, nil
+	})
+}
+
+// copySnapshot walks a plugin's files, then reads each regular file the walk listed, opened with open (whose
+// errors name the file), into an immutable copy, failing when ctx ends. A file open fails with errSkipped is left
+// out.
+func copySnapshot(ctx context.Context, files fs.FS, open func(name string) (fs.File, error)) (*memfs.FS, error) {
 	var tree memfs.Builder
 
 	regular, stated, err := listFiles(ctx, files)
 	if err == nil {
-		err = copyFiles(ctx, files, &tree, regular, stated)
+		err = copyFiles(ctx, open, &tree, regular, stated)
 	}
 
 	var copied *memfs.FS
@@ -188,22 +210,29 @@ func snapshotFiles(ctx context.Context, files fs.FS) (*memfs.FS, error) {
 	return copied, nil
 }
 
-// copyFiles reads the regular files of a plugin's files, whose stated sizes add up to stated, into tree.
-func copyFiles(ctx context.Context, files fs.FS, tree *memfs.Builder, regular []sizedFile, stated int) error {
+// copyFiles reads the regular files of a plugin's files, whose stated sizes add up to stated, opened with open,
+// into tree, leaving out those open fails with errSkipped.
+func copyFiles(
+	ctx context.Context, open func(name string) (fs.File, error), tree *memfs.Builder, regular []sizedFile, stated int,
+) error {
 	read := 0
 
 	for _, file := range regular {
 		// What is left for this file: the plugin's limit, less what was read and what the other files state.
 		stated -= file.size
 
-		data, err := readFile(ctx, files, file, min(MaxPluginFileSize, MaxPluginSize-read-stated))
+		data, err := readFile(ctx, open, file, min(MaxPluginFileSize, MaxPluginSize-read-stated))
+		if errors.Is(err, errSkipped) {
+			continue
+		}
+
 		if err == nil {
 			read += len(data)
 			err = tree.Add(file.name, data)
 		}
 
 		if err != nil {
-			return err //nolint:wrapcheck // readFile's errors name the file, as memfs's do; snapshotFiles wraps it
+			return err //nolint:wrapcheck // readFile's errors name the file, as memfs's do; copySnapshot wraps it
 		}
 	}
 
@@ -270,12 +299,12 @@ func pluginTooLarge(name string) error {
 	return fmt.Errorf("%w: %s brings the plugin's files over %d bytes", ErrPluginTooLarge, name, MaxPluginSize)
 }
 
-// readFile reads a regular file of files, of at most limit bytes: what is left for it, since it may have grown
-// after its size was stated. It fails when ctx ends.
-func readFile(ctx context.Context, files fs.FS, file sizedFile, limit int) ([]byte, error) {
-	opened, err := files.Open(file.name)
+// readFile reads a regular file of a plugin's files, opened with open, of at most limit bytes: what is left for
+// it, since it may have grown after its size was stated. It fails when ctx ends.
+func readFile(ctx context.Context, open func(name string) (fs.File, error), file sizedFile, limit int) ([]byte, error) {
+	opened, err := open(file.name)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", file.name, err)
+		return nil, err
 	}
 
 	data, err := readUpTo(ctx, opened, file.size, limit+1)
@@ -327,10 +356,17 @@ func readUpTo(ctx context.Context, src io.Reader, size, most int) ([]byte, error
 	return data, nil
 }
 
-// checkLink accepts the symbolic link name of files when its target stays inside files, judged by the target's
-// path alone: snapshotFiles skips it, so nothing is read through it whatever it resolves to.
+// checkLink accepts the symbolic link name of files when its target stays inside files (see judgeLink).
 func checkLink(files fs.FS, name string) error {
 	target, err := fs.ReadLink(files, name)
+
+	return judgeLink(name, target, err)
+}
+
+// judgeLink accepts the symbolic link name of a plugin's files, whose target is target (or could not be read,
+// failing with err), when that target stays inside the files, judged by its path alone: the copy skips the link,
+// so nothing is read through it whatever it resolves to.
+func judgeLink(name, target string, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w: reading its target: %w", name, errSymlinkOut, err)
 	}
