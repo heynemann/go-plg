@@ -27,4 +27,6 @@ func (fooer) Scalars(
 	return b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, nil
 }
 
+func (fooer) Spin(_ context.Context, n int) (int, error) { return n, nil }
+
 func main() {}

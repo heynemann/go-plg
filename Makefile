@@ -19,9 +19,9 @@ GUEST_STDLIB := bufio bytes context encoding/base64 encoding/hex errors fmt io m
 GUEST_SYMBOLS := guestsrc/golang/symbols
 GO_GUEST := guest/golang/golang.wasm
 
-.PHONY: check fmt-check lint test coverage bench symbols guests verify-guests clean
+.PHONY: check fmt-check lint test coverage allocs bench symbols guests verify-guests clean
 
-check: fmt-check lint test coverage
+check: fmt-check lint test coverage allocs
 
 # Formatting must leave no diff.
 fmt-check:
@@ -38,6 +38,10 @@ test:
 
 coverage:
 	scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
+
+# Allocation budgets (RULES.md §3). Coverage instrumentation changes inlining, so they run uninstrumented.
+allocs:
+	go test -race -shuffle=on -tags integration -count=1 -run 'DoNotAllocate' ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)

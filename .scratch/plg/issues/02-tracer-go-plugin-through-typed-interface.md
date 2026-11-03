@@ -16,13 +16,13 @@
 
 **Blocked by:** 01 (Go guest artifact + compilation cache)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test registers a Go plugin from a memory storage and calls `Foo(ctx, ...)` through the interface, getting the plugin's result
-- [ ] Interfaces missing ctx first or error last, or using funcs/channels/interfaces, fail Register with a precise message
-- [ ] Get returns ErrNotFound for unknown keys and ErrTypeMismatch when the key belongs to another interface
-- [ ] All iterates in key order over a fixed snapshot
-- [ ] Registering the same name twice is an error
-- [ ] A missing guest import produces an error naming the package to import
-- [ ] Concurrent Get/call under `go test -race` passes
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A test registers a Go plugin from a memory storage and calls `Foo(ctx, ...)` through the interface, getting the plugin's result
+- [x] Interfaces missing ctx first or error last, or using funcs/channels/interfaces, fail Register with a precise message
+- [x] Get returns ErrNotFound for unknown keys and ErrTypeMismatch when the key belongs to another interface
+- [x] All iterates in key order over a fixed snapshot
+- [x] Registering the same name twice is an error
+- [x] A missing guest import produces an error naming the package to import
+- [x] Concurrent Get/call under `go test -race` passes
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

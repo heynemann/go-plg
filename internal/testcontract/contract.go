@@ -28,6 +28,8 @@ type Fooer interface {
 	) (
 		bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string, error,
 	)
+	// Spin counts to n and returns the count: a large n keeps the instance busy until its context ends.
+	Spin(ctx context.Context, n int) (int, error)
 }
 
 // Greeting is contract code the plugins call: it runs interpreted inside the guest.

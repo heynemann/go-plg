@@ -28,7 +28,8 @@ jobs:
         with:
           path: ~/.cache/plg
           key: plg-cache-${{ hashFiles('guest/**/*.wasm', 'go.sum') }}
-      # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate, goleak.
+      # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate, goleak,
+      # allocation budgets (uninstrumented).
       - run: make check
       - name: unit tests, repeated to flush out flakiness
         run: go test -race -shuffle=on -count=10 ./...

@@ -51,3 +51,12 @@ func (*fooer) Scalars(
 	return !b, i + 1, i8 + 1, i16 + 1, i32 + 1, i64 + 1, u + 1, u8 + 1, u16 + 1, u32 + 1, u64 + 1,
 		f32 * 2, f64 * 2, strings.ToUpper(s), nil
 }
+
+func (*fooer) Spin(_ context.Context, n int) (int, error) {
+	count := 0
+	for count < n {
+		count++
+	}
+
+	return count, nil
+}

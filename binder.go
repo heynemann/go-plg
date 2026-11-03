@@ -1,0 +1,186 @@
+package plg
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+
+	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/wire"
+)
+
+// method is the call plan of one interface method, built once per contract: the codecs of its arguments
+// (after the context) and of its results (before the error).
+type method struct {
+	typ     reflect.Type
+	name    string
+	args    []*wire.Codec
+	results []*wire.Codec
+	zeros   []reflect.Value // the results returned with an error: zero values, then a nil error
+	field   int             // index of the adapter's W<name> field
+	index   uint32          // the method index of plg_call
+}
+
+func newMethod(iface reflect.Type, index, field int) (*method, error) {
+	sig := iface.Method(index)
+	fn := sig.Type
+	plan := &method{
+		typ:     fn,
+		name:    sig.Name,
+		field:   field,
+		index:   uint32(index), //nolint:gosec // G115: a method index is far below 2^32
+		args:    make([]*wire.Codec, 0, fn.NumIn()-1),
+		results: make([]*wire.Codec, 0, fn.NumOut()-1),
+	}
+
+	for k := 1; k < fn.NumIn(); k++ {
+		codec, err := wire.For(fn.In(k))
+		if err != nil {
+			return nil, fmt.Errorf("method %s: parameter %d: %w", sig.Name, k, err)
+		}
+
+		plan.args = append(plan.args, codec)
+	}
+
+	for k := range fn.NumOut() - 1 {
+		codec, err := wire.For(fn.Out(k))
+		if err != nil {
+			return nil, fmt.Errorf("method %s: result %d: %w", sig.Name, k, err)
+		}
+
+		plan.results = append(plan.results, codec)
+	}
+
+	for typ := range fn.Outs() {
+		plan.zeros = append(plan.zeros, reflect.Zero(typ))
+	}
+
+	return plan, nil
+}
+
+// encodeArgs appends the encoding of the arguments after the context.
+func (m *method) encodeArgs(dst []byte, args []reflect.Value) ([]byte, error) {
+	for k, codec := range m.args {
+		next, err := codec.Append(dst, args[k+1])
+		if err != nil {
+			return dst, fmt.Errorf("parameter %d: %w", k+1, err)
+		}
+
+		dst = next
+	}
+
+	return dst, nil
+}
+
+// decodeResults decodes body into the method's results, ending with a nil error.
+func (m *method) decodeResults(body []byte) ([]reflect.Value, error) {
+	out := make([]reflect.Value, len(m.zeros))
+	reader := wire.NewReader(body)
+
+	for k, codec := range m.results {
+		out[k] = reflect.New(codec.Type()).Elem()
+
+		err := codec.Decode(&reader, out[k])
+		if err != nil {
+			return nil, fmt.Errorf("result %d: %w", k, err)
+		}
+	}
+
+	err := reader.End()
+	if err != nil {
+		return nil, fmt.Errorf("results: %w", err)
+	}
+
+	out[len(out)-1] = m.zeros[len(out)-1]
+
+	return out, nil
+}
+
+// failed returns the method's zero results with err.
+func (m *method) failed(err error) []reflect.Value {
+	out := make([]reflect.Value, len(m.zeros))
+	copy(out, m.zeros)
+
+	out[len(out)-1] = reflect.ValueOf(&err).Elem()
+
+	return out
+}
+
+var errNilContext = errors.New("nil context")
+
+// bind returns a new adapter for the plugin: a pointer to the contract's adapter struct whose W<Method> fields
+// call the plugin, so it implements the contract's interface.
+func (ct *contract) bind(plug *plugin) any {
+	adapter := reflect.New(ct.adapter)
+	fields := adapter.Elem()
+
+	for _, meth := range ct.methods {
+		fields.Field(meth.field).Set(reflect.MakeFunc(meth.typ, func(args []reflect.Value) []reflect.Value {
+			out, err := plug.call(meth, args)
+			if err != nil {
+				return meth.failed(err)
+			}
+
+			return out
+		}))
+	}
+
+	return adapter.Interface()
+}
+
+// call runs one method call on an instance of the plugin, waiting for one while all are busy. Its context is
+// the call's first argument.
+func (p *plugin) call(meth *method, args []reflect.Value) ([]reflect.Value, error) {
+	ctx, ok := reflect.TypeAssert[context.Context](args[0])
+	if !ok {
+		return nil, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, errNilContext)
+	}
+
+	held, err := p.pool.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, err)
+	}
+
+	out, discard, err := p.exchange(ctx, held, meth, args)
+	if discard || held.inst.Broken() { // never reuse a broken instance: wazero would answer with garbage
+		p.pool.discard(ctx, held)
+	} else {
+		p.pool.release(held)
+	}
+
+	return out, err
+}
+
+// exchange encodes the arguments, calls the instance and decodes its answer. The boolean reports an instance
+// that must not serve another call.
+func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, args []reflect.Value) (
+	[]reflect.Value, bool, error,
+) {
+	var err error
+
+	held.buf, err = meth.encodeArgs(held.buf[:0], args)
+	if err != nil {
+		return nil, false, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, err)
+	}
+
+	res, err := held.inst.Call(ctx, meth.index, held.buf)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: %s.%s: %w", ErrCall, p.key, meth.name, err)
+	}
+
+	switch res.Status { //nolint:exhaustive // panic, load and ABI statuses all fail the call and break the instance
+	case wire.StatusOK:
+		out, err := meth.decodeResults(res.Body)
+		if err != nil {
+			return nil, true, fmt.Errorf("%w: %s.%s: %w: %w", ErrCall, p.key, meth.name, engine.ErrABI, err)
+		}
+
+		return out, false, nil
+	case wire.StatusError:
+		return nil, false, &PluginError{Key: p.key, Method: meth.name, Message: res.Message}
+	default:
+		return nil, true, fmt.Errorf("%w: %s.%s: guest status %s: %s", ErrCall, p.key, meth.name, res.Status,
+			res.Message)
+	}
+}
