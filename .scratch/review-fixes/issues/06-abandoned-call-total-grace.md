@@ -6,10 +6,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression test (the review's fetch-in-a-loop plugin abandoned at its deadline) reproduces the bug (fails on the current code) and passes with the fix
-- [ ] The abandoned call is gone and the instance discarded within the documented total grace; other calls on the instance fail with `ErrInstanceLost`
-- [ ] Warnings/metrics for the zombie stop after discard
-- [ ] README limitations updated with the total grace rule
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A regression test (the review's fetch-in-a-loop plugin abandoned at its deadline) reproduces the bug (fails on the current code) and passes with the fix
+- [x] The abandoned call is gone and the instance discarded within the documented total grace; other calls on the instance fail with `ErrInstanceLost`
+- [x] Warnings/metrics for the zombie stop after discard
+- [x] README limitations updated with the total grace rule
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

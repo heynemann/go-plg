@@ -495,7 +495,7 @@ Calls on one instance share it as concurrent requests share a Node.js process:
   whatever `Create` built), which may change while a call waits, and the instance's memory limit.
 - Each call keeps its own `ctx`: one that ends while the call waits for a response fails alone, at once (even
   while another call's code runs on the instance), with the context's error; the instance serves on (the plugin
-  sees the request fail and gets 250 ms to finish).
+  sees the request fail and gets 250 ms in all to finish, else the instance is discarded).
 - A call that traps, runs out of memory, panics or is stopped while running discards the instance: it fails
   with a `PanicError`, every other call on that instance with `plg.ErrInstanceLost` (safe to retry).
 - Only HTTP requests let other calls run; a Host call, and a Lua request made where the call cannot yield (inside
@@ -669,10 +669,12 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
   3000 frames with a `RangeError`; a variadic parameter arrives as one array; a response header's values are
   joined into one, as in `fetch`.
 - **`WithConcurrentCalls`:** interleaved calls share the plugin's global state and memory limit; a call abandoned
-  at its deadline still runs its remaining code (250 ms per step, beyond that the instance is discarded); a Lua
-  request that falls back to blocking counts against `MaxRequestsPerCall` per step rather than per call; in
-  TypeScript a request belongs to the call whose step made it, so a promise shared between calls through global
-  state is attributed to the call that started it.
+  at its deadline (or finished with requests still in flight) still runs its remaining code, within 250 ms in all
+  from its end however many steps that takes: a call still running then, say retrying a failing request in a loop,
+  discards the instance (its other calls fail with `plg.ErrInstanceLost`); a Lua request that falls back to
+  blocking counts against `MaxRequestsPerCall` per step rather than per call; in TypeScript a request belongs to
+  the call whose step made it, so a promise shared between calls through global state is attributed to the call
+  that started it.
 - **Rebuilds:** the guest artifacts must be rebuilt and re-verified (`make verify-guests`) whenever wazero,
   wasi-sdk, Lua, QuickJS-ng, yaegi or Go are upgraded.
 

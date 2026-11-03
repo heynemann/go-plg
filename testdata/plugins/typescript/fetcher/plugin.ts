@@ -7,6 +7,7 @@
 //   HOST <url> <host>     one GET with the Host header overridden
 //   FLOOD <n> <size> <url> n POSTs of one size-byte body, all started before awaiting any
 //   LOOP -                loops forever
+//   POLL <url>            GETs forever, ignoring the failures
 //   HOG -                 allocates until it runs out of memory
 //   HANG -                awaits a promise nothing settles
 //   PRINT <text>          prints text on stdout, then returns "printed"
@@ -70,6 +71,14 @@ export function Create() {
         case "LOOP":
           for (;;) {
             // spins until the call's deadline stops it
+          }
+        case "POLL":
+          for (;;) {
+            try {
+              await get(args[1]);
+            } catch {
+              // fails at once once the call has ended: it retries all the same
+            }
           }
         case "HOG": {
           const kept: Uint8Array[] = [];

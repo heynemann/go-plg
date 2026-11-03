@@ -2852,6 +2852,136 @@ func TestMuxReportsAFailureNobodyWaitsFor(t *testing.T) {
 	assert.Equal(t, "trace", panics[0].Guest)
 }
 
+// spin ends a step of call by starting request id, refused at once (as a policy refuses the requests of a call
+// that already ended): the guest catches each failed request and starts the next.
+func (s *guestStep) spin(call, id uint32) {
+	s.reply <- stepReply{step: engine.Step{Requests: []engine.Request{
+		{Call: call, ID: id, N: int(id), Answer: []byte("refused")},
+	}}}
+}
+
+// TestMuxEndedCallHasOneTotalGrace: a call that ended (abandoned at its deadline, or finished with a request in
+// flight) runs the rest of its code within one grace of muxGrace in all, however many steps that takes: here a
+// guest retrying a failed request forever, each step taking a fifth of the grace. Once the grace is spent, the
+// instance is discarded, failing the other call on it, and the call runs no further step.
+func TestMuxEndedCallHasOneTotalGrace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		// end starts a call on held, waiting for request 1 (in flight at web), and ends it; it returns the call.
+		end  func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) uint32
+		name string
+	}{
+		{
+			name: "abandoned",
+			end: func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) uint32 {
+				t.Helper()
+
+				ctx, cancel := context.WithCancelCause(t.Context())
+				late := callLane(ctx, held, "late")
+				step := guest.next()
+				step.wait(1)
+				<-web.requests // it ends with the call, failing
+
+				cancel(errLate)
+				require.ErrorIs(t, (<-late).err, errLate)
+
+				return step.call
+			},
+		},
+		{
+			name: "finished",
+			end: func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) uint32 {
+				t.Helper()
+
+				done := callLane(t.Context(), held, "done")
+
+				step := guest.next()
+				step.reply <- stepReply{step: engine.Step{
+					Requests: []engine.Request{{Call: step.call, ID: 1, N: 1}},
+					Done:     []engine.Completion{{Call: step.call, Result: engine.Result{Status: wire.StatusOK}}},
+				}}
+
+				got := <-done
+				require.NoError(t, got.err)
+				assert.Equal(t, wire.StatusOK, got.res.Status)
+
+				(<-web.requests).answer <- "failed"
+
+				return step.call
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				guest, web := newScriptedGuest(), newFakeWeb()
+				instances := muxPool(t, guest, 2, web.serve, nil)
+				held := acquireN(t, instances, 2)
+
+				other := callLane(t.Context(), held[1], "other")
+
+				guest.next().wait(100)
+
+				otherRequest := <-web.requests
+
+				ended := tc.end(t, guest, web, held[0])
+				graceEnds := time.Now().Add(muxGrace)
+
+				for id := uint32(1); id <= 5; id++ {
+					step := guest.next()
+					require.Equal(t, id, step.request)
+					assert.True(t, step.deadline.Equal(graceEnds), "step %d runs within the call's one grace", id)
+					time.Sleep(muxGrace / 5)
+					step.spin(ended, id+1)
+				}
+
+				select {
+				case got := <-other:
+					require.ErrorIs(t, got.err, ErrInstanceLost, "the grace spent, the instance is discarded")
+				case step := <-guest.steps:
+					assert.Failf(t, "the call ran past its grace", "step for request %d at %v, its grace ended %v",
+						step.request, time.Now(), graceEnds)
+
+					step.reply <- stepReply{} // the call goes on waiting, for nothing
+
+					otherRequest.answer <- "answer"
+
+					step = guest.next()
+					step.finish(step.call, "other")
+					<-other
+				}
+
+				assert.True(t, time.Now().Equal(graceEnds), "discarded as the grace ends")
+				<-otherRequest.done // the other call's request ends with it
+
+				synctest.Wait()
+
+				select {
+				case step := <-guest.steps:
+					assert.Failf(t, "a step after the discard", "request %d", step.request)
+
+					step.reply <- stepReply{}
+				default:
+				}
+
+				for _, lane := range held {
+					assert.True(t, lane.inst.Broken())
+					instances.discard(t.Context(), lane)
+				}
+
+				panics := instances.panics.history.recent()
+				require.Len(t, panics, 1, "the call nobody waits for is reported")
+				require.ErrorIs(t, panics[0], context.DeadlineExceeded)
+				require.ErrorContains(t, panics[0], "grace")
+			})
+		})
+	}
+}
+
 func TestMuxPoolDiscardBreaksTheInstance(t *testing.T) {
 	t.Parallel()
 

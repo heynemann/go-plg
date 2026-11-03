@@ -7,6 +7,7 @@
 --   SORTGET <url>         one GET from inside table.sort's comparator, where the call cannot yield
 --   FLOOD <n> <size> <url> n POSTs of one size-byte body, one after the other
 --   LOOP -                loops forever
+--   POLL <url>            GETs forever, ignoring the failures
 --   HOG -                 allocates until it runs out of memory
 --   YIELD -               yields from the method itself
 --   PRINT <text>          prints text on stdout, then returns "printed"
@@ -86,6 +87,10 @@ function Fetcher:Foo(cmd)
     return ok .. "|" .. table.concat(reasons, ";")
   elseif verb == "LOOP" then
     while true do
+    end
+  elseif verb == "POLL" then
+    while true do
+      get(args[2])
     end
   elseif verb == "HOG" then
     local kept = {}

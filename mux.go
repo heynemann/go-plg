@@ -13,14 +13,18 @@ import (
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
-// muxGrace is how long each step may run for a call that already ended, its answer delivered (or abandoned at its
-// deadline): the plugin code after its HTTP requests fail, such as cleanup in a catch or finally block. A step
-// running longer is stopped and the instance discarded, as any call stopped at its deadline.
+// muxGrace is how long, in all, a call that already ended (its answer delivered, or abandoned at its deadline)
+// may go on running: the plugin code after its HTTP requests fail, such as cleanup in a catch or finally block.
+// It is one deadline per call, from its end, however many steps the rest takes: a call still running then (a step
+// running past it is stopped; a call that starts another step afterwards, say retrying a failed request forever,
+// is failed instead) discards the instance, as any call stopped at its deadline.
 const muxGrace = 250 * time.Millisecond
 
 var (
-	errMuxDiscarded = errors.New("the instance was discarded")
-	errMuxPanic     = errors.New("the host panicked driving the instance")
+	errMuxDiscarded  = errors.New("the instance was discarded")
+	errMuxPanic      = errors.New("the host panicked driving the instance")
+	errMuxGraceSpent = fmt.Errorf("%w: the call ran on past its %s of grace after it ended", context.DeadlineExceeded,
+		muxGrace)
 )
 
 // stepper is a guest instance that can serve several calls at once: a *guestInstance whose guest exports the
@@ -93,8 +97,9 @@ type callState struct {
 	// exactly while the call is in flight, as an http.Request carries its own.
 	ctx      context.Context //nolint:containedctx // the context of one call in flight, see above
 	cancel   context.CancelFunc
-	mailbox  *muxCall // the call's mailbox; nil once answered
-	pending  int      // HTTP requests not answered yet
+	grace    time.Time // once the call is answered (mailbox nil), when the rest of it must have ended
+	mailbox  *muxCall  // the call's mailbox; nil once answered
+	pending  int       // HTTP requests not answered yet
 	id       uint32
 	finished bool // the guest ended the call
 }
@@ -256,10 +261,12 @@ func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32
 
 // abandon answers a call whose caller's context ended with cause while the call waited (or ran a step of its
 // own), and ends its requests; a caller that left already gets nothing. The guest then runs the rest of the call
-// (with the failed requests) under muxGrace per step.
+// (with the failed requests) within muxGrace in all.
 func (*muxInstance) abandon(state *callState, cause error) {
 	state.cancel()
 	state.mailbox.answer(engine.Result{}, abandoned(cause), "")
+
+	state.grace = time.Now().Add(muxGrace)
 }
 
 // abandoned is the error of a call whose context ended with cause while it waited for its HTTP requests.
@@ -296,10 +303,16 @@ func (m *muxInstance) resume(state *callState, request uint32, answer []byte) {
 	}
 
 	ctx := state.ctx
-	if state.mailbox == nil { // the call is answered: the rest of it runs on borrowed time
+	if state.mailbox == nil { // the call is answered: the rest of it runs on borrowed time, muxGrace in all
+		if !time.Now().Before(state.grace) {
+			m.fail(state, engine.Result{}, errMuxGraceSpent)
+
+			return
+		}
+
 		var cancel context.CancelFunc
 
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(state.ctx), muxGrace)
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(state.ctx), state.grace)
 		defer cancel()
 	}
 
@@ -410,12 +423,16 @@ func (m *muxInstance) roundTrip(ctx context.Context, req []byte, n int) []byte {
 	return m.pool.http(ctx, nil, req, n)
 }
 
-// finish answers a call the guest ended.
+// finish answers a call the guest ended. Its requests still in flight resume it within muxGrace.
 func (m *muxInstance) finish(state *callState, res engine.Result) {
 	state.finished = true
 
 	if mailbox := state.mailbox; mailbox != nil {
 		mailbox.answer(res, nil, "")
+
+		if state.pending > 0 {
+			state.grace = time.Now().Add(muxGrace)
+		}
 	}
 
 	m.forget(state)

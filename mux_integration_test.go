@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/httpcap"
@@ -291,6 +292,97 @@ func TestAMultiplexedCallReturnsAtItsDeadlineWhileAnotherCallRuns(t *testing.T) 
 		assert.Equal(t, "200||ok", got.out)
 		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "busy/fetch"), "the same instance")
 		assert.Empty(t, ctr.RecentPanics(), "the late answer reached nobody")
+	})
+}
+
+// refusalCounter counts the warnings logging a request refused past MaxRequestsPerCall.
+type refusalCounter struct {
+	n atomic.Int64
+}
+
+func (*refusalCounter) Enabled(context.Context, slog.Level) bool { return true }
+
+//nolint:gocritic // hugeParam: slog.Handler fixes the signature
+func (c *refusalCounter) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Level != slog.LevelWarn || rec.Message != "plg: http request refused or failed" {
+		return nil
+	}
+
+	rec.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "error" && strings.Contains(attr.Value.String(), httpcap.ErrTooManyRequests.Error()) {
+			c.n.Add(1)
+		}
+
+		return true
+	})
+
+	return nil
+}
+
+func (c *refusalCounter) WithAttrs([]slog.Attr) slog.Handler { return c }
+
+func (c *refusalCounter) WithGroup(string) slog.Handler { return c }
+
+// TestAnAbandonedCallRetryingForeverIsDiscardedAfterItsGrace: a call abandoned at its deadline that retries its
+// failed request forever, each retry refused at once (past MaxRequestsPerCall), runs on within one grace in all,
+// not one per step: then its instance is discarded, the other call on it failing with ErrInstanceLost, and its
+// refused requests (a warning and a metric each) stop with it.
+func TestAnAbandonedCallRetryingForeverIsDiscardedAfterItsGrace(t *testing.T) {
+	t.Parallel()
+
+	eachScript(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		// Without a total grace the abandoned call retries forever and the other call waits for its request
+		// until a safety deadline ends, failing the test instead of hanging it.
+		safety, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+
+		logs, reader, srv := &refusalCounter{}, newMetricsReader(t), newGateServer(t)
+		ctr := newContainer(t, plg.WithLogger(slog.New(logs)), plg.WithMeterProvider(reader.provider))
+		policy := openPolicy(hostOf(t, srv.URL))
+		policy.MaxRequestsPerCall = 1 // the call's retries are refused at once
+		plug := fetcherIn(t, lang, ctr, "poll", plg.WithPool(1, 1), plg.WithConcurrentCalls(2), plg.WithHTTP(policy))
+		refusedRequests := func() int64 {
+			return reader.collect(t).int64Value(t, "plg.http.requests", attribute.String("key", "poll/fetch"),
+				attribute.String("outcome", "refused"))
+		}
+
+		ctx := make(expiring)
+		late := callLater(ctx, plug, "POLL "+srv.URL)
+		<-srv.started
+
+		other := callLater(safety, plug, "GET "+srv.URL)
+		<-srv.started
+
+		abandoned := time.Now()
+
+		close(ctx) // the first call's deadline passes while it waits for its request
+		require.ErrorIs(t, (<-late).err, context.DeadlineExceeded)
+
+		got := <-other
+		elapsed := time.Since(abandoned)
+
+		require.ErrorIs(t, got.err, plg.ErrInstanceLost, "the abandoned call's grace spent, its instance is discarded")
+		require.ErrorContains(t, got.err, "another call on its instance failed")
+		assert.GreaterOrEqual(t, elapsed, plg.MuxGrace, "the abandoned call had its grace")
+
+		panics := ctr.RecentPanics()
+		require.Len(t, panics, 1, "the call nobody waits for is reported")
+		require.ErrorIs(t, panics[0], context.DeadlineExceeded)
+
+		refused := logs.n.Load()
+		assert.Positive(t, refused, "the abandoned call retried")
+		assert.Equal(t, refused, refusedRequests(), "a warning and a metric each")
+
+		close(srv.release)
+
+		// A new instance serves the next call: the pool closes the broken one first, its owner gone.
+		got = <-callLater(t.Context(), plug, "GET "+srv.URL)
+		require.NoError(t, got.err)
+		assert.Equal(t, "200||ok", got.out)
+		assert.Equal(t, refused, logs.n.Load(), "no warning after the discard")
+		assert.Equal(t, refused, refusedRequests(), "no metric after the discard")
 	})
 }
 
