@@ -1,0 +1,36 @@
+// Package testcontract is the contract plg's tests load. The Go guest interprets this file's source, so the
+// test plugins under testdata/ import this package by its real import path.
+package testcontract
+
+import (
+	"context"
+	"strings"
+)
+
+// Celsius is a named scalar: named types cross the plugin boundary by their kind.
+type Celsius float64
+
+// Fooer is the interface the test plugins implement.
+type Fooer interface {
+	// Foo returns Greeting(name).
+	Foo(ctx context.Context, name string) (string, error)
+	// Count returns how many times the instance has been called through Count.
+	Count(ctx context.Context) (int, error)
+	// Fail returns an error with message msg, or nil when msg is empty.
+	Fail(ctx context.Context, msg string) error
+	// Boil reports whether c is at or above the boiling point, and c in Fahrenheit.
+	Boil(ctx context.Context, c Celsius) (bool, float64, error)
+	// Scalars returns every argument transformed: b negated, integers incremented, floats doubled and s
+	// upper-cased.
+	Scalars(
+		ctx context.Context, b bool, i int, i8 int8, i16 int16, i32 int32, i64 int64,
+		u uint, u8 uint8, u16 uint16, u32 uint32, u64 uint64, f32 float32, f64 float64, s string,
+	) (
+		bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string, error,
+	)
+}
+
+// Greeting is contract code the plugins call: it runs interpreted inside the guest.
+func Greeting(name string) string {
+	return "hello, " + strings.TrimSpace(name)
+}

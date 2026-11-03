@@ -11,6 +11,7 @@ linters:
   disable:
     - wsl # deprecated; replaced by wsl_v5
     - exhaustruct # functional options and meaningful zero values are idiomatic here
+    - exhaustruct_v5 # successor of exhaustruct (deprecated); same reason: functional options and meaningful zero values are idiomatic here
     - nlreturn # blank-line rules are owned by wsl_v5
     - gomodguard # deprecated; replaced by gomodguard_v2 (enabled via default: all)
 
