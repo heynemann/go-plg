@@ -411,7 +411,7 @@ func TestStdlibAllowlist(t *testing.T) {
 		assert.Equal(t, "ready\n", stdout.String(), "plugin stdout goes to the guest's writer")
 	})
 
-	for _, pkg := range []string{"os", "os/exec", "net", "net/http", "syscall", "unsafe", "reflect", "io/fs"} {
+	for _, pkg := range []string{"os", "os/exec", "net", "net/http/httputil", "syscall", "unsafe", "reflect", "io/fs"} {
 		t.Run(pkg, func(t *testing.T) {
 			t.Parallel()
 
@@ -449,6 +449,33 @@ func Create() (testcontract.Fooer, error) { return partial{}, nil }
 
 	res = call(t, guest, "Count")
 	assert.Equal(t, wire.StatusPanic, res.status, "the unimplemented method panics on the call, like Go")
+}
+
+func TestNetHTTPIsClientOnly(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"client":         "_ = http.DefaultClient.Get\n\t_, _ = http.NewRequest(http.MethodGet, \"http://a/\", nil)",
+		"ListenAndServe": "_ = http.ListenAndServe",
+		"Server":         "_ = &http.Server{}",
+		"ServeMux":       "_ = http.NewServeMux",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			plugin := importingPlugin(body, "net/http")
+			plugin["p.go"] = strings.Replace(plugin["p.go"], "\t_ \"net/http\"\n", "\t\"net/http\"\n", 1)
+
+			_, res := load(t, plugin)
+			if name == "client" {
+				assert.Equal(t, wire.StatusOK, res.status, res.msg)
+
+				return
+			}
+
+			assert.Equal(t, wire.StatusLoad, res.status, "server-side symbols are not in the guest")
+		})
+	}
 }
 
 func TestABIViolations(t *testing.T) {

@@ -13,12 +13,28 @@ BENCH_OUT := bench.txt
 
 # The Go guest's standard library allowlist (PLAN.md) has one source, internal/goallow/packages.txt, which
 # `plg gen` and the tests read too. Symbol tables are extracted for every package except cmp (yaegi compiles it
-# from source) and encoding/json, extracted separately: its Options interface has a method on an internal type,
-# so its wrapper cannot be generated and is excluded.
+# from source) and two extracted separately: encoding/json, whose Options interface has a method on an internal
+# type, so its wrapper cannot be generated and is excluded; and net/http, whose client side only is allowlisted
+# (requests go through the host transport; the guest has no sockets), so the server-side symbols in
+# GUEST_HTTP_SERVER are left out.
 GUEST_ALLOWLIST := $(shell sed -e 's/#.*//' internal/goallow/packages.txt)
-GUEST_STDLIB := $(filter-out cmp encoding/json,$(GUEST_ALLOWLIST))
+GUEST_STDLIB := $(filter-out cmp encoding/json net/http,$(GUEST_ALLOWLIST))
+GUEST_HTTP_SERVER := AllowQuerySemicolons CloseNotifier ConnState CrossOriginProtection DefaultServeMux Dir \
+	Error ErrAbortHandler ErrBodyNotAllowed ErrHandlerTimeout ErrHijacked ErrServerClosed ErrSkipAltProtocol \
+	ErrWriteAfterFlush FS File FileServer FileServerFS FileSystem Flusher Handle HandleFunc Handler HandlerFunc \
+	Hijacker ListenAndServe ListenAndServeTLS LocalAddrContextKey MaxBytesHandler MaxBytesReader \
+	NewCrossOriginProtection NewFileTransport NewFileTransportFS NewResponseController NewServeMux NotFound \
+	NotFoundHandler PushOptions Pusher Redirect RedirectHandler ResponseController ResponseWriter Serve \
+	ServeContent ServeFile ServeFileFS ServeMux ServeTLS Server ServerContextKey State[A-Za-z]+ StripPrefix \
+	TimeoutHandler
+empty :=
+space := $(empty) $(empty)
+GUEST_HTTP_EXCLUDE := ^($(subst $(space),|,$(strip $(GUEST_HTTP_SERVER))))$$
 GUEST_SYMBOLS := guestsrc/golang/symbols
-GO_GUEST := guest/golang/golang.wasm
+# The Go guest is over 20 MB raw, so it is committed gzip-compressed (scripts/gzipwasm.go: fixed level, empty
+# header, hence reproducible); guest/golang inflates it once per process.
+GO_GUEST := guest/golang/golang.wasm.gz
+GO_GUEST_RAW := $(BIN)/golang.wasm
 
 .PHONY: check fmt-check lint test coverage allocs repeat bench symbols guests verify-guests clean
 
@@ -59,10 +75,12 @@ symbols: $(BIN)/yaegi
 	find $(GUEST_SYMBOLS) -name '*.go' ! -name symbols.go -delete
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols $(GUEST_STDLIB)
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
+	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
-# Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor).
+# Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
 guests:
-	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(GO_GUEST) ./guestsrc/golang
+	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(GO_GUEST_RAW) ./guestsrc/golang
+	go run scripts/gzipwasm.go $(GO_GUEST_RAW) $(GO_GUEST)
 
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests

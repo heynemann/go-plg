@@ -8,6 +8,8 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+
+	"github.com/heynemann/go-plg/internal/httpcap"
 )
 
 // plugin is a loaded plugin as the catalogue serves it.
@@ -15,7 +17,8 @@ type plugin struct {
 	value any          // the bound adapter; it implements iface
 	iface reflect.Type // the interface it was registered for
 	pool  *pool
-	key   string // "<name>/<descriptor key>"
+	http  *httpcap.Client // the Register call's, shared with its other plugins
+	key   string          // "<name>/<descriptor key>"
 }
 
 // snapshot is an immutable state of the catalogue. Register publishes a new one with compare-and-swap, so

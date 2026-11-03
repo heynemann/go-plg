@@ -379,6 +379,22 @@ func TestRegisterArguments(t *testing.T) {
 			},
 		},
 		{
+			name: "nohosts", want: plg.ErrInvalidHTTPPolicy, msg: "AllowedHosts is required",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithHTTP(plg.HTTPPolicy{})},
+		},
+		{
+			name: "badhost", want: plg.ErrInvalidHTTPPolicy, msg: `"https://api.example.com"`,
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithHTTP(plg.HTTPPolicy{
+				AllowedHosts: []string{"https://api.example.com"},
+			})},
+		},
+		{
+			name: "badlimit", want: plg.ErrInvalidHTTPPolicy, msg: "MaxResponseBytes",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithHTTP(plg.HTTPPolicy{
+				AllowedHosts: []string{"api.example.com"}, MaxResponseBytes: 2 << 30,
+			})},
+		},
+		{
 			name: "language", want: plg.ErrUnsupportedLanguage, msg: `plugin k (storage s)`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
 				{Key: "k", Language: "cobol", Entrypoint: "main.cbl"},

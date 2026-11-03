@@ -20,6 +20,7 @@ math/bits
 math/cmplx
 math/rand
 math/rand/v2
+net/http # client side only: requests go through the host (plg.WithHTTP); no server symbols
 net/url
 regexp
 slices

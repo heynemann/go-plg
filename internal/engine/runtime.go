@@ -7,8 +7,11 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"strconv"
+	"sync/atomic"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
@@ -27,13 +30,17 @@ type RuntimeOptions struct {
 }
 
 // Runtime is a wazero runtime: every instance it creates has the same memory limit and is stopped
-// preemptively when the context of its current call ends. It is safe for concurrent use.
+// preemptively when the context of its current call ends. Its guests may import the plg host module
+// (http_roundtrip, take_result). It is safe for concurrent use.
 type Runtime struct {
 	rt     wazero.Runtime
 	logger *slog.Logger
+	hosts  *xsync.Map[string, *hostState] // by instance module name
+	names  atomic.Uint64                  // instance name sequence
 }
 
-// NewRuntime returns a runtime sharing the engine's compilation cache, with WASI preview 1 available.
+// NewRuntime returns a runtime sharing the engine's compilation cache, with WASI preview 1 and the plg host
+// module available.
 func (e *Engine) NewRuntime(ctx context.Context, opts RuntimeOptions) *Runtime {
 	cfg := wazero.NewRuntimeConfig().
 		WithCompilationCache(e.cache).
@@ -43,7 +50,10 @@ func (e *Engine) NewRuntime(ctx context.Context, opts RuntimeOptions) *Runtime {
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg)
 	wasi_snapshot_preview1.MustInstantiate(ctx, rt) // cannot fail on a fresh runtime
 
-	return &Runtime{rt: rt, logger: e.logger}
+	created := &Runtime{rt: rt, logger: e.logger, hosts: xsync.NewMap[string, *hostState]()}
+	created.instantiateHostModule(ctx, rt)
+
+	return created
 }
 
 func limitPages(limit uint64) uint32 {
@@ -96,21 +106,28 @@ type Mount struct {
 type InstanceOptions struct {
 	// Stdout and Stderr receive the guest's output; nil discards it.
 	Stdout, Stderr io.Writer
+	// HTTP serves the instance's HTTP requests; nil refuses them all.
+	HTTP HTTPFunc
 	// Mounts are the instance's only file system access.
 	Mounts []Mount
 }
 
 // Instantiate creates an instance of the module and runs the guest's reactor initialization. Instances have
-// clocks, sleep, a cryptographic random source, the given mounts and the argument list ["plugin"]; no
-// environment and no sockets.
+// clocks, sleep, a cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP only
+// through opts.HTTP; no environment and no sockets.
 func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instance, error) {
 	fsCfg := wazero.NewFSConfig()
 	for _, mnt := range opts.Mounts {
 		fsCfg = fsCfg.WithFSMount(mnt.FS, mnt.GuestPath)
 	}
 
+	// The host imports find the instance's state by its module name, unique within the runtime.
+	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
+	state := &hostState{http: opts.HTTP}
+	m.rt.hosts.Store(name, state)
+
 	cfg := wazero.NewModuleConfig().
-		WithName("").
+		WithName(name).
 		WithStartFunctions("_initialize").
 		WithArgs("plugin").
 		WithSysWalltime().
@@ -123,10 +140,19 @@ func (m *Module) Instantiate(ctx context.Context, opts InstanceOptions) (*Instan
 
 	mod, err := m.rt.rt.InstantiateModule(ctx, m.cm, cfg)
 	if err != nil {
+		m.rt.hosts.Delete(name)
+
 		return nil, fmt.Errorf("instantiating guest %s: %w", m.name, err)
 	}
 
-	return newInstance(ctx, mod)
+	inst, err := newInstance(ctx, mod, state, m.rt.hosts)
+	if err != nil {
+		m.rt.hosts.Delete(name)
+
+		return nil, err
+	}
+
+	return inst, nil
 }
 
 func orDiscard(w io.Writer) io.Writer {

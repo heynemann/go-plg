@@ -7,10 +7,12 @@ import (
 )
 
 // fakeGuest assembles a tiny wasm module that exports one page of memory and the plg ABI functions with the
-// given bodies, so engine behavior can be tested against exact guest misbehavior without the real guest.
+// given bodies, so engine behavior can be tested against exact guest misbehavior without the real guest. It
+// may import plg host functions: import i is function index i, called with call(i).
 type fakeGuest struct {
-	bodies map[string][]byte // export name -> function body (instructions, without the final end)
-	data   []byte            // placed at address 0
+	bodies  map[string][]byte // export name -> function body (instructions, without the final end)
+	data    []byte            // placed at address 0
+	imports []string          // plg host functions, in function index order
 }
 
 const (
@@ -29,6 +31,10 @@ func signatureOf(export string) [2][]byte {
 		return [2][]byte{{i32, i32}, {i64}}
 	case "plg_close":
 		return [2][]byte{nil, {i64}}
+	case "http_roundtrip":
+		return [2][]byte{{i32, i32}, {i32}}
+	case "take_result":
+		return [2][]byte{{i32, i32}, nil}
 	default: // _initialize
 		return [2][]byte{}
 	}
@@ -42,6 +48,12 @@ func i64Const(v int64) []byte { return append([]byte{0x42}, sleb(v)...) }
 func packed(ptr, size uint32) []byte { return i64Const(int64(ptr)<<32 | int64(size)) }
 
 func unreachable() []byte { return []byte{0x00} }
+
+// call calls function index fn.
+func call(fn int) []byte { return append([]byte{0x10}, uleb(fn)...) }
+
+// drop drops the top of the stack.
+func drop() []byte { return []byte{0x1a} }
 
 // spin is `loop br 0 end unreachable`.
 func spin() []byte { return []byte{0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00} }
@@ -64,13 +76,13 @@ func (g fakeGuest) wasm() []byte {
 
 	slices.Sort(names)
 
-	var types, funcs, exports, code bytes.Buffer
+	var types, imports, funcs, exports, code bytes.Buffer
 
 	exports.Write(uleb(len(names) + 1))
 	exports.Write(name("memory"))
 	exports.Write([]byte{0x02, 0x00})
 
-	for i, n := range names {
+	for i, n := range slices.Concat(g.imports, names) {
 		sig := signatureOf(n)
 		params, results := sig[0], sig[1]
 
@@ -79,6 +91,15 @@ func (g fakeGuest) wasm() []byte {
 		types.Write(params)
 		types.Write(uleb(len(results)))
 		types.Write(results)
+
+		if i < len(g.imports) {
+			imports.Write(name("plg"))
+			imports.Write(name(n))
+			imports.WriteByte(0x00) // a function
+			imports.Write(uleb(i))
+
+			continue
+		}
 
 		funcs.Write(uleb(i))
 
@@ -92,7 +113,12 @@ func (g fakeGuest) wasm() []byte {
 	}
 
 	out := []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00}
-	out = section(out, 1, vec(len(names), types.Bytes()))
+	out = section(out, 1, vec(len(g.imports)+len(names), types.Bytes()))
+
+	if len(g.imports) > 0 {
+		out = section(out, 2, vec(len(g.imports), imports.Bytes()))
+	}
+
 	out = section(out, 3, vec(len(names), funcs.Bytes()))
 	out = section(out, 5, []byte{0x01, 0x00, 0x01}) // one memory, min 1 page
 	out = section(out, 7, exports.Bytes())

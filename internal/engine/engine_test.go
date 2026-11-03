@@ -55,12 +55,18 @@ func newRuntime(t *testing.T, e *engine.Engine) *engine.Runtime {
 func instantiate(t *testing.T, g fakeGuest) (*engine.Instance, error) {
 	t.Helper()
 
+	return instantiateWith(t, g, engine.InstanceOptions{})
+}
+
+func instantiateWith(t *testing.T, g fakeGuest, opts engine.InstanceOptions) (*engine.Instance, error) {
+	t.Helper()
+
 	rt := newRuntime(t, newEngine(t, engine.Options{CacheDir: t.TempDir()}))
 
 	mod, err := rt.Compile(t.Context(), "fake", g.wasm())
 	require.NoError(t, err)
 
-	inst, err := mod.Instantiate(t.Context(), engine.InstanceOptions{})
+	inst, err := mod.Instantiate(t.Context(), opts)
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
 	}

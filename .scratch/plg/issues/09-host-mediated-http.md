@@ -4,11 +4,11 @@
 
 **Blocked by:** 02 (Tracer bullet)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A Go plugin's `http.Get` against an allowlisted test server returns the response
-- [ ] Non-allowlisted hosts and private-network addresses (including via DNS) are refused
-- [ ] Oversized requests or responses and exceeding MaxRequestsPerCall produce errors, never memory blowups
-- [ ] Cancelling the call's ctx aborts an in-flight request
-- [ ] Without WithHTTP every request is refused
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A Go plugin's `http.Get` against an allowlisted test server returns the response
+- [x] Non-allowlisted hosts and private-network addresses (including via DNS) are refused
+- [x] Oversized requests or responses and exceeding MaxRequestsPerCall produce errors, never memory blowups
+- [x] Cancelling the call's ctx aborts an in-flight request
+- [x] Without WithHTTP every request is refused
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

@@ -1,6 +1,10 @@
 package plg
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/heynemann/go-plg/internal/httpcap"
+)
 
 // Errors returned by plg. Test for them with [errors.Is]; the returned errors wrap them with details such as the
 // key, the method or the offending type.
@@ -37,6 +41,8 @@ var (
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not
 	// compile, or its Create failed.
 	ErrLoad = errors.New("plg: plugin failed to load")
+	// ErrInvalidHTTPPolicy reports an [HTTPPolicy] Register cannot accept.
+	ErrInvalidHTTPPolicy = httpcap.ErrInvalidPolicy
 	// ErrCall reports a call that failed outside the plugin's own code: the guest trapped, panicked, was
 	// stopped by its context or broke the guest ABI. The instance that served it is discarded.
 	ErrCall = errors.New("plg: plugin call failed")

@@ -33,6 +33,7 @@ func WithCompilationCacheDir(dir string) Option {
 type RegisterOption func(*registerConfig)
 
 type registerConfig struct {
+	http      *HTTPPolicy // nil: HTTP refused
 	storages  []Storage
 	languages []Language // enabled languages; empty enables every language
 }

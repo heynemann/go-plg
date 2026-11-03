@@ -27,7 +27,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/plg
-          key: plg-cache-${{ hashFiles('guest/**/*.wasm', 'go.sum') }}
+          key: plg-cache-${{ hashFiles('guest/**/*.wasm*', 'go.sum') }}
       # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate, goleak,
       # allocation budgets (uninstrumented), unit tests repeated with -count=10.
       - run: make check

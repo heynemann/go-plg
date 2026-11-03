@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/tetratelabs/wazero/api"
 
 	"github.com/heynemann/go-plg/internal/wire"
@@ -32,6 +33,8 @@ type Instance struct {
 	mod                      api.Module
 	mem                      api.Memory
 	alloc, init, call, close api.Function
+	host                     *hostState
+	hosts                    *xsync.Map[string, *hostState] // the runtime's registry host lives in
 	inPtr, inCap             uint32
 	stack                    [2]uint64
 	broken                   bool
@@ -45,7 +48,9 @@ type Result struct {
 	Status  wire.Status
 }
 
-func newInstance(ctx context.Context, mod api.Module) (*Instance, error) {
+func newInstance(ctx context.Context, mod api.Module, host *hostState, hosts *xsync.Map[string, *hostState]) (
+	*Instance, error,
+) {
 	inst := &Instance{
 		mod:   mod,
 		mem:   mod.Memory(),
@@ -53,6 +58,8 @@ func newInstance(ctx context.Context, mod api.Module) (*Instance, error) {
 		init:  mod.ExportedFunction(exportInit),
 		call:  mod.ExportedFunction(exportCall),
 		close: mod.ExportedFunction(exportClose),
+		host:  host,
+		hosts: hosts,
 	}
 
 	if inst.mem == nil || inst.alloc == nil || inst.init == nil || inst.call == nil || inst.close == nil {
@@ -103,8 +110,10 @@ func (in *Instance) Close(ctx context.Context) error {
 	}
 
 	in.broken = true
+	err = errors.Join(err, in.mod.Close(ctx))
+	in.hosts.Delete(in.mod.Name())
 
-	return errors.Join(err, in.mod.Close(ctx))
+	return err
 }
 
 // write copies req into the guest's input buffer, growing it through plg_alloc when needed. A request longer
@@ -131,6 +140,8 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 
 // invoke calls fn, whose packed result names a status-prefixed buffer, and validates that buffer.
 func (in *Instance) invoke(ctx context.Context, fn api.Function, stack []uint64) (Result, error) {
+	in.host.begin()
+
 	err := fn.CallWithStack(ctx, stack)
 	if err != nil {
 		return Result{}, in.fail(fmt.Errorf("%s: %w", fn.Definition().ExportNames()[0], err))

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/guestreg"
+	"github.com/heynemann/go-plg/internal/httpcap"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -31,22 +31,25 @@ func Register[T any](ctx context.Context, c *Container, name string, opts ...Reg
 }
 
 func (c *Container) register(ctx context.Context, iface reflect.Type, name string, opts []RegisterOption) error {
-	contr, cfg, err := c.prepare(iface, name, opts)
+	reg, err := c.prepare(iface, name, opts)
 	if err != nil {
 		return err
 	}
 
 	if _, dup := c.names.LoadOrStore(name, true); dup {
+		reg.http.Close()
+
 		return fmt.Errorf("%w: %s", ErrDuplicateName, name)
 	}
 
-	plugins, err := c.loadAll(ctx, contr, name, cfg)
+	plugins, err := c.loadAll(ctx, reg)
 	if err == nil {
 		err = c.publish(ctx, iface, plugins)
 	}
 
 	if err != nil {
 		c.names.Delete(name)
+		reg.http.Close()
 
 		return err
 	}
@@ -54,26 +57,33 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 	return nil
 }
 
-// prepare checks a Register call's arguments and returns the interface's contract and the Register options.
-func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (
-	*contract, *registerConfig, error,
-) {
+// registration is a checked Register call.
+type registration struct {
+	contr *contract
+	cfg   *registerConfig
+	http  *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
+	name  string
+}
+
+// prepare checks a Register call's arguments and returns the interface's contract, the Register options and
+// the HTTP client of its policy.
+func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (*registration, error) {
 	if c.closed.Load() {
-		return nil, nil, ErrClosed
+		return nil, ErrClosed
 	}
 
 	if name == "" || strings.Contains(name, "/") {
-		return nil, nil, fmt.Errorf("%w %q: names are non-empty and have no slash", ErrInvalidName, name)
+		return nil, fmt.Errorf("%w %q: names are non-empty and have no slash", ErrInvalidName, name)
 	}
 
 	err := validateInterface(iface)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	contr, err := lookupContract(iface)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	cfg := &registerConfig{}
@@ -83,10 +93,15 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 	}
 
 	if len(cfg.storages) == 0 || slices.Contains(cfg.storages, nil) {
-		return nil, nil, fmt.Errorf("%w: register %s with at least one non-nil WithStorage", ErrNoStorage, name)
+		return nil, fmt.Errorf("%w: register %s with at least one non-nil WithStorage", ErrNoStorage, name)
 	}
 
-	return contr, cfg, nil
+	client, err := httpClient(cfg.http, c.logger)
+	if err != nil {
+		return nil, err
+	}
+
+	return &registration{contr: contr, cfg: cfg, http: client, name: name}, nil
 }
 
 // source is a plugin a storage listed.
@@ -160,10 +175,8 @@ func listStorages(ctx context.Context, storages []Storage) ([]source, error) {
 }
 
 // loadAll loads every listed plugin; on failure it closes the ones already loaded.
-func (c *Container) loadAll(ctx context.Context, contr *contract, name string, cfg *registerConfig) (
-	[]*plugin, error,
-) {
-	srcs, err := c.listPlugins(ctx, name, cfg)
+func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, error) {
+	srcs, err := c.listPlugins(ctx, reg.name, reg.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -171,9 +184,9 @@ func (c *Container) loadAll(ctx context.Context, contr *contract, name string, c
 	plugins := make([]*plugin, 0, len(srcs))
 
 	for i := range srcs {
-		key := name + "/" + srcs[i].desc.Key
+		key := reg.name + "/" + srcs[i].desc.Key
 
-		plug, err := c.load(ctx, contr, key, &srcs[i])
+		plug, err := c.load(ctx, reg, key, &srcs[i])
 		if err != nil {
 			c.closePlugins(ctx, plugins)
 
@@ -187,8 +200,9 @@ func (c *Container) loadAll(ctx context.Context, contr *contract, name string, c
 }
 
 // load opens a plugin, starts its first instance (running its Create) and binds an adapter to it.
-func (c *Container) load(ctx context.Context, contr *contract, key string, src *source) (*plugin, error) {
+func (c *Container) load(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
 	start := time.Now()
+	contr := reg.contr
 
 	files, err := src.storage.Open(ctx, src.desc)
 	if err != nil {
@@ -212,8 +226,12 @@ func (c *Container) load(ctx context.Context, contr *contract, key string, src *
 		return nil, err
 	}
 
+	opts := engine.InstanceOptions{
+		Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
+		HTTP:   reg.http.Handler(key),
+	}
 	spawn := func(ctx context.Context) (*engine.Instance, error) {
-		return startGo(ctx, mod, tree, contr.payload)
+		return startGo(ctx, mod, opts, contr.payload)
 	}
 
 	first, err := spawn(ctx)
@@ -221,7 +239,7 @@ func (c *Container) load(ctx context.Context, contr *contract, key string, src *
 		return nil, err
 	}
 
-	plug := &plugin{key: key, iface: contr.iface}
+	plug := &plugin{key: key, iface: contr.iface, http: reg.http}
 	plug.pool = newPool(key, first, spawn, c.logger)
 	plug.value = contr.bind(plug) //nolint:contextcheck // each adapter call takes the context it is passed
 
@@ -238,11 +256,11 @@ var (
 	errInitStatus = errors.New("guest failed to initialize")
 )
 
-// startGo starts a Go guest instance over the plugin's source tree and runs the plugin's Create.
-func startGo(ctx context.Context, mod *engine.Module, tree fs.FS, payload []byte) (*engine.Instance, error) {
-	inst, err := mod.Instantiate(ctx, engine.InstanceOptions{
-		Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
-	})
+// startGo starts a Go guest instance (mounting the plugin's source tree) and runs the plugin's Create.
+func startGo(ctx context.Context, mod *engine.Module, opts engine.InstanceOptions, payload []byte) (
+	*engine.Instance, error,
+) {
+	inst, err := mod.Instantiate(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("starting an instance: %w", err)
 	}
@@ -292,6 +310,8 @@ func (c *Container) publish(ctx context.Context, iface reflect.Type, plugins []*
 // closePlugins closes plugins that were never published, logging failures.
 func (c *Container) closePlugins(ctx context.Context, plugins []*plugin) {
 	for _, p := range plugins {
+		p.http.Close()
+
 		err := p.pool.close(context.WithoutCancel(ctx))
 		if err != nil {
 			c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an unpublished plugin failed",

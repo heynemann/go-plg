@@ -83,6 +83,7 @@ func (c *Container) Close(ctx context.Context) error {
 
 	for _, plug := range last.plugins {
 		errs = append(errs, plug.pool.close(ctx))
+		plug.http.Close()
 	}
 
 	errs = append(errs, c.runtime.Close(ctx), c.engine.Close(ctx))

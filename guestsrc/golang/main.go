@@ -7,7 +7,9 @@
 package main
 
 import (
+	"net/http"
 	"os"
+	"runtime"
 	"unsafe"
 
 	"github.com/heynemann/go-plg/internal/goguest"
@@ -20,6 +22,33 @@ import (
 var guest = goguest.New(os.Stdout, os.Stderr)
 
 func main() {}
+
+// init makes the standard net/http client go through the host: plugins call http.Get and friends as usual.
+func init() { //nolint:gochecknoinits // a reactor has no other hook that runs before the plugin is loaded
+	http.DefaultTransport = goguest.Transport{Exchange: exchange}
+}
+
+// httpRoundTrip hands the encoded request at ptr to the host, which makes the request and keeps its encoded
+// answer for takeResult; it returns the answer's length.
+//
+//go:wasmimport plg http_roundtrip
+func httpRoundTrip(ptr, size uint32) uint32
+
+// takeResult copies the host's pending answer, exactly size bytes, to ptr.
+//
+//go:wasmimport plg take_result
+func takeResult(ptr, size uint32)
+
+// exchange sends an encoded request to the host and returns the host's answer in a fresh buffer.
+func exchange(req []byte) []byte {
+	size := httpRoundTrip(ptr(req), uint32(len(req))) //nolint:gosec // G115: goguest bounds requests below 2 GiB
+	runtime.KeepAlive(req)
+
+	resp := make([]byte, size)
+	takeResult(ptr(resp), size)
+
+	return resp
+}
 
 // plgAlloc returns a pointer to the guest-owned input buffer, grown to at least size bytes.
 //
@@ -50,7 +79,7 @@ func plgClose() uint64 { //nolint:unused // called by the host through //go:wasm
 }
 
 // ptr returns the wasm32 address of b's first byte; uintptr is 32 bits on wasm, so the conversion is exact.
-func ptr(b []byte) uint32 { //nolint:unused // reached only through the //go:wasmexport functions
+func ptr(b []byte) uint32 {
 	return uint32(uintptr(unsafe.Pointer(unsafe.SliceData(b)))) //nolint:gosec // G103,G115: wasm32 address, see above
 }
 

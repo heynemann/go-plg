@@ -2,6 +2,7 @@ package golang_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"errors"
 	"os/exec"
@@ -119,4 +120,25 @@ func readBytes(t *testing.T, reader *bytes.Reader) []byte {
 	require.NoError(t, err)
 
 	return out
+}
+
+func TestInflateRejectsCorruptArtifacts(t *testing.T) {
+	t.Parallel()
+
+	var compressed bytes.Buffer
+
+	zw := gzip.NewWriter(&compressed)
+	_, err := zw.Write(bytes.Repeat([]byte("wasm"), 1000))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	raw, err := golang.InflateArtifact(compressed.Bytes())
+	require.NoError(t, err)
+	assert.Equal(t, bytes.Repeat([]byte("wasm"), 1000), raw)
+
+	_, err = golang.InflateArtifact([]byte("not gzip"))
+	require.Error(t, err, "bad header")
+
+	_, err = golang.InflateArtifact(compressed.Bytes()[:compressed.Len()-10])
+	require.Error(t, err, "truncated stream")
 }
