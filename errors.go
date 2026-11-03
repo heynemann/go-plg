@@ -28,7 +28,14 @@ var (
 	ErrDuplicateName = errors.New("plg: name already registered")
 	// ErrNoStorage reports a Register call without any storage.
 	ErrNoStorage = errors.New("plg: no storage")
-	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint.
+	// ErrInvalidOption reports a Register option with an invalid value, such as a [WithPool] minimum above its
+	// maximum.
+	ErrInvalidOption = errors.New("plg: invalid option")
+	// ErrMemoryBudget reports a Register whose plugins' worst-case memory, added to that of the plugins already
+	// registered, exceeds the container's [WithMemoryBudget].
+	ErrMemoryBudget = errors.New("plg: memory budget exceeded")
+	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, or whose MemoryLimit is under
+	// one 64 KiB page or over 4 GiB.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
 	// ErrInvalidManifest reports a plugin directory of an [FSStorage] whose plugin.json is missing or malformed.
 	ErrInvalidManifest = errors.New("plg: invalid plugin.json")

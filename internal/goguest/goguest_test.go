@@ -207,13 +207,16 @@ func call(t *testing.T, guest *goguest.Guest, method string, args ...any) result
 	return parse(t, guest.Call(methodIndex(t, method), send(guest, encode(t, args...))))
 }
 
-func TestCallsReachThePlugin(t *testing.T) {
-	t.Parallel()
+// The tests interpreting plugins run serially (//nolint:paralleltest below): every one of them interprets the
+// testcontract package, whose Tree type is recursive, and yaegi v0.16.1 builds a recursive struct type by
+// patching the field types of a reflect.StructOf type in place (unsafe2.SetFieldType). reflect caches StructOf
+// types process-wide, so two interpreters in parallel tests patch the same type: a data race in yaegi, not in
+// plg. In production each interpreter runs alone in its own wasm instance.
 
+//nolint:paralleltest // interprets testcontract: serial, see above
+func TestCallsReachThePlugin(t *testing.T) {
 	for _, plugin := range []string{"fooer", "fooermain"} {
 		t.Run(plugin, func(t *testing.T) {
-			t.Parallel()
-
 			guest := loadOK(t, plugin)
 			res := call(t, guest, "Foo", "  bob ")
 			require.Equal(t, wire.StatusOK, res.status, res.msg)
@@ -230,9 +233,8 @@ func TestCallsReachThePlugin(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestPluginStateLivesInTheInstance(t *testing.T) {
-	t.Parallel()
-
 	guest := loadOK(t, "fooer")
 	for want := 1; want <= 3; want++ {
 		res := call(t, guest, "Count")
@@ -245,9 +247,8 @@ func TestPluginStateLivesInTheInstance(t *testing.T) {
 	assert.Equal(t, 1, decode(t, res.body, 0)[0], "each guest runs its own Create")
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestScalarsRoundTrip(t *testing.T) {
-	t.Parallel()
-
 	guest := loadOK(t, "fooer")
 
 	tests := []struct {
@@ -291,9 +292,9 @@ func TestScalarsRoundTrip(t *testing.T) {
 
 // A result the plugin computes beyond ±2^53 cannot cross: the call fails with StatusConvert naming the
 // result, and the instance keeps serving.
+//
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestResultsBeyondTwoToThe53DoNotCross(t *testing.T) {
-	t.Parallel()
-
 	guest := loadOK(t, "fooer")
 
 	res := call(t, guest, "Scalars", false, wire.MaxSafeInt, int8(0), int16(0), int32(0), int64(0), uint(0),
@@ -307,9 +308,8 @@ func TestResultsBeyondTwoToThe53DoNotCross(t *testing.T) {
 	assert.Equal(t, 3, decode(t, res.body, 0)[0])
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestNamedScalarCrossesByKind(t *testing.T) {
-	t.Parallel()
-
 	guest := loadOK(t, "fooer")
 
 	for _, tc := range []struct {
@@ -326,9 +326,8 @@ func TestNamedScalarCrossesByKind(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestPluginErrorsAndPanics(t *testing.T) {
-	t.Parallel()
-
 	guest := loadOK(t, "fooer")
 
 	res := call(t, guest, "Fail", "boom")
@@ -344,9 +343,8 @@ func TestPluginErrorsAndPanics(t *testing.T) {
 	assert.Contains(t, res.msg, "plugin panicked on purpose")
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestLoadFailures(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		plugin string
 		msg    []string
@@ -363,8 +361,6 @@ func TestLoadFailures(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.plugin, func(t *testing.T) {
-			t.Parallel()
-
 			guest, res := load(t, testdataPlugin(t, tc.plugin))
 			assert.Equal(t, tc.status, res.status, res.msg)
 
@@ -393,12 +389,9 @@ func importingPlugin(body string, imports ...string) map[string]string {
 	return map[string]string{"p.go": src.String()}
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestStdlibAllowlist(t *testing.T) {
-	t.Parallel()
-
 	t.Run("allowed", func(t *testing.T) {
-		t.Parallel()
-
 		var stdout bytes.Buffer
 
 		// Every package of the shared allowlist (internal/goallow) is importable.
@@ -413,8 +406,6 @@ func TestStdlibAllowlist(t *testing.T) {
 
 	for _, pkg := range []string{"os", "os/exec", "net", "net/http/httputil", "syscall", "unsafe", "reflect", "io/fs"} {
 		t.Run(pkg, func(t *testing.T) {
-			t.Parallel()
-
 			_, res := load(t, importingPlugin("", pkg))
 			assert.Equal(t, wire.StatusLoad, res.status)
 			assert.Contains(t, res.msg, `"`+pkg+`"`)
@@ -424,9 +415,9 @@ func TestStdlibAllowlist(t *testing.T) {
 
 // A plugin may implement part of the interface by embedding it, as in compiled Go: its own methods work and
 // the others panic only when called (yaegi cannot bind them; the dispatcher forwards them instead).
+//
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestPartialImplementationPanicsOnlyWhenCalled(t *testing.T) {
-	t.Parallel()
-
 	guest, res := load(t, map[string]string{"p.go": `package p
 
 import (
@@ -451,9 +442,8 @@ func Create() (testcontract.Fooer, error) { return partial{}, nil }
 	assert.Equal(t, wire.StatusPanic, res.status, "the unimplemented method panics on the call, like Go")
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestNetHTTPIsClientOnly(t *testing.T) {
-	t.Parallel()
-
 	for name, body := range map[string]string{
 		"client":         "_ = http.DefaultClient.Get\n\t_, _ = http.NewRequest(http.MethodGet, \"http://a/\", nil)",
 		"ListenAndServe": "_ = http.ListenAndServe",
@@ -461,8 +451,6 @@ func TestNetHTTPIsClientOnly(t *testing.T) {
 		"ServeMux":       "_ = http.NewServeMux",
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
 			plugin := importingPlugin(body, "net/http")
 			plugin["p.go"] = strings.Replace(plugin["p.go"], "\t_ \"net/http\"\n", "\t\"net/http\"\n", 1)
 
@@ -478,23 +466,18 @@ func TestNetHTTPIsClientOnly(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestABIViolations(t *testing.T) {
-	t.Parallel()
-
 	root := gopath(t, testdataPlugin(t, "fooer"))
 	payload := initPayload(t, root, methodNames())
 
 	t.Run("init larger than the input buffer", func(t *testing.T) {
-		t.Parallel()
-
 		guest := goguest.New(nil, nil)
 		res := parse(t, guest.Init(send(guest, payload)+1))
 		assert.Equal(t, wire.StatusABI, res.status)
 	})
 
 	t.Run("malformed init payload", func(t *testing.T) {
-		t.Parallel()
-
 		guest := goguest.New(nil, nil)
 		res := parse(t, guest.Init(send(guest, payload[:len(payload)-1])))
 		assert.Equal(t, wire.StatusABI, res.status)
@@ -502,8 +485,6 @@ func TestABIViolations(t *testing.T) {
 	})
 
 	t.Run("unknown method in payload", func(t *testing.T) {
-		t.Parallel()
-
 		guest := goguest.New(nil, nil)
 		res := parse(t, guest.Init(send(guest, initPayload(t, root, []string{"Missing"}))))
 		assert.Equal(t, wire.StatusABI, res.status)
@@ -563,9 +544,9 @@ func TestAllocReusesTheInputBuffer(t *testing.T) {
 
 // TestRejectsADispatcherItDoesNotAgreeWith models a host whose dispatcher does not match the guest's ABI: the
 // guest reports it instead of crashing.
+//
+//nolint:paralleltest // interprets testcontract: serial, see above
 func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
-	t.Parallel()
-
 	const header = "package dispatch\n\nimport (\n\t\"context\"\n\n\t_ \"plg.local/plugin\"\n)\n\n" +
 		"var _ context.Context\n\n"
 
@@ -602,8 +583,6 @@ func TestRejectsADispatcherItDoesNotAgreeWith(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
 			root := gopathWith(t, testdataPlugin(t, "fooer"), tc.dispatcher)
 			guest := goguest.New(nil, nil)
 			res := parse(t, guest.Init(send(guest, initPayload(t, root, []string{"Foo"}))))

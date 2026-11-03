@@ -10,12 +10,12 @@
 
 **Blocked by:** 02 (Tracer bullet)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 64 goroutines × thousands of calls against a pool pass under `go test -race` with correct results
-- [ ] A Go plugin in an infinite loop is stopped at the ctx deadline; the next call succeeds on a fresh instance
-- [ ] A plugin allocating past its limit fails that call; other plugins and instances keep working
-- [ ] Register fails when the worst-case memory exceeds WithMemoryBudget; pools never exceed the budget at runtime
-- [ ] After discards, the pool returns to min in the background without callers creating instances
-- [ ] A plugin returning an ordinary error keeps its instance (verified by instance identity)
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] 64 goroutines × thousands of calls against a pool pass under `go test -race` with correct results
+- [x] A Go plugin in an infinite loop is stopped at the ctx deadline; the next call succeeds on a fresh instance
+- [x] A plugin allocating past its limit fails that call; other plugins and instances keep working
+- [x] Register fails when the worst-case memory exceeds WithMemoryBudget; pools never exceed the budget at runtime
+- [x] After discards, the pool returns to min in the background without callers creating instances
+- [x] A plugin returning an ordinary error keeps its instance (verified by instance identity)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

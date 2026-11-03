@@ -32,18 +32,20 @@ import (
 	"github.com/heynemann/go-plg/internal/guestreg"
 )
 
-// goMemoryLimit caps the memory of each Go plugin instance; yaegi alone takes about 29 MiB.
+// goMemoryLimit is the default memory limit of each Go plugin instance; yaegi alone takes about 29 MiB.
 const goMemoryLimit = 128 << 20
 
-// Container holds registered plugins and the WebAssembly runtime that runs them. Create it with [New] and
-// release it with [Container.Close].
+// Container holds registered plugins and the WebAssembly runtimes that run them: one per distinct per-instance
+// memory limit, all sharing the container's compilation cache. Create it with [New] and release it with
+// [Container.Close].
 type Container struct {
 	engine    *engine.Engine
-	runtime   *engine.Runtime
 	logger    *slog.Logger
-	modules   *xsync.Map[Language, *compiledGuest]
+	runtimes  *xsync.Map[uint64, *engine.Runtime] // by memory limit
+	modules   *xsync.Map[moduleKey, *compiledGuest]
 	names     *xsync.Map[string, bool] // registered (or registering) names
 	catalogue atomic.Pointer[snapshot]
+	budget    memoryBudget
 	closed    atomic.Bool
 }
 
@@ -54,24 +56,22 @@ func New(opts ...Option) *Container {
 		opt(&cfg)
 	}
 
-	ctx := context.Background()
-	eng := engine.New(ctx, engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir})
-
 	ctr := &Container{
-		engine:  eng,
-		runtime: eng.NewRuntime(ctx, engine.RuntimeOptions{MemoryLimit: goMemoryLimit}),
-		logger:  cfg.logger,
-		modules: xsync.NewMap[Language, *compiledGuest](),
-		names:   xsync.NewMap[string, bool](),
+		engine:   engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
+		logger:   cfg.logger,
+		runtimes: xsync.NewMap[uint64, *engine.Runtime](),
+		modules:  xsync.NewMap[moduleKey, *compiledGuest](),
+		names:    xsync.NewMap[string, bool](),
+		budget:   memoryBudget{total: cfg.memoryBudget},
 	}
 	ctr.catalogue.Store(&snapshot{})
 
 	return ctr
 }
 
-// Close stops serving plugins and releases the runtime. It waits on ctx for calls in flight to finish; calls
-// still running when ctx ends are stopped. Afterwards Get fails with [ErrClosed], and so do calls through
-// plugins obtained earlier. Closing a closed container does nothing.
+// Close stops serving plugins and their refill goroutines, and releases the runtimes. It waits on ctx for calls
+// in flight to finish; calls still running when ctx ends are stopped. Afterwards Get fails with [ErrClosed],
+// and so do calls through plugins obtained earlier. Closing a closed container does nothing.
 func (c *Container) Close(ctx context.Context) error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
@@ -86,7 +86,11 @@ func (c *Container) Close(ctx context.Context) error {
 		plug.http.Close()
 	}
 
-	errs = append(errs, c.runtime.Close(ctx), c.engine.Close(ctx))
+	for _, rt := range c.runtimes.All() {
+		errs = append(errs, rt.Close(ctx))
+	}
+
+	errs = append(errs, c.engine.Close(ctx))
 
 	err := errors.Join(errs...)
 	if err != nil {
@@ -96,7 +100,28 @@ func (c *Container) Close(ctx context.Context) error {
 	return nil
 }
 
-// compiledGuest is a guest module compiled once per container, by the first Register that needs it. done is
+// runtime returns the container's runtime for instances limited to limit bytes, creating it on first use.
+func (c *Container) runtime(ctx context.Context, limit uint64) (*engine.Runtime, error) {
+	rt, _ := c.runtimes.LoadOrCompute(limit, func() (*engine.Runtime, bool) {
+		return c.engine.NewRuntime(ctx, engine.RuntimeOptions{MemoryLimit: limit}), false
+	})
+
+	// Close sets closed before closing the runtimes it finds: one created after that is closed here (closing
+	// a runtime twice is harmless).
+	if c.closed.Load() {
+		return nil, errors.Join(ErrClosed, rt.Close(ctx))
+	}
+
+	return rt, nil
+}
+
+// moduleKey identifies a compiled guest module: one per language and runtime.
+type moduleKey struct {
+	lang  Language
+	limit uint64
+}
+
+// compiledGuest is a guest module compiled once per runtime, by the first Register that needs it. done is
 // closed once mod or err is set.
 type compiledGuest struct {
 	mod  *engine.Module
@@ -104,15 +129,21 @@ type compiledGuest struct {
 	done chan struct{}
 }
 
-// module returns the container's compiled module of guest, compiling it on first use. Concurrent callers wait
-// for one compilation; a failed one is forgotten, so a later call retries.
-func (c *Container) module(ctx context.Context, lang Language, guest guestreg.Guest) (*engine.Module, error) {
+// module returns the guest's module compiled for the runtime of instances limited to limit bytes, compiling it
+// on first use. Concurrent callers wait for one compilation; a failed one is forgotten, so a later call
+// retries. Every runtime compiles through the container's compilation cache, which holds the guest's machine
+// code once: compiling it for another runtime only decodes the module again.
+func (c *Container) module(ctx context.Context, lang Language, guest guestreg.Guest, limit uint64) (
+	*engine.Module, error,
+) {
+	key := moduleKey{lang: lang, limit: limit}
+
 	for {
 		mine := &compiledGuest{done: make(chan struct{})}
 
-		entry, loaded := c.modules.LoadOrStore(lang, mine)
+		entry, loaded := c.modules.LoadOrStore(key, mine)
 		if !loaded {
-			return c.compile(ctx, lang, guest, mine)
+			return c.compile(ctx, key, guest, mine)
 		}
 
 		select {
@@ -127,20 +158,37 @@ func (c *Container) module(ctx context.Context, lang Language, guest guestreg.Gu
 	}
 }
 
-func (c *Container) compile(ctx context.Context, lang Language, guest guestreg.Guest, entry *compiledGuest) (
+func (c *Container) compile(ctx context.Context, key moduleKey, guest guestreg.Guest, entry *compiledGuest) (
 	*engine.Module, error,
 ) {
 	defer close(entry.done)
 
-	wasm, err := guest.Wasm()
-	if err == nil {
-		entry.mod, err = c.runtime.Compile(ctx, string(lang), wasm)
+	rt, err := c.runtime(ctx, key.limit)
+	if err != nil {
+		entry.err = err
+	} else {
+		entry.mod, entry.err = compileGuest(ctx, rt, key.lang, guest)
 	}
 
-	if err != nil {
-		entry.err = fmt.Errorf("loading the %s guest: %w", lang, err)
-		c.modules.Delete(lang)
+	if entry.err != nil {
+		c.modules.Delete(key)
 	}
 
 	return entry.mod, entry.err
+}
+
+func compileGuest(ctx context.Context, rt *engine.Runtime, lang Language, guest guestreg.Guest) (
+	*engine.Module, error,
+) {
+	wasm, err := guest.Wasm()
+	if err == nil {
+		var mod *engine.Module
+
+		mod, err = rt.Compile(ctx, string(lang), wasm)
+		if err == nil {
+			return mod, nil
+		}
+	}
+
+	return nil, fmt.Errorf("loading the %s guest: %w", lang, err)
 }

@@ -33,10 +33,10 @@ type lookalike interface {
 
 // newContainer returns a container on the default on-disk compilation cache, so only the first test run on a
 // machine compiles the Go guest cold.
-func newContainer(tb testing.TB) *plg.Container {
+func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	tb.Helper()
 
-	ctr := plg.New()
+	ctr := plg.New(opts...)
 
 	tb.Cleanup(func() { assert.NoError(tb, ctr.Close(context.Background())) })
 
@@ -62,11 +62,13 @@ func goStorage(tb testing.TB, name string, dirs map[string]string) *plg.MemorySt
 	return store
 }
 
-func registerFooers(tb testing.TB, ctr *plg.Container, name string, dirs map[string]string) {
+func registerFooers(tb testing.TB, ctr *plg.Container, name string, dirs map[string]string,
+	opts ...plg.RegisterOption,
+) {
 	tb.Helper()
 
-	err := plg.Register[testcontract.Fooer](tb.Context(), ctr, name, plg.WithStorage(goStorage(tb, name, dirs)))
-	require.NoError(tb, err)
+	opts = append(opts, plg.WithStorage(goStorage(tb, name, dirs)))
+	require.NoError(tb, plg.Register[testcontract.Fooer](tb.Context(), ctr, name, opts...))
 }
 
 // getFooer returns the plugin with the given key.
@@ -82,11 +84,11 @@ func getFooer(tb testing.TB, ctr *plg.Container, key string) testcontract.Fooer 
 }
 
 // fooerContainer returns a container with the "fooer" name registered for the given plugins.
-func fooerContainer(tb testing.TB, dirs map[string]string) *plg.Container {
+func fooerContainer(tb testing.TB, dirs map[string]string, opts ...plg.RegisterOption) *plg.Container {
 	tb.Helper()
 
 	ctr := newContainer(tb)
-	registerFooers(tb, ctr, "fooer", dirs)
+	registerFooers(tb, ctr, "fooer", dirs, opts...)
 
 	return ctr
 }
@@ -175,7 +177,9 @@ func TestCallsReachThePluginThroughItsInterface(t *testing.T) {
 func TestInstanceStateLivesAcrossCalls(t *testing.T) {
 	t.Parallel()
 
-	ref := getFooer(t, fooerContainer(t, map[string]string{"ref": "fooer"}), "fooer/ref")
+	ctr := fooerContainer(t, map[string]string{"ref": "fooer"})
+	ref := getFooer(t, ctr, "fooer/ref")
+	served := instanceID(t, ctr, "fooer/ref")
 
 	for want := 1; want <= 3; want++ {
 		got, err := ref.Count(t.Context())
@@ -184,16 +188,19 @@ func TestInstanceStateLivesAcrossCalls(t *testing.T) {
 	}
 
 	require.Error(t, ref.Fail(t.Context(), "an ordinary error"))
+	assert.Equal(t, served, instanceID(t, ctr, "fooer/ref"), "a plugin error keeps the instance")
 
 	got, err := ref.Count(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, 4, got, "a plugin error keeps the instance")
+	assert.Equal(t, 4, got, "and its state")
 }
 
 func TestPluginPanicDiscardsTheInstance(t *testing.T) {
 	t.Parallel()
 
-	ref := getFooer(t, fooerContainer(t, map[string]string{"ref": "fooer"}), "fooer/ref")
+	ctr := fooerContainer(t, map[string]string{"ref": "fooer"})
+	ref := getFooer(t, ctr, "fooer/ref")
+	served := instanceID(t, ctr, "fooer/ref")
 
 	n, err := ref.Count(t.Context())
 	require.NoError(t, err)
@@ -202,35 +209,35 @@ func TestPluginPanicDiscardsTheInstance(t *testing.T) {
 	err = ref.Fail(t.Context(), "panic")
 	require.ErrorIs(t, err, plg.ErrCall)
 	require.ErrorContains(t, err, "plugin panicked on purpose")
+	assert.NotEqual(t, served, instanceID(t, ctr, "fooer/ref"))
 
 	n, err = ref.Count(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "the next call runs on a fresh instance, with a fresh Create")
 }
 
-func TestDeadlineStopsTheCallAndDiscardsTheInstance(t *testing.T) {
+func TestDeadlineStopsAnInfiniteLoopAndDiscardsTheInstance(t *testing.T) {
 	t.Parallel()
 
-	ref := getFooer(t, fooerContainer(t, map[string]string{"ref": "fooer"}), "fooer/ref")
+	ctr := fooerContainer(t, map[string]string{"hog": "hog"}, plg.WithPool(1, 1))
+	hog := getFooer(t, ctr, "fooer/hog")
+	served := instanceID(t, ctr, "fooer/hog")
 
-	n, err := ref.Spin(t.Context(), 1000)
-	require.NoError(t, err)
-	require.Equal(t, 1000, n)
-
-	n, err = ref.Count(t.Context())
+	n, err := hog.Count(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err = ref.Spin(ctx, maxSafeInt) // never finishes on its own
+	err = hog.Fail(ctx, "loop") // for {}
 	require.ErrorIs(t, err, plg.ErrCall)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the guest was stopped preemptively")
 
-	n, err = ref.Count(t.Context())
+	n, err = hog.Count(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, 1, n, "the stopped instance was replaced by a fresh one")
+	assert.Equal(t, 1, n, "the next call succeeds, on a fresh instance")
+	assert.NotEqual(t, served, instanceID(t, ctr, "fooer/hog"))
 }
 
 func TestCallContext(t *testing.T) {
@@ -254,10 +261,10 @@ func TestCallContext(t *testing.T) {
 	assert.Equal(t, 1, n, "rejected calls never reached the instance")
 }
 
-func TestCallsWaitOnTheirContextWhileTheInstanceIsBusy(t *testing.T) {
+func TestCallsWaitOnTheirContextWhileThePoolIsFull(t *testing.T) {
 	t.Parallel()
 
-	ctr := fooerContainer(t, map[string]string{"ref": "fooer"})
+	ctr := fooerContainer(t, map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
 	ref := getFooer(t, ctr, "fooer/ref")
 
 	release, err := plg.Hold(t.Context(), ctr, "fooer/ref")
@@ -480,14 +487,14 @@ func TestAllIteratesInKeyOrderOverAFixedSnapshot(t *testing.T) {
 	}
 }
 
-// TestConcurrentGetAndCalls runs Get, All, calls and Registers concurrently. With one instance per plugin,
+// TestConcurrentGetAndCalls runs Get, All, calls and Registers concurrently. With a pool of one instance,
 // calls are serialized: the Count results are exactly 1..n, each seen once.
 func TestConcurrentGetAndCalls(t *testing.T) {
 	t.Parallel()
 
 	const workers, rounds = 8, 10
 
-	ctr := fooerContainer(t, map[string]string{"ref": "fooer"})
+	ctr := fooerContainer(t, map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
 	counts := make(chan int, workers*rounds)
 	errs := make(chan error, workers)
 
@@ -734,22 +741,4 @@ func BenchmarkCallGo(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-}
-
-// BenchmarkCallGoParallel contends for the plugin's single instance.
-func BenchmarkCallGoParallel(b *testing.B) {
-	ref := getFooer(b, benchContainer(b), "fooer/ref")
-	ctx := b.Context()
-
-	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_, err := ref.Foo(ctx, "bench")
-			if err != nil {
-				b.Error(err)
-
-				return
-			}
-		}
-	})
 }

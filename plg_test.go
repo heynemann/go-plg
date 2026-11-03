@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -400,6 +401,24 @@ func TestRegisterArguments(t *testing.T) {
 				{Key: "k", Language: "cobol", Entrypoint: "main.cbl"},
 			}})},
 		},
+		{name: "pool-empty", opts: withEmpty(plg.WithPool(0, 1)), want: plg.ErrInvalidOption, msg: "WithPool(0, 1)"},
+		{name: "pool-inverted", opts: withEmpty(plg.WithPool(3, 2)), want: plg.ErrInvalidOption, msg: "(3, 2)"},
+		{name: "pool-huge", opts: withEmpty(plg.WithPool(1, 4097)), want: plg.ErrInvalidOption, msg: "<= 4096"},
+		{name: "limit-zero", opts: withEmpty(plg.WithMemoryLimit(0)), want: plg.ErrInvalidOption, msg: "(0)"},
+		{name: "limit-small", opts: withEmpty(plg.WithMemoryLimit(64<<10 - 1)), want: plg.ErrInvalidOption},
+		{name: "limit-huge", opts: withEmpty(plg.WithMemoryLimit(4<<30 + 1)), want: plg.ErrInvalidOption},
+		{
+			name: "desc-limit-small", want: plg.ErrInvalidDescriptor, msg: `"k" with a memory limit of 65535 bytes`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
+				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 64<<10 - 1},
+			}})},
+		},
+		{
+			name: "desc-limit-huge", want: plg.ErrInvalidDescriptor, msg: "4294967297 bytes",
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
+				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 4<<30 + 1},
+			}})},
+		},
 	}
 
 	ctr := newUnitContainer(t)
@@ -419,6 +438,33 @@ func TestRegisterArguments(t *testing.T) {
 			require.NoError(t, plg.Register[pinger](t.Context(), ctr, tc.name, emptyStorage()),
 				"a failed Register leaves its name free")
 		})
+	}
+}
+
+func withEmpty(opt plg.RegisterOption) []plg.RegisterOption {
+	return []plg.RegisterOption{emptyStorage(), opt}
+}
+
+// TestRegisterAcceptsTheLimitsOfPoolsAndMemory registers at each bound: the options are accepted, and so are
+// descriptor limits, whose plugin then fails only for its unsupported language, checked after the descriptor.
+func TestRegisterAcceptsTheLimitsOfPoolsAndMemory(t *testing.T) {
+	t.Parallel()
+
+	ctr := newUnitContainer(t)
+
+	for i, opt := range []plg.RegisterOption{
+		plg.WithPool(1, 1), plg.WithPool(4096, 4096), plg.WithMemoryLimit(64 << 10), plg.WithMemoryLimit(4 << 30),
+	} {
+		require.NoError(t, plg.Register[pinger](t.Context(), ctr, "opt"+strconv.Itoa(i), withEmpty(opt)...))
+	}
+
+	for _, limit := range []uint64{64 << 10, 4 << 30} {
+		store := listStorage{name: "s", descs: []plg.Descriptor{
+			{Key: "k", Language: "cobol", Entrypoint: "main.cbl", MemoryLimit: limit},
+		}}
+
+		err := plg.Register[pinger](t.Context(), ctr, "desc"+strconv.FormatUint(limit, 10), plg.WithStorage(store))
+		require.ErrorIs(t, err, plg.ErrUnsupportedLanguage)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +23,10 @@ import (
 //
 // It fails if T breaks the interface contract (every method takes a context.Context first, returns an error
 // last and uses only data types) with [ErrInvalidInterface], if T has no [Contract] with [ErrNoContract], if
-// name is already registered with [ErrDuplicateName], if a plugin's language guest is not linked into the
-// program with [ErrGuestNotLinked], and if a plugin fails to load (its Create included) with [ErrLoad].
+// name is already registered with [ErrDuplicateName], if an option is invalid with [ErrInvalidOption], if a
+// plugin's language guest is not linked into the program with [ErrGuestNotLinked], if the plugins' worst-case
+// memory does not fit the container's budget with [ErrMemoryBudget], and if a plugin fails to load (the Create
+// of any of its first instances included) with [ErrLoad].
 func Register[T any](ctx context.Context, c *Container, name string, opts ...RegisterOption) error {
 	return c.register(ctx, reflect.TypeFor[T](), name, opts)
 }
@@ -65,8 +66,8 @@ type registration struct {
 	name  string
 }
 
-// prepare checks a Register call's arguments and returns the interface's contract, the Register options and
-// the HTTP client of its policy.
+// prepare checks a Register call's arguments and returns the interface's contract, the Register options (with
+// their defaults) and the HTTP client of its policy.
 func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (*registration, error) {
 	if c.closed.Load() {
 		return nil, ErrClosed
@@ -86,14 +87,9 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
-	cfg := &registerConfig{}
-
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	if len(cfg.storages) == 0 || slices.Contains(cfg.storages, nil) {
-		return nil, fmt.Errorf("%w: register %s with at least one non-nil WithStorage", ErrNoStorage, name)
+	cfg, err := registerOptions(name, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := httpClient(cfg.http, c.logger)
@@ -109,6 +105,7 @@ type source struct {
 	storage Storage
 	guest   guestreg.Guest
 	desc    Descriptor
+	limit   uint64 // per-instance memory limit, whole pages
 }
 
 // listPlugins lists the storages and checks their descriptors: every key and entrypoint and that no key is
@@ -136,10 +133,30 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 			return nil, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storage.Name(), err)
 		}
 
+		src.limit = c.instanceLimit(ctx, name, cfg, &src)
 		srcs = append(srcs, src)
 	}
 
 	return srcs, nil
+}
+
+// instanceLimit returns a plugin's per-instance memory limit: the Register's, lowered by the descriptor's.
+// A descriptor asking for more than the Register allows gets the Register's limit, with a warning.
+func (c *Container) instanceLimit(ctx context.Context, name string, cfg *registerConfig, src *source) uint64 {
+	asked := src.desc.MemoryLimit
+	if asked == 0 {
+		return cfg.memoryLimit
+	}
+
+	if asked > cfg.memoryLimit {
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
+			slog.String("key", name+"/"+src.desc.Key), slog.Uint64("asked", asked),
+			slog.Uint64("limit", cfg.memoryLimit))
+
+		return cfg.memoryLimit
+	}
+
+	return wholePages(asked)
 }
 
 // listStorages lists every storage, checking that each descriptor has a key and an entrypoint and that no key
@@ -156,9 +173,9 @@ func listStorages(ctx context.Context, storages []Storage) ([]source, error) {
 		}
 
 		for _, desc := range descs {
-			if desc.Key == "" || desc.Entrypoint == "" {
-				return nil, fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint",
-					ErrInvalidDescriptor, store.Name(), desc)
+			err = checkDescriptor(store, &desc)
+			if err != nil {
+				return nil, err
 			}
 
 			if prev, dup := owner[desc.Key]; dup {
@@ -174,9 +191,31 @@ func listStorages(ctx context.Context, storages []Storage) ([]source, error) {
 	return srcs, nil
 }
 
-// loadAll loads every listed plugin; on failure it closes the ones already loaded.
+// checkDescriptor checks that a descriptor has a key and an entrypoint, and a memory limit from one page to
+// 4 GiB if any.
+func checkDescriptor(store Storage, desc *Descriptor) error {
+	if desc.Key == "" || desc.Entrypoint == "" {
+		return fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint", ErrInvalidDescriptor,
+			store.Name(), *desc)
+	}
+
+	if desc.MemoryLimit != 0 && (desc.MemoryLimit < engine.PageSize || desc.MemoryLimit > maxMemoryLimit) {
+		return fmt.Errorf("%w: storage %s lists %q with a memory limit of %d bytes, not from one %d-byte page "+
+			"to 4 GiB", ErrInvalidDescriptor, store.Name(), desc.Key, desc.MemoryLimit, engine.PageSize)
+	}
+
+	return nil
+}
+
+// loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
+// it closes the ones already loaded and gives the reservation back.
 func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, error) {
 	srcs, err := c.listPlugins(ctx, reg.name, reg.cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	reserved, err := c.reserveMemory(reg.name, reg.cfg, srcs)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +228,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		plug, err := c.load(ctx, reg, key, &srcs[i])
 		if err != nil {
 			c.closePlugins(ctx, plugins)
+			c.budget.unreserve(reserved)
 
 			return nil, fmt.Errorf("%w: %s (storage %s): %w", ErrLoad, key, srcs[i].storage.Name(), err)
 		}
@@ -199,7 +239,35 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 	return plugins, nil
 }
 
-// load opens a plugin, starts its first instance (running its Create) and binds an adapter to it.
+// reserveMemory reserves the worst case of every plugin, pool maximum × its memory limit, in the container's
+// budget, and returns the bytes reserved.
+func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []source) (uint64, error) {
+	maxSize := uint64(cfg.poolMax) //nolint:gosec // G115: settle validated 1 <= poolMax <= maxPoolSize
+
+	var reserved, needed uint64
+
+	for i := range srcs {
+		needed += maxSize * srcs[i].limit
+	}
+
+	for i := range srcs {
+		worst := maxSize * srcs[i].limit
+		if !c.budget.reserve(worst) {
+			c.budget.unreserve(reserved)
+
+			return 0, fmt.Errorf("%w: %s needs up to %d bytes (a pool of up to %d instances per plugin), "+
+				"and %d of the %d-byte budget are reserved by other plugins", ErrMemoryBudget, name, needed,
+				maxSize, c.budget.reserved.Load(), c.budget.total)
+		}
+
+		reserved += worst
+	}
+
+	return reserved, nil
+}
+
+// load opens a plugin, starts the minimum instances of its pool (running Create in each) and binds an adapter
+// to it.
 func (c *Container) load(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
 	start := time.Now()
 	contr := reg.contr
@@ -221,7 +289,7 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 		return nil, err
 	}
 
-	mod, err := c.module(ctx, src.desc.Language, src.guest)
+	mod, err := c.module(ctx, src.desc.Language, src.guest, src.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -230,22 +298,30 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 		Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
 		HTTP:   reg.http.Handler(key),
 	}
-	spawn := func(ctx context.Context) (*engine.Instance, error) {
-		return startGo(ctx, mod, opts, contr.payload)
-	}
+	instances := newPool(poolConfig{
+		logger: c.logger,
+		spawn: func(ctx context.Context) (instance, error) {
+			return startGo(ctx, mod, opts, contr.payload)
+		},
+		budget:  &c.budget,
+		key:     key,
+		limit:   src.limit,
+		minSize: reg.cfg.poolMin,
+		maxSize: reg.cfg.poolMax,
+	})
 
-	first, err := spawn(ctx)
+	err = instances.warm(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	plug := &plugin{key: key, iface: contr.iface, http: reg.http}
-	plug.pool = newPool(key, first, spawn, c.logger)
+	plug := &plugin{key: key, iface: contr.iface, http: reg.http, pool: instances}
 	plug.value = contr.bind(plug) //nolint:contextcheck // each adapter call takes the context it is passed
 
 	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key),
 		slog.String("language", string(src.desc.Language)), slog.String("version", src.desc.Version),
-		slog.Duration("duration", time.Since(start)))
+		slog.Uint64("memory_limit", src.limit), slog.Int("pool_min", reg.cfg.poolMin),
+		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
 
 	return plug, nil
 }

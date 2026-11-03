@@ -72,9 +72,9 @@ func grown(name string, depth int) *testcontract.Tree {
 
 // TestDataTypesCrossTheGuest sends every data type through the interpreted plugin and back: the guest
 // decodes into and encodes from the types yaegi creates for the contract.
+//
+//nolint:paralleltest // interprets testcontract: serial, see goguest_test.go
 func TestDataTypesCrossTheGuest(t *testing.T) {
-	t.Parallel()
-
 	guest := loadShaper(t)
 	sample := testcontract.SampleOrder()
 	before1970 := time.Date(1969, time.December, 31, 23, 59, 59, 500, time.UTC)
@@ -136,9 +136,9 @@ func TestDataTypesCrossTheGuest(t *testing.T) {
 
 // TestInspectSeesWhatTheHostSent checks the arguments as the plugin code sees them, independently of how they
 // come back: nil and empty collections, nil map values, a skipped field and the time's instant and zone.
+//
+//nolint:paralleltest // interprets testcontract: serial, see goguest_test.go
 func TestInspectSeesWhatTheHostSent(t *testing.T) {
-	t.Parallel()
-
 	guest := loadShaper(t)
 	zoned := time.Date(2026, time.March, 1, 12, 0, 0, 42, time.FixedZone("CET", 3600))
 
@@ -178,9 +178,9 @@ func TestInspectSeesWhatTheHostSent(t *testing.T) {
 
 // TestNestedResultBeyondTwoToThe53 has the plugin push a nested field past 2^53: the failure names the result
 // and the field, and the instance keeps serving.
+//
+//nolint:paralleltest // interprets testcontract: serial, see goguest_test.go
 func TestNestedResultBeyondTwoToThe53(t *testing.T) {
-	t.Parallel()
-
 	guest := loadShaper(t)
 
 	res := callShaper(t, guest, "Bump", testcontract.SampleOrder(), wire.MaxSafeInt-1)
