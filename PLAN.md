@@ -78,15 +78,16 @@ type Storage interface {
 }
 
 type Descriptor struct {
-    Key        string   // unique within one Register call
-    Language   Language // LanguageGo | LanguageLua | LanguageTypeScript
-    Entrypoint string   // path inside the fs.FS returned by Open
-    Version    string   // change detection; empty → content hash
+    Key         string   // unique within one Register call
+    Language    Language // LanguageGo | LanguageLua | LanguageTypeScript
+    Entrypoint  string   // path inside the fs.FS returned by Open
+    Version     string   // change detection; empty → content hash
+    MemoryLimit uint64   // per-instance bytes; 0 → the Register limit, which it may only lower
 }
 ```
 
 - **Scope:** storages belong to one Register call. Every plugin they list implements that interface.
-- **Built-in storages:** memory, filesystem directory, and any `io/fs.FS`. S3 (aws-sdk-v2) and Postgres (pgx) are provided only as `examples/`.
+- **Built-in storages:** memory (`NewMemoryStorage`), filesystem directory (`NewFSStorage(dir)`), and any `io/fs.FS` (`NewFSStorageFromFS(name, fsys)`). S3 (aws-sdk-v2) and Postgres (pgx) are provided only as `examples/`.
 - **Built-in layout:** one directory per plugin containing `plugin.json` with `{"language", "entrypoint", "version"?, "memoryLimit"?}`. The key is the directory name. `memoryLimit` may only *lower* the Register limit.
 - **Multi-file plugins:** the plugin's fs.FS is mounted read-only into the guest at `/plugin`.
   - yaegi compiles the package directory.
@@ -337,3 +338,14 @@ Each milestone is implemented, tested with `go test -race`, smoke-run against re
 - **Pool (size 1):** a buffered channel of slots; a caller takes a slot (waiting on its ctx, or failing with `ErrClosed`), spawns an instance into it if it is empty, and gives it back. A broken or discarded instance is closed and its slot left empty, so the next caller spawns a fresh one with a fresh `Create`. Each slot owns a reusable argument buffer. `Close` takes every slot back (waiting on its ctx for calls in flight) and closes the instances.
 - **testcontract** gained `Spin(ctx, n)` (a deadline stops it preemptively in tests) and the corpus a `createpanics` plugin.
 - **Measured (go1.27.3, linux/amd64, 32 threads, no race detector):** `Get` 10.7 ns/op, `All` over two plugins 17.7 ns/op, both 0 allocs (parallel: ~1 ns/op); one `Foo` call into a Go plugin ≈ 244 µs/op, 10 allocs, almost all of it inside the guest (yaegi interpreting the dispatcher, the plugin and the contract code), with every protection on.
+
+### Ticket 05: filesystem and fs.FS storages with plugin.json
+
+- **API:** `NewFSStorage(dir)` (an `os.DirFS`, named `dir`) and `NewFSStorageFromFS(name, fsys)` (any `io/fs.FS`, e.g. an `embed.FS` narrowed with `fs.Sub`) both return `*FSStorage`. Register options `WithGolangPlugins`, `WithLuaPlugins`, `WithTypescriptPlugins`; constants `LanguageLua` (`"lua"`) and `LanguageTypeScript` (`"typescript"`); `Descriptor.MemoryLimit uint64` (bytes, 0 = the Register limit); sentinel `ErrInvalidManifest`.
+- **Layout:** every top-level directory is a plugin whose key is its name; top-level files and dot-prefixed entries are ignored (so `.git` or a README next to the plugins are harmless). `List` returns the plugins sorted by key; `Open` returns `fs.Sub(fsys, key)` after rejecting keys that are not a single directory name. Symlinked files are skipped, as `memfs.AddTree` skips them at load.
+- **plugin.json** is parsed with sonic configured `CaseSensitive`, `DisallowUnknownFields`, `ValidateString`, `UseUnicodeErrors`: a misspelt or wrongly cased key (`memory_limit`, `Language`) is an error instead of a silently ignored limit. `language` must be exactly `go`, `lua` or `typescript`; `entrypoint` a non-empty `fs.ValidPath`; `memoryLimit`, when present, an integer from 1 to 4 GiB (the wasm32 maximum, 65536 pages; rounding to pages is ticket 06's). Any failure, a missing plugin.json included, is `ErrInvalidManifest` naming the directory, and Register wraps it in `ErrLoad` naming the storage. Fuzzed by `FuzzFSStorageManifest` (a rejected manifest names its directory; an accepted one meets every constraint and survives re-encoding unchanged); 60 s / 7.8 M execs found nothing.
+- **Content-hash versions:** a missing `version` becomes `sha256:<hex>` over each regular file's path (relative to the plugin directory, varint-length-prefixed) and the SHA-256 of its contents, in lexical order, so it changes exactly when a file is added, removed, renamed or edited, and does not depend on the key or on the backing FS (a directory and an embed.FS of it hash the same). Register applies the same hash to an empty `Version` from any storage (memory, custom), so every loaded plugin has a version for ticket 10's change detection.
+- **Allowlist semantics:** no language option enables every language. With options, a plugin in another language (unknown ones like `cobol` included) is skipped and logged at Info with `key`, `storage` and `language` (counting it is ticket 14's metrics). Keys and duplicates are checked over every listed plugin before skipping, so enabling a language later can never turn a valid configuration into a duplicate-key error. An enabled Lua/TypeScript plugin fails Register with `ErrUnsupportedLanguage` until its guest ticket lands.
+- **Multi-file Go plugins** needed no new loading code: ticket 02 already copies the entrypoint's whole package directory into the read-only source tree; `testdata/storages/disk/multifile` (three files, entrypoint `.`) proves it end to end through a real directory.
+- **Not enforced yet:** `MemoryLimit` is parsed, validated and carried on the Descriptor only; ticket 06 applies it (it may only lower the Register limit).
+- **Measured (`BenchmarkFSStorageList`, the per-storage cost Register pays before loading, testdata tree of three plugins with one hashed):** directory 53 µs/op, 11.6 KB, 100 allocs; embed.FS 6.2 µs/op, 7.6 KB, 63 allocs. Hashing reads through one 4 KiB buffer per plugin and hides `*os.File`'s `WriteTo`, which otherwise allocates 32 KiB per file (168 KB/op before).

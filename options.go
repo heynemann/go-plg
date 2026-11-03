@@ -1,6 +1,9 @@
 package plg
 
-import "log/slog"
+import (
+	"log/slog"
+	"slices"
+)
 
 // Option configures a [Container]; pass it to [New].
 type Option func(*containerConfig)
@@ -30,7 +33,13 @@ func WithCompilationCacheDir(dir string) Option {
 type RegisterOption func(*registerConfig)
 
 type registerConfig struct {
-	storages []Storage
+	storages  []Storage
+	languages []Language // enabled languages; empty enables every language
+}
+
+// enabled reports whether the Register runs plugins in lang.
+func (c *registerConfig) enabled(lang Language) bool {
+	return len(c.languages) == 0 || slices.Contains(c.languages, lang)
 }
 
 // WithStorage adds a storage whose plugins implement the registered interface. Register needs at least one;
@@ -38,5 +47,27 @@ type registerConfig struct {
 func WithStorage(s Storage) RegisterOption {
 	return func(c *registerConfig) {
 		c.storages = append(c.storages, s)
+	}
+}
+
+// WithGolangPlugins enables Go plugins. The language options form an allowlist: without any, every language is
+// enabled; with some, plugins in the other languages are skipped (and logged) rather than failing Register.
+func WithGolangPlugins() RegisterOption {
+	return withLanguage(LanguageGo)
+}
+
+// WithLuaPlugins enables Lua plugins; see [WithGolangPlugins] for how the language options combine.
+func WithLuaPlugins() RegisterOption {
+	return withLanguage(LanguageLua)
+}
+
+// WithTypescriptPlugins enables TypeScript plugins; see [WithGolangPlugins] for how the language options combine.
+func WithTypescriptPlugins() RegisterOption {
+	return withLanguage(LanguageTypeScript)
+}
+
+func withLanguage(lang Language) RegisterOption {
+	return func(c *registerConfig) {
+		c.languages = append(c.languages, lang)
 	}
 }

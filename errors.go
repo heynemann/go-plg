@@ -26,6 +26,8 @@ var (
 	ErrNoStorage = errors.New("plg: no storage")
 	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
+	// ErrInvalidManifest reports a plugin directory of an [FSStorage] whose plugin.json is missing or malformed.
+	ErrInvalidManifest = errors.New("plg: invalid plugin.json")
 	// ErrDuplicateKey reports a plugin key listed twice by the storages of one Register call.
 	ErrDuplicateKey = errors.New("plg: duplicate plugin key")
 	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run.

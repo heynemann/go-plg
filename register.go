@@ -19,7 +19,8 @@ import (
 
 // Register loads, under name, every plugin its storages list for the interface T, and publishes them in one
 // step: each plugin's key is "<name>/<descriptor key>". It loads synchronously and fails fast: on any error
-// nothing is published.
+// nothing is published. Plugins in a language the language options ([WithGolangPlugins], …) leave out are
+// skipped and logged.
 //
 // It fails if T breaks the interface contract (every method takes a context.Context first, returns an error
 // last and uses only data types) with [ErrInvalidInterface], if T has no [Contract] with [ErrNoContract], if
@@ -30,7 +31,7 @@ func Register[T any](ctx context.Context, c *Container, name string, opts ...Reg
 }
 
 func (c *Container) register(ctx context.Context, iface reflect.Type, name string, opts []RegisterOption) error {
-	contr, storages, err := c.prepare(iface, name, opts)
+	contr, cfg, err := c.prepare(iface, name, opts)
 	if err != nil {
 		return err
 	}
@@ -39,7 +40,7 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 		return fmt.Errorf("%w: %s", ErrDuplicateName, name)
 	}
 
-	plugins, err := c.loadAll(ctx, contr, name, storages)
+	plugins, err := c.loadAll(ctx, contr, name, cfg)
 	if err == nil {
 		err = c.publish(ctx, iface, plugins)
 	}
@@ -53,8 +54,10 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 	return nil
 }
 
-// prepare checks a Register call's arguments and returns the interface's contract and the storages.
-func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (*contract, []Storage, error) {
+// prepare checks a Register call's arguments and returns the interface's contract and the Register options.
+func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (
+	*contract, *registerConfig, error,
+) {
 	if c.closed.Load() {
 		return nil, nil, ErrClosed
 	}
@@ -73,17 +76,17 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, nil, err
 	}
 
-	var cfg registerConfig
+	cfg := &registerConfig{}
 
 	for _, opt := range opts {
-		opt(&cfg)
+		opt(cfg)
 	}
 
 	if len(cfg.storages) == 0 || slices.Contains(cfg.storages, nil) {
 		return nil, nil, fmt.Errorf("%w: register %s with at least one non-nil WithStorage", ErrNoStorage, name)
 	}
 
-	return contr, cfg.storages, nil
+	return contr, cfg, nil
 }
 
 // source is a plugin a storage listed.
@@ -93,9 +96,40 @@ type source struct {
 	desc    Descriptor
 }
 
-// listPlugins lists the storages and checks their descriptors: every key and entrypoint first, then that each
-// plugin's language guest is linked.
-func listPlugins(ctx context.Context, storages []Storage) ([]source, error) {
+// listPlugins lists the storages and checks their descriptors: every key and entrypoint and that no key is
+// listed twice first, then it skips (and logs) the plugins in languages the Register did not enable and checks
+// that each remaining plugin's language guest is linked.
+func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) ([]source, error) {
+	listed, err := listStorages(ctx, cfg.storages)
+	if err != nil {
+		return nil, err
+	}
+
+	srcs := listed[:0]
+
+	for _, src := range listed {
+		if !cfg.enabled(src.desc.Language) {
+			c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin skipped: its language is not enabled",
+				slog.String("key", name+"/"+src.desc.Key), slog.String("storage", src.storage.Name()),
+				slog.String("language", string(src.desc.Language)))
+
+			continue
+		}
+
+		src.guest, err = guestFor(src.desc.Language)
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storage.Name(), err)
+		}
+
+		srcs = append(srcs, src)
+	}
+
+	return srcs, nil
+}
+
+// listStorages lists every storage, checking that each descriptor has a key and an entrypoint and that no key
+// is listed twice, whatever its language.
+func listStorages(ctx context.Context, storages []Storage) ([]source, error) {
 	var srcs []source
 
 	owner := map[string]string{} // key -> storage name
@@ -122,23 +156,14 @@ func listPlugins(ctx context.Context, storages []Storage) ([]source, error) {
 		}
 	}
 
-	for i := range srcs {
-		var err error
-
-		srcs[i].guest, err = guestFor(srcs[i].desc.Language)
-		if err != nil {
-			return nil, fmt.Errorf("plugin %s (storage %s): %w", srcs[i].desc.Key, srcs[i].storage.Name(), err)
-		}
-	}
-
 	return srcs, nil
 }
 
 // loadAll loads every listed plugin; on failure it closes the ones already loaded.
-func (c *Container) loadAll(ctx context.Context, contr *contract, name string, storages []Storage) (
+func (c *Container) loadAll(ctx context.Context, contr *contract, name string, cfg *registerConfig) (
 	[]*plugin, error,
 ) {
-	srcs, err := listPlugins(ctx, storages)
+	srcs, err := c.listPlugins(ctx, name, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +193,13 @@ func (c *Container) load(ctx context.Context, contr *contract, key string, src *
 	files, err := src.storage.Open(ctx, src.desc)
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
+	}
+
+	if src.desc.Version == "" {
+		src.desc.Version, err = contentVersion(files, ".")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	tree, err := goSourceTree(contr, files, src.desc.Entrypoint)

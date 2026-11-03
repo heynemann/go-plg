@@ -4,12 +4,12 @@
 
 **Blocked by:** 02 (Tracer bullet)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A filesystem directory of plugins and an embed.FS of plugins both load through Register
-- [ ] A multi-file Go plugin package works
-- [ ] A plugin outside the language allowlist is skipped with a log line and Register still succeeds
-- [ ] Duplicate keys across two storages fail Register with both storage names in the message
-- [ ] Malformed or missing plugin.json fails Register naming the plugin directory
-- [ ] Descriptor versions fall back to a stable content hash
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] A filesystem directory of plugins and an embed.FS of plugins both load through Register
+- [x] A multi-file Go plugin package works
+- [x] A plugin outside the language allowlist is skipped with a log line and Register still succeeds
+- [x] Duplicate keys across two storages fail Register with both storage names in the message
+- [x] Malformed or missing plugin.json fails Register naming the plugin directory
+- [x] Descriptor versions fall back to a stable content hash
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

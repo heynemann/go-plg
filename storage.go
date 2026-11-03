@@ -19,6 +19,14 @@ type Language string
 // needs the Go guest: import _ "github.com/heynemann/go-plg/guest/golang".
 const LanguageGo Language = "go"
 
+// LanguageLua is a Lua plugin. No Lua guest exists yet: Register fails every Lua plugin it does not skip with
+// [ErrUnsupportedLanguage].
+const LanguageLua Language = "lua"
+
+// LanguageTypeScript is a TypeScript plugin. No TypeScript guest exists yet: Register fails every TypeScript
+// plugin it does not skip with [ErrUnsupportedLanguage].
+const LanguageTypeScript Language = "typescript"
+
 // Storage lists plugins and opens their sources. A storage belongs to one Register call: every plugin it lists
 // implements that call's interface. Implementations must be safe for concurrent use.
 type Storage interface {
@@ -39,8 +47,12 @@ type Descriptor struct {
 	// Entrypoint is a path inside the plugin's fs.FS. For Go it names the package directory or a .go file in
 	// it; every file of that directory (and below) is loaded.
 	Entrypoint string
-	// Version identifies the plugin's revision.
+	// Version identifies the plugin's revision. When it is empty, Register uses a content hash of the
+	// plugin's files (see [FSStorage]).
 	Version string
+	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit. It can only
+	// lower that limit.
+	MemoryLimit uint64
 }
 
 // MemoryStorage is a [Storage] holding plugins in memory, for tests and for plugins a program builds itself.

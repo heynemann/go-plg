@@ -400,14 +400,24 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 		files:  fstest.MapFS{"pkg/plugin.go": {Data: src}, "pkg/secret.go": {Data: []byte("package fooer\n")}},
 		broken: "pkg/secret.go",
 	}
-	store := listStorage{name: "s", files: files, descs: []plg.Descriptor{
-		{Key: "k", Language: plg.LanguageGo, Entrypoint: "pkg/plugin.go"},
-	}}
 
-	err = plg.Register[testcontract.Fooer](t.Context(), newContainer(t), "fooer", plg.WithStorage(store))
-	require.ErrorIs(t, err, plg.ErrLoad)
-	require.ErrorIs(t, err, errStorage)
-	require.ErrorContains(t, err, "copying sources")
+	ctr := newContainer(t)
+
+	// Without a version, Register hashes the plugin's files first; with one, it copies them first.
+	for version, step := range map[string]string{"": "hashing", "v1": "copying sources"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+
+			store := listStorage{name: "s", files: files, descs: []plg.Descriptor{
+				{Key: "k", Language: plg.LanguageGo, Entrypoint: "pkg/plugin.go", Version: version},
+			}}
+
+			err := plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer"+version, plg.WithStorage(store))
+			require.ErrorIs(t, err, plg.ErrLoad)
+			require.ErrorIs(t, err, errStorage)
+			require.ErrorContains(t, err, step)
+		})
+	}
 }
 
 func TestGetErrors(t *testing.T) {
