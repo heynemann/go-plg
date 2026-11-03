@@ -34,9 +34,6 @@ import (
 	"github.com/heynemann/go-plg/internal/guestreg"
 )
 
-// goMemoryLimit is the default memory limit of each Go plugin instance; yaegi alone takes about 29 MiB.
-const goMemoryLimit = 128 << 20
-
 // closeTimeout bounds closing a generation's instances, in which each runs the plugin's optional Close: a Close
 // that hangs cannot keep a retired generation's memory forever.
 const closeTimeout = 10 * time.Second

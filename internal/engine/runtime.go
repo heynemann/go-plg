@@ -13,6 +13,8 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
@@ -41,8 +43,14 @@ type Runtime struct {
 
 // NewRuntime returns a runtime sharing the engine's compilation cache, with WASI preview 1 and the plg host
 // module available.
+//
+// Its guests may use wasm exception handling, wazero's experimental feature: the Lua guest compiles Lua's errors
+// (setjmp/longjmp) to it. wazero v1.12 reads the feature only when decoding and validating a module, and neither
+// the compiled code of modules without exception instructions nor the compilation cache key depends on it, so
+// every runtime enables it and one runtime per memory limit still serves every guest.
 func (e *Engine) NewRuntime(ctx context.Context, opts RuntimeOptions) *Runtime {
 	cfg := wazero.NewRuntimeConfig().
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
 		WithCompilationCache(e.cache).
 		WithCloseOnContextDone(true).
 		WithMemoryLimitPages(limitPages(opts.MemoryLimit))

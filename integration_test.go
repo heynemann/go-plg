@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -43,23 +41,16 @@ func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	return ctr
 }
 
-// pluginFiles returns a test plugin's source directory.
+// pluginFiles returns a Go test plugin's source directory.
 func pluginFiles(name string) fs.FS {
-	return os.DirFS(filepath.Join("testdata", "plugins", "go", name))
+	return golang().files(name)
 }
 
-// goStorage returns a memory storage holding test plugins (key -> testdata plugin directory).
+// goStorage returns a memory storage holding Go test plugins (key -> testdata plugin directory).
 func goStorage(tb testing.TB, name string, dirs map[string]string) *plg.MemoryStorage {
 	tb.Helper()
 
-	store := plg.NewMemoryStorage(name)
-
-	for key, dir := range dirs {
-		desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v1"}
-		require.NoError(tb, store.Put(desc, pluginFiles(dir)))
-	}
-
-	return store
+	return golang().storage(tb, name, dirs)
 }
 
 func registerFooers(tb testing.TB, ctr *plg.Container, name string, dirs map[string]string,
@@ -67,7 +58,15 @@ func registerFooers(tb testing.TB, ctr *plg.Container, name string, dirs map[str
 ) {
 	tb.Helper()
 
-	opts = append(opts, plg.WithStorage(goStorage(tb, name, dirs)))
+	registerFooersIn(tb, golang(), ctr, name, dirs, opts...)
+}
+
+func registerFooersIn(tb testing.TB, lang contractLanguage, ctr *plg.Container, name string, dirs map[string]string,
+	opts ...plg.RegisterOption,
+) {
+	tb.Helper()
+
+	opts = append(opts, plg.WithStorage(lang.storage(tb, name, dirs)))
 	require.NoError(tb, plg.Register[testcontract.Fooer](tb.Context(), ctr, name, opts...))
 }
 
@@ -83,12 +82,20 @@ func getFooer(tb testing.TB, ctr *plg.Container, key string) testcontract.Fooer 
 	return fooer
 }
 
-// fooerContainer returns a container with the "fooer" name registered for the given plugins.
+// fooerContainer returns a container with the "fooer" name registered for the given Go plugins.
 func fooerContainer(tb testing.TB, dirs map[string]string, opts ...plg.RegisterOption) *plg.Container {
 	tb.Helper()
 
+	return fooerContainerIn(tb, golang(), dirs, opts...)
+}
+
+// fooerContainerIn returns a container with the "fooer" name registered for the given plugins of lang.
+func fooerContainerIn(tb testing.TB, lang contractLanguage, dirs map[string]string, opts ...plg.RegisterOption,
+) *plg.Container {
+	tb.Helper()
+
 	ctr := newContainer(tb)
-	registerFooers(tb, ctr, "fooer", dirs, opts...)
+	registerFooersIn(tb, lang, ctr, "fooer", dirs, opts...)
 
 	return ctr
 }
@@ -96,103 +103,111 @@ func fooerContainer(tb testing.TB, dirs map[string]string, opts ...plg.RegisterO
 func TestCallsReachThePluginThroughItsInterface(t *testing.T) {
 	t.Parallel()
 
-	ctr := fooerContainer(t, map[string]string{"ref": "fooer", "main": "fooermain"})
-	ref, main := getFooer(t, ctr, "fooer/ref"), getFooer(t, ctr, "fooer/main")
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	t.Run("Foo", func(t *testing.T) {
-		t.Parallel()
+		ctr := fooerContainerIn(t, lang, map[string]string{"ref": "fooer", "main": "fooermain"})
+		ref, main := getFooer(t, ctr, "fooer/ref"), getFooer(t, ctr, "fooer/main")
 
-		got, err := ref.Foo(t.Context(), "  wasm ")
-		require.NoError(t, err)
-		assert.Equal(t, "hello, wasm", got, "contract code ran inside the guest")
+		t.Run("Foo", func(t *testing.T) {
+			t.Parallel()
 
-		got, err = main.Foo(t.Context(), "")
-		require.NoError(t, err)
-		assert.Equal(t, "main says hello, ", got, "a package main plugin, and an empty string")
-	})
-
-	t.Run("named scalar", func(t *testing.T) {
-		t.Parallel()
-
-		for _, tc := range []struct {
-			in         testcontract.Celsius
-			boiling    bool
-			fahrenheit float64
-		}{{100, true, 212}, {99.5, false, 211.1}, {-40, false, -40}, {0, false, 32}} {
-			boiling, fahrenheit, err := ref.Boil(t.Context(), tc.in)
+			got, err := ref.Foo(t.Context(), "  wasm ")
 			require.NoError(t, err)
-			assert.Equal(t, tc.boiling, boiling, "%v", tc.in)
-			assert.InDelta(t, tc.fahrenheit, fahrenheit, 1e-9, "%v", tc.in)
-		}
-	})
+			assert.Equal(t, "hello, wasm", got, "the plugin's code (Go: the contract's too) ran inside the guest")
 
-	t.Run("every scalar kind", func(t *testing.T) {
-		t.Parallel()
+			got, err = main.Foo(t.Context(), "")
+			require.NoError(t, err)
+			assert.Equal(t, "main says hello, ", got, "a second plugin, and an empty string")
+		})
 
-		b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := ref.Scalars(t.Context(),
-			false, maxSafeInt-1, math.MaxInt8-1, math.MinInt16, math.MinInt32, -maxSafeInt,
-			0, math.MaxUint8-1, math.MaxUint16-1, math.MaxUint32-1, maxSafeInt-1, 1.5, -0.25, "ünï")
-		got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
+		t.Run("named scalar", func(t *testing.T) {
+			t.Parallel()
 
-		require.NoError(t, err)
-		assert.Equal(t, []any{
-			true, maxSafeInt, int8(math.MaxInt8), int16(math.MinInt16 + 1), int32(math.MinInt32 + 1),
-			int64(-maxSafeInt + 1), uint(1), uint8(math.MaxUint8), uint16(math.MaxUint16),
-			uint32(math.MaxUint32), uint64(maxSafeInt), float32(3), -0.5, "ÜNÏ",
-		}, got, "each value transformed by the plugin")
-	})
+			for _, tc := range []struct {
+				in         testcontract.Celsius
+				boiling    bool
+				fahrenheit float64
+			}{{100, true, 212}, {99.5, false, 211.1}, {-40, false, -40}, {0, false, 32}} {
+				boiling, fahrenheit, err := ref.Boil(t.Context(), tc.in)
+				require.NoError(t, err)
+				assert.Equal(t, tc.boiling, boiling, "%v", tc.in)
+				assert.InDelta(t, tc.fahrenheit, fahrenheit, 1e-9, "%v", tc.in)
+			}
+		})
 
-	t.Run("extremes round-trip", func(t *testing.T) {
-		t.Parallel()
+		t.Run("every scalar kind", func(t *testing.T) {
+			t.Parallel()
 
-		b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := main.Scalars(t.Context(),
-			true, -maxSafeInt, math.MinInt8, math.MaxInt16, math.MaxInt32, maxSafeInt,
-			maxSafeInt, 0, 0, 0, 0, math.MaxFloat32, math.SmallestNonzeroFloat64, "")
-		got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
+			b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := ref.Scalars(t.Context(),
+				false, maxSafeInt-1, math.MaxInt8-1, math.MinInt16, math.MinInt32, -maxSafeInt,
+				0, math.MaxUint8-1, math.MaxUint16-1, math.MaxUint32-1, maxSafeInt-1, 1.5, -0.25, "ünï")
+			got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
 
-		require.NoError(t, err)
-		assert.Equal(t, []any{
-			true, -maxSafeInt, int8(math.MinInt8), int16(math.MaxInt16), int32(math.MaxInt32),
-			int64(maxSafeInt), uint(maxSafeInt), uint8(0), uint16(0), uint32(0), uint64(0),
-			float32(math.MaxFloat32), math.SmallestNonzeroFloat64, "",
-		}, got, "each value back unchanged")
-	})
+			require.NoError(t, err)
+			assert.Equal(t, []any{
+				true, maxSafeInt, int8(math.MaxInt8), int16(math.MinInt16 + 1), int32(math.MinInt32 + 1),
+				int64(-maxSafeInt + 1), uint(1), uint8(math.MaxUint8), uint16(math.MaxUint16),
+				uint32(math.MaxUint32), uint64(maxSafeInt), float32(3), -0.5, "ÜNÏ",
+			}, got, "each value transformed by the plugin")
+		})
 
-	t.Run("plugin errors", func(t *testing.T) {
-		t.Parallel()
+		t.Run("extremes round-trip", func(t *testing.T) {
+			t.Parallel()
 
-		require.NoError(t, ref.Fail(t.Context(), ""))
+			b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s, err := main.Scalars(t.Context(),
+				true, -maxSafeInt, math.MinInt8, math.MaxInt16, math.MaxInt32, maxSafeInt,
+				maxSafeInt, 0, 0, 0, 0, math.MaxFloat32, math.SmallestNonzeroFloat64, "")
+			got := []any{b, i, i8, i16, i32, i64, u, u8, u16, u32, u64, f32, f64, s}
 
-		err := ref.Fail(t.Context(), "boom")
-		require.EqualError(t, err, "boom", "the plugin's message, as an in-process implementation would return")
+			require.NoError(t, err)
+			assert.Equal(t, []any{
+				true, -maxSafeInt, int8(math.MinInt8), int16(math.MaxInt16), int32(math.MaxInt32),
+				int64(maxSafeInt), uint(maxSafeInt), uint8(0), uint16(0), uint32(0), uint64(0),
+				float32(math.MaxFloat32), math.SmallestNonzeroFloat64, "",
+			}, got, "each value back unchanged")
+		})
 
-		var pluginErr *plg.PluginError
+		t.Run("plugin errors", func(t *testing.T) {
+			t.Parallel()
 
-		require.ErrorAs(t, err, &pluginErr)
-		assert.Equal(t, plg.PluginError{Key: "fooer/ref", Method: "Fail", Message: "boom"}, *pluginErr)
-		require.NotErrorIs(t, err, plg.ErrCall, "an ordinary error keeps the instance")
+			require.NoError(t, ref.Fail(t.Context(), ""))
+
+			err := ref.Fail(t.Context(), "boom")
+			require.EqualError(t, err, "boom", "the plugin's message, as an in-process implementation would return")
+
+			var pluginErr *plg.PluginError
+
+			require.ErrorAs(t, err, &pluginErr)
+			assert.Equal(t, plg.PluginError{Key: "fooer/ref", Method: "Fail", Message: "boom"}, *pluginErr)
+			require.NotErrorIs(t, err, plg.ErrCall, "an ordinary error keeps the instance")
+		})
 	})
 }
 
 func TestInstanceStateLivesAcrossCalls(t *testing.T) {
 	t.Parallel()
 
-	ctr := fooerContainer(t, map[string]string{"ref": "fooer"})
-	ref := getFooer(t, ctr, "fooer/ref")
-	served := instanceID(t, ctr, "fooer/ref")
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	for want := 1; want <= 3; want++ {
+		ctr := fooerContainerIn(t, lang, map[string]string{"ref": "fooer"})
+		ref := getFooer(t, ctr, "fooer/ref")
+		served := instanceID(t, ctr, "fooer/ref")
+
+		for want := 1; want <= 3; want++ {
+			got, err := ref.Count(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		}
+
+		require.Error(t, ref.Fail(t.Context(), "an ordinary error"))
+		assert.Equal(t, served, instanceID(t, ctr, "fooer/ref"), "a plugin error keeps the instance")
+
 		got, err := ref.Count(t.Context())
 		require.NoError(t, err)
-		assert.Equal(t, want, got)
-	}
-
-	require.Error(t, ref.Fail(t.Context(), "an ordinary error"))
-	assert.Equal(t, served, instanceID(t, ctr, "fooer/ref"), "a plugin error keeps the instance")
-
-	got, err := ref.Count(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, 4, got, "and its state")
+		assert.Equal(t, 4, got, "and its state")
+	})
 }
 
 func TestPluginPanicDiscardsTheInstance(t *testing.T) {

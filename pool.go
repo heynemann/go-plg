@@ -11,7 +11,7 @@ import (
 	"github.com/heynemann/go-plg/internal/engine"
 )
 
-// instance is a guest instance as a pool serves it: a *goInstance, or a fake in the pool's tests. One
+// instance is a guest instance as a pool serves it: a *guestInstance, or a fake in the pool's tests. One
 // goroutine at a time owns it.
 type instance interface {
 	Call(ctx context.Context, method uint32, args []byte) (engine.Result, error)

@@ -16,21 +16,32 @@ import (
 // maxSafeInt is 2^53, the largest integer magnitude that crosses the plugin boundary.
 const maxSafeInt = 1 << 53
 
-// getShaper returns the shaper test plugin, registered as "shaper/ref" in a container of its own.
+// getShaper returns the Go shaper test plugin, registered as "shaper/ref" in a container of its own.
 //
 //nolint:ireturn // the plugin is served as the contract interface under test
 func getShaper(tb testing.TB) testcontract.Shaper {
 	tb.Helper()
 
+	shaper, _ := getShaperIn(tb, golang())
+
+	return shaper
+}
+
+// getShaperIn returns the shaper test plugin of lang, registered as "shaper/ref" in a container of its own.
+//
+//nolint:ireturn // the plugin is served as the contract interface under test
+func getShaperIn(tb testing.TB, lang contractLanguage) (testcontract.Shaper, *plg.Container) {
+	tb.Helper()
+
 	ctr := newContainer(tb)
 	err := plg.Register[testcontract.Shaper](tb.Context(), ctr, "shaper",
-		plg.WithStorage(goStorage(tb, "shaper", map[string]string{"ref": "shaper"})))
+		plg.WithStorage(lang.storage(tb, "shaper", map[string]string{"ref": "shaper"})))
 	require.NoError(tb, err)
 
 	shaper, err := plg.Get[testcontract.Shaper](tb.Context(), ctr, "shaper/ref")
 	require.NoError(tb, err)
 
-	return shaper
+	return shaper, ctr
 }
 
 func grownTree(name string, depth int) *testcontract.Tree {
@@ -42,21 +53,34 @@ func grownTree(name string, depth int) *testcontract.Tree {
 	return tree
 }
 
-// TestEveryDataTypeCrossesAGoPlugin sends every allowed data type through a real Go plugin in the guest
-// artifact and back, through the typed interface.
-func TestEveryDataTypeCrossesAGoPlugin(t *testing.T) {
+// TestEveryDataTypeCrossesAPlugin sends every allowed data type through a real plugin of each language in its
+// guest artifact and back, through the typed interface.
+func TestEveryDataTypeCrossesAPlugin(t *testing.T) {
 	t.Parallel()
 
-	shaper := getShaper(t)
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		shaper, _ := getShaperIn(t, lang)
+		everyDataTypeCrosses(t, shaper)
+	})
+}
+
+func everyDataTypeCrosses(t *testing.T, shaper testcontract.Shaper) {
+	t.Helper()
+
 	sample := testcontract.SampleOrder()
 
 	t.Run("structs, slices, maps, bytes and time, nested", func(t *testing.T) {
 		t.Parallel()
 
-		for _, in := range []testcontract.Order{sample, {}, testcontract.EmptyOrder()} {
-			got, err := shaper.Echo(t.Context(), in)
+		orders := []testcontract.Order{sample, {}, testcontract.EmptyOrder()}
+		for i := range orders {
+			in := &orders[i]
+
+			got, err := shaper.Echo(t.Context(), *in)
 			require.NoError(t, err)
-			assert.Equal(t, in, got, "nil and empty collections stay distinct")
+			assert.Equal(t, *in, got, "nil and empty collections stay distinct")
 		}
 	})
 
@@ -146,67 +170,98 @@ func TestEveryDataTypeCrossesAGoPlugin(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 6, sum)
 	})
+
+	t.Run("nesting up to the wire's limit", func(t *testing.T) {
+		t.Parallel()
+
+		// Each tree level is three levels of the encoding (*Tree, Tree, []*Tree): 3332 levels fit the limit of
+		// 10000, 3333 do not.
+		tree, err := shaper.Grow(t.Context(), 3332, 1)
+		require.NoError(t, err)
+
+		depth := 0
+		for ; len(tree.Kids) > 0; depth++ {
+			tree = tree.Kids[0]
+		}
+
+		assert.Equal(t, 3332, depth)
+
+		_, err = shaper.Grow(t.Context(), 3333, 1)
+		require.ErrorIs(t, err, plg.ErrConversion)
+		require.ErrorContains(t, err, "nested too deeply")
+	})
 }
 
 // TestOutOfRangeIntegersFailNamingTheField: integers beyond ±2^53 (which Lua and JavaScript numbers cannot
 // represent exactly) fail with ErrConversion naming the parameter or result and the field, in either
-// direction, and the instance keeps serving.
+// direction, and the instance keeps serving. Arguments are encoded on the host, so their fields have Go names;
+// a result field has the name the plugin's language knows it by.
 func TestOutOfRangeIntegersFailNamingTheField(t *testing.T) {
 	t.Parallel()
 
-	shaper := getShaper(t)
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	inLine := testcontract.SampleOrder()
-	inLine.Lines[1].Qty = maxSafeInt + 1
+		shaper, ctr := getShaperIn(t, lang)
+		served := instanceID(t, ctr, "shaper/ref")
 
-	inMap := testcontract.SampleOrder()
-	inMap.ByCode["a"].Qty = -maxSafeInt - 1
+		inLine := testcontract.SampleOrder()
+		inLine.Lines[1].Qty = maxSafeInt + 1
 
-	tests := []struct {
-		err  error
-		name string
-		want string
-	}{
-		{
-			name: "argument field", want: "shaper/ref.Echo: parameter 1: Lines[1].Qty: ",
-			err: errOf(shaper.Echo(t.Context(), inLine)),
-		},
-		{
-			name: "argument map value", want: `shaper/ref.EchoPtr: parameter 1: ByCode["a"].Qty: `,
-			err: errOf(shaper.EchoPtr(t.Context(), &inMap)),
-		},
-		{
-			name: "variadic argument", want: "shaper/ref.Sum: parameter 2: [1]: ",
-			err: errOf(shaper.Sum(t.Context(), 0, 1, maxSafeInt+1)),
-		},
-		{
-			name: "result field", want: "shaper/ref.Bump: result 0: Lines[0].Qty: ",
-			err: errOf(shaper.Bump(t.Context(), testcontract.SampleOrder(), maxSafeInt-1)),
-		},
-	}
+		inMap := testcontract.SampleOrder()
+		inMap.ByCode["a"].Qty = -maxSafeInt - 1
 
-	for _, tc := range tests {
-		require.ErrorIs(t, tc.err, plg.ErrConversion, tc.name)
-		require.NotErrorIs(t, tc.err, plg.ErrCall, tc.name)
-		assert.Contains(t, tc.err.Error(), tc.want, tc.name)
-		assert.Contains(t, tc.err.Error(), "integer beyond ±2^53", tc.name)
-	}
+		tests := []struct {
+			err  error
+			name string
+			want string
+		}{
+			{
+				name: "argument field", want: "shaper/ref.Echo: parameter 1: Lines[1].Qty: ",
+				err: errOf(shaper.Echo(t.Context(), inLine)),
+			},
+			{
+				name: "argument map value", want: `shaper/ref.EchoPtr: parameter 1: ByCode["a"].Qty: `,
+				err: errOf(shaper.EchoPtr(t.Context(), &inMap)),
+			},
+			{
+				name: "variadic argument", want: "shaper/ref.Sum: parameter 2: [1]: ",
+				err: errOf(shaper.Sum(t.Context(), 0, 1, maxSafeInt+1)),
+			},
+			{
+				name: "result field", want: "shaper/ref.Bump: result 0: Lines[0]." + lang.field("Qty", "qty") + ": ",
+				err: errOf(shaper.Bump(t.Context(), testcontract.SampleOrder(), maxSafeInt)),
+			},
+		}
 
-	// The instance survived: its state carries on across a result that could not cross.
-	fooer := getFooer(t, fooerContainer(t, map[string]string{"ref": "fooer"}), "fooer/ref")
+		for _, tc := range tests {
+			require.ErrorIs(t, tc.err, plg.ErrConversion, tc.name)
+			require.NotErrorIs(t, tc.err, plg.ErrCall, tc.name)
+			assert.Contains(t, tc.err.Error(), tc.want, tc.name)
+			assert.Contains(t, tc.err.Error(), "integer beyond ±2^53", tc.name)
+		}
 
-	first, err := fooer.Count(t.Context())
-	require.NoError(t, err)
+		assert.Equal(t, served, instanceID(t, ctr, "shaper/ref"), "a result that could not cross keeps the instance")
 
-	//nolint:dogsled // Scalars returns fourteen values; only its error matters here
-	_, _, _, _, _, _, _, _, _, _, _, _, _, _, err = fooer.Scalars(t.Context(), false, maxSafeInt, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, "")
-	require.ErrorIs(t, err, plg.ErrConversion)
-	assert.Contains(t, err.Error(), "fooer/ref.Scalars: result 1: ")
+		if !lang.exactInts {
+			return
+		}
 
-	second, err := fooer.Count(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, first+1, second, "the same instance served both calls")
+		// The plugin computes an integer beyond 2^53 itself.
+		fooer := getFooer(t, fooerContainerIn(t, lang, map[string]string{"ref": "fooer"}), "fooer/ref")
+
+		first, err := fooer.Count(t.Context())
+		require.NoError(t, err)
+
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, err = fooer.Scalars(t.Context(), false, maxSafeInt, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, "")
+		require.ErrorIs(t, err, plg.ErrConversion)
+		assert.Contains(t, err.Error(), "fooer/ref.Scalars: result 1: ")
+
+		second, err := fooer.Count(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, first+1, second, "the same instance served both calls")
+	})
 }
 
 // errOf returns a call's error, dropping its result.

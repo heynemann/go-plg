@@ -15,6 +15,7 @@ import (
 	// The guests plg ships, which `plg warm` compiles: every guest package registers itself in internal/guestreg,
 	// and plg.Warm compiles what is registered.
 	_ "github.com/heynemann/go-plg/guest/golang"
+	_ "github.com/heynemann/go-plg/guest/lua"
 	"github.com/heynemann/go-plg/internal/buildguest"
 	"github.com/heynemann/go-plg/internal/gen"
 )

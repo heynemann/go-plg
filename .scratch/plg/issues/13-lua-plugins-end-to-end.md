@@ -12,12 +12,12 @@
 
 **Blocked by:** 03 (Full data-type encoding), 05 (Filesystem and fs.FS storages), 08 (Typed Host interface), 09 (Host-mediated HTTP)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The shared contract tests pass for an equivalent Lua plugin, including all data types
-- [ ] A multi-file Lua plugin using `require` works; requiring outside the plugin directory fails
-- [ ] `host` and `http.request` work and obey their policies
-- [ ] Lua plugins that error, run out of memory, recurse or loop return errors and the host survives
-- [ ] The guest artifact is rebuilt and checked for reproducibility in CI
-- [ ] `json.encode`/`json.decode` round-trip nested tables, arrays vs objects, unicode and numbers; malformed JSON returns a Lua error
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] The shared contract tests pass for an equivalent Lua plugin, including all data types
+- [x] A multi-file Lua plugin using `require` works; requiring outside the plugin directory fails
+- [x] `host` and `http.request` work and obey their policies
+- [x] Lua plugins that error, run out of memory, recurse or loop return errors and the host survives
+- [x] The guest artifact is rebuilt and checked for reproducibility in CI
+- [x] `json.encode`/`json.decode` round-trip nested tables, arrays vs objects, unicode and numbers; malformed JSON returns a Lua error
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

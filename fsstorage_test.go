@@ -453,6 +453,8 @@ func TestLanguageAllowlist(t *testing.T) {
 		{Key: "t", Language: plg.LanguageTypeScript, Entrypoint: "index.ts"},
 		{Key: "x", Language: "cobol", Entrypoint: "main.cbl"},
 	}}
+	goThenLua := listStorage{name: "poly", descs: polyglot.descs[:2]}
+	luaOnly := listStorage{name: "scripts", descs: polyglot.descs[1:2]}
 	scripts := listStorage{name: "scripts", descs: polyglot.descs[1:3]}
 	goOnly := listStorage{name: "go", descs: polyglot.descs[:1]}
 	cobol := listStorage{name: "odd", descs: polyglot.descs[3:]}
@@ -465,13 +467,16 @@ func TestLanguageAllowlist(t *testing.T) {
 	tests := []struct {
 		want     error
 		name     string
+		failsOn  string // an enabled plugin Register tried and failed to load, as the error names it
 		storages []plg.Storage
 		opts     []plg.RegisterOption
 		skipped  []skipRecord
 	}{
 		{
-			name: "lua only", storages: []plg.Storage{polyglot}, opts: []plg.RegisterOption{plg.WithLuaPlugins()},
-			want:    plg.ErrUnsupportedLanguage, // enabled, but no Lua guest exists yet
+			// The Lua plugin, enabled, fails: its guest is not linked into this test binary, or (with the
+			// integration tests' blank import) it is but the plugin has no files.
+			name: "lua only", storages: []plg.Storage{goThenLua}, opts: []plg.RegisterOption{plg.WithLuaPlugins()},
+			failsOn: "l (storage poly)",
 			skipped: []skipRecord{skipped("g", "poly", "go")},
 		},
 		{
@@ -488,8 +493,8 @@ func TestLanguageAllowlist(t *testing.T) {
 			skipped: []skipRecord{skipped("g", "go", "go"), skipped("l", "scripts", "lua")},
 		},
 		{
-			name: "every language by default", storages: []plg.Storage{scripts},
-			want: plg.ErrUnsupportedLanguage,
+			name: "every language by default", storages: []plg.Storage{luaOnly},
+			failsOn: "l (storage scripts)",
 		},
 		{
 			name: "duplicates count whatever the language", storages: []plg.Storage{goOnly, luaDup},
@@ -514,9 +519,13 @@ func TestLanguageAllowlist(t *testing.T) {
 			}
 
 			err := plg.Register[pinger](t.Context(), ctr, "langs", opts...)
-			if tc.want != nil {
+
+			switch {
+			case tc.want != nil:
 				require.ErrorIs(t, err, tc.want)
-			} else {
+			case tc.failsOn != "":
+				require.ErrorContains(t, err, tc.failsOn)
+			default:
 				require.NoError(t, err)
 
 				for key := range plg.All[pinger](t.Context(), ctr) {

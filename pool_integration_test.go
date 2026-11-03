@@ -315,10 +315,16 @@ func TestRegisterRacingCloseCreatesNoRuntime(t *testing.T) {
 // BenchmarkCallGoParallel calls a Go plugin from GOMAXPROCS goroutines, with every protection on: with a pool
 // of one instance the calls contend for it, with one instance per goroutine they run in parallel.
 func BenchmarkCallGoParallel(b *testing.B) {
+	benchCallParallel(b, golang())
+}
+
+func benchCallParallel(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
 	for _, size := range []int{1, runtime.GOMAXPROCS(0)} {
 		b.Run("pool="+strconv.Itoa(size), func(b *testing.B) {
-			ref := getFooer(b, fooerContainer(b, map[string]string{"ref": "fooer"}, plg.WithPool(size, size)),
-				"fooer/ref")
+			ctr := fooerContainerIn(b, lang, map[string]string{"ref": "fooer"}, plg.WithPool(size, size))
+			ref := getFooer(b, ctr, "fooer/ref")
 			ctx := b.Context()
 
 			b.ReportAllocs()

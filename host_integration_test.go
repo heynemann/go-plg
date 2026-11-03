@@ -18,23 +18,24 @@ import (
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
-// registerHosted registers the hosted test plugin as "hosted/ref", with Register's context carrying "register".
-func registerHosted(tb testing.TB, ctr *plg.Container) {
+// registerHosted registers lang's hosted test plugin as "hosted/ref", with Register's context carrying
+// "register".
+func registerHosted(tb testing.TB, lang contractLanguage, ctr *plg.Container) {
 	tb.Helper()
 
 	err := plg.Register[testcontract.Hosted](withHostValue(tb.Context(), "register"), ctr, "hosted",
-		plg.WithStorage(goStorage(tb, "hosted", map[string]string{"ref": "hosted"})),
+		plg.WithStorage(lang.storage(tb, "hosted", map[string]string{"ref": "hosted"})),
 		plg.WithHost[testcontract.Host](newTestHost()))
 	require.NoError(tb, err)
 }
 
-// hostedPlugin registers the hosted test plugin in ctr and returns it.
+// hostedPlugin registers lang's hosted test plugin in ctr and returns it.
 //
 //nolint:ireturn // the plugin is served as the contract interface under test
-func hostedPlugin(tb testing.TB, ctr *plg.Container) testcontract.Hosted {
+func hostedPlugin(tb testing.TB, lang contractLanguage, ctr *plg.Container) testcontract.Hosted {
 	tb.Helper()
 
-	registerHosted(tb, ctr)
+	registerHosted(tb, lang, ctr)
 
 	hosted, err := plg.Get[testcontract.Hosted](tb.Context(), ctr, "hosted/ref")
 	require.NoError(tb, err)
@@ -45,99 +46,116 @@ func hostedPlugin(tb testing.TB, ctr *plg.Container) testcontract.Hosted {
 func TestHostMethodsReturnTypedResults(t *testing.T) {
 	t.Parallel()
 
-	hosted := hostedPlugin(t, newContainer(t))
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	user, err := hosted.Describe(t.Context(), "ada")
-	require.NoError(t, err)
+		hosted := hostedPlugin(t, lang, newContainer(t))
 
-	want := newTestHost().users["ada"]
-	want.Name = "described Ada"
-	assert.Equal(t, want, user, "the struct crossed host -> guest -> host, nested pointer, slice and time included")
-
-	tests := []struct {
-		more []int
-		base int
-		want int
-	}{
-		{base: 1, more: []int{2, 3}, want: 6},
-		{base: 7, want: 7},
-		{base: -maxSafeInt, more: []int{maxSafeInt, maxSafeInt}, want: maxSafeInt},
-	}
-
-	for _, tc := range tests {
-		got, err := hosted.Total(t.Context(), tc.base, tc.more...)
+		user, err := hosted.Describe(t.Context(), "ada")
 		require.NoError(t, err)
-		assert.Equal(t, tc.want, got, "variadic host method with %d, %v", tc.base, tc.more)
-	}
+
+		want := newTestHost().users["ada"]
+		want.Name = "described Ada"
+		assert.Equal(t, want, user, "the struct crossed host -> guest -> host, nested pointer, slice and time included")
+
+		tests := []struct {
+			more []int
+			base int
+			want int
+		}{
+			{base: 1, more: []int{2, 3}, want: 6},
+			{base: 7, want: 7},
+			{base: -maxSafeInt, more: []int{maxSafeInt, maxSafeInt}, want: maxSafeInt},
+		}
+
+		for _, tc := range tests {
+			got, err := hosted.Total(t.Context(), tc.base, tc.more...)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got, "variadic host method with %d, %v", tc.base, tc.more)
+		}
+	})
 }
 
 func TestHostMethodsSeeTheContextOfTheCallInProgress(t *testing.T) {
 	t.Parallel()
 
-	hosted := hostedPlugin(t, newContainer(t))
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	for _, v := range []string{"first call", "second call", ""} {
-		got, err := hosted.Value(withHostValue(t.Context(), v))
+		hosted := hostedPlugin(t, lang, newContainer(t))
+
+		for _, v := range []string{"first call", "second call", ""} {
+			got, err := hosted.Value(withHostValue(t.Context(), v))
+			require.NoError(t, err)
+			assert.Equal(t, v, got)
+		}
+
+		origin, err := hosted.Origin(t.Context())
 		require.NoError(t, err)
-		assert.Equal(t, v, got)
-	}
-
-	origin, err := hosted.Origin(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, "register", origin, "while Create runs, host calls see Register's context")
+		assert.Equal(t, "register", origin, "while Create runs, host calls see Register's context")
+	})
 }
 
 func TestHostErrorsReachThePluginAsErrors(t *testing.T) {
 	t.Parallel()
 
-	hosted := hostedPlugin(t, newContainer(t))
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	seen, err := hosted.Relay(t.Context(), "quota exceeded")
-	require.NoError(t, err, "the plugin handled the host's error itself")
-	assert.Equal(t, "quota exceeded", seen, "the plugin got an error with the host's exact message")
+		hosted := hostedPlugin(t, lang, newContainer(t))
 
-	seen, err = hosted.Relay(t.Context(), "")
-	require.NoError(t, err)
-	assert.Empty(t, seen, "a nil error stays nil")
+		seen, err := hosted.Relay(t.Context(), "quota exceeded")
+		require.NoError(t, err, "the plugin handled the host's error itself")
+		assert.Equal(t, "quota exceeded", seen, "the plugin got an error with the host's exact message")
 
-	_, err = hosted.Describe(t.Context(), "nobody")
+		seen, err = hosted.Relay(t.Context(), "")
+		require.NoError(t, err)
+		assert.Empty(t, seen, "a nil error stays nil")
 
-	var pluginErr *plg.PluginError
+		_, err = hosted.Describe(t.Context(), "nobody")
 
-	require.ErrorAs(t, err, &pluginErr, "the plugin returned the host's error")
-	assert.Equal(t, `no user "nobody"`, pluginErr.Message)
-	require.NotErrorIs(t, err, plg.ErrCall, "an error from the host is the plugin's to handle")
+		var pluginErr *plg.PluginError
 
-	// A result the host cannot encode is an error for the plugin too, naming the method and result.
-	_, err = hosted.Total(t.Context(), maxSafeInt, 1)
-	require.ErrorAs(t, err, &pluginErr)
-	assert.Contains(t, pluginErr.Message, "host method testcontract.Host.Sum: result 0: wire: integer beyond ±2^53")
+		require.ErrorAs(t, err, &pluginErr, "the plugin returned the host's error")
+		assert.Equal(t, `no user "nobody"`, pluginErr.Message)
+		require.NotErrorIs(t, err, plg.ErrCall, "an error from the host is the plugin's to handle")
+
+		// A result the host cannot encode is an error for the plugin too, naming the method and result.
+		_, err = hosted.Total(t.Context(), maxSafeInt, 1)
+		require.ErrorAs(t, err, &pluginErr)
+		assert.Contains(t, pluginErr.Message,
+			"host method testcontract.Host.Sum: result 0: wire: integer beyond ±2^53")
+	})
 }
 
 func TestHostPanicReachesThePluginAsAnError(t *testing.T) {
 	t.Parallel()
 
-	var logs bytes.Buffer
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	hosted := hostedPlugin(t, loggedContainer(t, &logs))
+		var logs bytes.Buffer
 
-	seen, err := hosted.Relay(t.Context(), "panic")
-	require.NoError(t, err, "the plugin handled the error the panic became")
-	assert.Equal(t, "plg: hosted/ref: host testcontract.Host.Fail failed: host panicked on purpose", seen,
-		"the plugin received the PanicError's message")
+		hosted := hostedPlugin(t, lang, loggedContainer(t, &logs))
 
-	origin, err := hosted.Origin(withHostValue(t.Context(), "later"))
-	require.NoError(t, err)
-	assert.Equal(t, "register", origin, "the same instance keeps serving: a host panic does not discard it")
+		seen, err := hosted.Relay(t.Context(), "panic")
+		require.NoError(t, err, "the plugin handled the error the panic became")
+		assert.Equal(t, "plg: hosted/ref: host testcontract.Host.Fail failed: host panicked on purpose", seen,
+			"the plugin received the PanicError's message")
 
-	user, err := hosted.Describe(t.Context(), "ada")
-	require.NoError(t, err, "the host keeps serving")
-	assert.Equal(t, "described Ada", user.Name)
+		origin, err := hosted.Origin(withHostValue(t.Context(), "later"))
+		require.NoError(t, err)
+		assert.Equal(t, "register", origin, "the same instance keeps serving: a host panic does not discard it")
 
-	logged := logs.String()
-	assert.Contains(t, logged, `"level":"ERROR","msg":"plg: plugin failure","key":"hosted/ref","phase":"host",`+
-		`"value":"host panicked on purpose","language":"go","method":"testcontract.Host.Fail"`)
-	assert.Contains(t, logged, "(*testHost).Fail", "the host stack is logged")
+		user, err := hosted.Describe(t.Context(), "ada")
+		require.NoError(t, err, "the host keeps serving")
+		assert.Equal(t, "described Ada", user.Name)
+
+		logged := logs.String()
+		assert.Contains(t, logged, `"level":"ERROR","msg":"plg: plugin failure","key":"hosted/ref","phase":"host",`+
+			`"value":"host panicked on purpose","language":"`+string(lang.lang)+`","method":"testcontract.Host.Fail"`)
+		assert.Contains(t, logged, "(*testHost).Fail", "the host stack is logged")
+	})
 }
 
 func TestCreateMustMatchWithHost(t *testing.T) {
@@ -185,32 +203,36 @@ func hostedSource(t *testing.T) string {
 func TestHostServesConcurrentPlugins(t *testing.T) {
 	t.Parallel()
 
-	ctr := newContainer(t)
-	err := plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
-		plg.WithStorage(goStorage(t, "hosted", map[string]string{"a": "hosted", "b": "hosted", "c": "hosted"})),
-		plg.WithHost[testcontract.Host](newTestHost()))
-	require.NoError(t, err)
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	errs := make(chan error, 3*4)
+		ctr := newContainer(t)
+		err := plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
+			plg.WithStorage(lang.storage(t, "hosted", map[string]string{"a": "hosted", "b": "hosted", "c": "hosted"})),
+			plg.WithHost[testcontract.Host](newTestHost()))
+		require.NoError(t, err)
 
-	for key, hosted := range plg.All[testcontract.Hosted](t.Context(), ctr) {
-		for i := range 4 {
-			go func() {
-				want := fmt.Sprintf("%s#%d", key, i)
+		errs := make(chan error, 3*4)
 
-				got, err := hosted.Value(withHostValue(t.Context(), want))
-				if err == nil && got != want {
-					err = fmt.Errorf("%w: %s: got %q", errWrongValue, want, got)
-				}
+		for key, hosted := range plg.All[testcontract.Hosted](t.Context(), ctr) {
+			for i := range 4 {
+				go func() {
+					want := fmt.Sprintf("%s#%d", key, i)
 
-				errs <- err
-			}()
+					got, err := hosted.Value(withHostValue(t.Context(), want))
+					if err == nil && got != want {
+						err = fmt.Errorf("%w: %s: got %q", errWrongValue, want, got)
+					}
+
+					errs <- err
+				}()
+			}
 		}
-	}
 
-	for range cap(errs) {
-		require.NoError(t, <-errs, "each call's host methods see that call's context")
-	}
+		for range cap(errs) {
+			require.NoError(t, <-errs, "each call's host methods see that call's context")
+		}
+	})
 }
 
 var errWrongValue = errors.New("wrong value")
@@ -218,7 +240,23 @@ var errWrongValue = errors.New("wrong value")
 // BenchmarkCallGoHost is one call into a Go plugin making one host call (Value), every protection on; compare
 // with BenchmarkCallGo for the host call's round trip.
 func BenchmarkCallGoHost(b *testing.B) {
-	hosted := hostedPlugin(b, newContainer(b))
+	benchHostValue(b, golang())
+}
+
+// BenchmarkCallGoHostStruct is one call making one host call returning a struct (Describe).
+func BenchmarkCallGoHostStruct(b *testing.B) {
+	benchHostStruct(b, golang())
+}
+
+// BenchmarkCallGoHostParallel contends for the plugin's single instance.
+func BenchmarkCallGoHostParallel(b *testing.B) {
+	benchHostValueParallel(b, golang())
+}
+
+func benchHostValue(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	hosted := hostedPlugin(b, lang, newContainer(b))
 	ctx := withHostValue(b.Context(), "bench")
 
 	b.ReportAllocs()
@@ -231,9 +269,10 @@ func BenchmarkCallGoHost(b *testing.B) {
 	}
 }
 
-// BenchmarkCallGoHostStruct is one call making one host call returning a struct (Describe).
-func BenchmarkCallGoHostStruct(b *testing.B) {
-	hosted := hostedPlugin(b, newContainer(b))
+func benchHostStruct(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	hosted := hostedPlugin(b, lang, newContainer(b))
 	ctx := b.Context()
 
 	b.ReportAllocs()
@@ -246,9 +285,10 @@ func BenchmarkCallGoHostStruct(b *testing.B) {
 	}
 }
 
-// BenchmarkCallGoHostParallel contends for the plugin's single instance.
-func BenchmarkCallGoHostParallel(b *testing.B) {
-	hosted := hostedPlugin(b, newContainer(b))
+func benchHostValueParallel(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	hosted := hostedPlugin(b, lang, newContainer(b))
 	ctx := withHostValue(b.Context(), "bench")
 
 	b.ReportAllocs()

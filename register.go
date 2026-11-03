@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
-	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/internal/httpcap"
 )
@@ -74,6 +73,7 @@ type registration struct {
 	name       string
 	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host's stubs
 	goPayload  []byte // the Go init payload, likewise
+	schema     []byte // the script guests' wire.Schema: the interface's methods, then the Host's
 }
 
 // prepare checks a Register call's arguments and returns the interface's contract, the Register options (with
@@ -115,9 +115,13 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 	reg := &registration{contr: contr, cfg: cfg, http: client, host: hst, name: name}
 	reg.dispatcher, reg.goPayload = contr.dispatcher, contr.payload
 
+	var hostMethods []*method
+
 	if hst != nil {
-		reg.dispatcher, reg.goPayload = hst.dispatcher, hst.payload
+		reg.dispatcher, reg.goPayload, hostMethods = hst.dispatcher, hst.payload, hst.methods
 	}
+
+	reg.schema = scriptSchema(contr.methods, hostMethods)
 
 	return reg, nil
 }
@@ -125,6 +129,7 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 // source is a plugin a storage listed.
 type source struct {
 	storage   Storage
+	loader    loader
 	guest     guestreg.Guest
 	storeName string // storage.Name(), asked once
 	desc      Descriptor
@@ -210,21 +215,22 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 		return false, nil
 	}
 
-	guest, err := cfg.guestFor(src.desc.Language)
+	ld, guest, err := cfg.guestFor(src.desc.Language)
 	if err != nil {
 		return false, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
 	}
 
-	src.guest, src.limit = guest, instanceLimit(cfg, &src.desc)
+	src.loader, src.guest, src.limit = ld, guest, instanceLimit(cfg.limit(ld), &src.desc)
 
 	return true, nil
 }
 
-// instanceLimit returns a plugin's per-instance memory limit: the Register's, lowered by the descriptor's. A
-// descriptor asking for more than the Register allows gets the Register's limit ([Container.launch] warns).
-func instanceLimit(cfg *registerConfig, desc *Descriptor) uint64 {
-	if desc.MemoryLimit == 0 || desc.MemoryLimit > cfg.memoryLimit {
-		return cfg.memoryLimit
+// instanceLimit returns a plugin's per-instance memory limit: the Register's for its language, lowered by the
+// descriptor's. A descriptor asking for more than the Register allows gets the Register's limit
+// ([Container.launch] warns).
+func instanceLimit(limit uint64, desc *Descriptor) uint64 {
+	if desc.MemoryLimit == 0 || desc.MemoryLimit > limit {
+		return limit
 	}
 
 	return wholePages(desc.MemoryLimit)
@@ -469,13 +475,12 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 ) {
 	start := time.Now()
 
-	if src.desc.MemoryLimit > reg.cfg.memoryLimit {
+	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
-			slog.String("key", key), slog.Uint64("asked", src.desc.MemoryLimit),
-			slog.Uint64("limit", reg.cfg.memoryLimit))
+			slog.String("key", key), slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
 	}
 
-	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, src.desc.Entrypoint)
+	spec, err := src.loader.prepare(reg, files, src.desc.Entrypoint)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +491,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	}
 
 	meters := newPluginMeters(c.meters, key, src.desc.Language, reg.contr.iface)
-	instances := c.pluginPool(reg, key, src, meters, c.goLauncher(reg, key, src, tree, mod, meters).start)
+	instances := c.pluginPool(reg, key, src, meters, c.newLauncher(reg, key, src, spec, mod, meters).start)
 
 	err = instances.warm(ctx)
 	if err != nil {
@@ -510,21 +515,22 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	return gen, nil
 }
 
-// goLauncher returns the launcher of a Go plugin's instances, which mount tree.
-func (c *Container) goLauncher(reg *registration, key string, src *source, tree fs.FS, mod *engine.Module,
+// newLauncher returns the launcher of a plugin version's instances, which start from spec.
+func (c *Container) newLauncher(reg *registration, key string, src *source, spec launchSpec, mod *engine.Module,
 	meters *pluginMeters,
-) *goLauncher {
-	return &goLauncher{
+) *launcher {
+	return &launcher{
 		mod:     mod,
 		logger:  c.logger,
 		panics:  c.panics,
-		payload: reg.goPayload,
+		payload: spec.payload,
 		opts: engine.InstanceOptions{
-			Mounts: []engine.Mount{{FS: tree, GuestPath: goabi.GoPath}},
+			Mounts: spec.mounts,
 			HTTP:   c.httpHandler(reg, key, src.desc.Language, meters),
 			Host:   reg.host.handler(key, src.desc.Language, c.panics),
 		},
-		key: key,
+		key:  key,
+		lang: src.desc.Language,
 	}
 }
 

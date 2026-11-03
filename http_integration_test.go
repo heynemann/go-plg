@@ -91,57 +91,69 @@ func httpContainer(t *testing.T, logs io.Writer) *plg.Container {
 	return ctr
 }
 
-// fetcherIn registers the fetcher plugin under name with opts in ctr, and returns it: its key is name+"/fetch".
+// fetcherIn registers lang's fetcher plugin under name with opts in ctr, and returns it: its key is
+// name+"/fetch".
 //
 //nolint:ireturn // the plugin is served as the contract interface under test
-func fetcherIn(t *testing.T, ctr *plg.Container, name string, opts ...plg.RegisterOption) testcontract.Fooer {
+func fetcherIn(t *testing.T, lang contractLanguage, ctr *plg.Container, name string, opts ...plg.RegisterOption,
+) testcontract.Fooer {
 	t.Helper()
 
-	opts = append(opts, plg.WithStorage(goStorage(t, name, map[string]string{"fetch": "fetcher"})))
+	opts = append(opts, plg.WithStorage(lang.storage(t, name, map[string]string{"fetch": "fetcher"})))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, name, opts...))
 
 	return getFooer(t, ctr, name+"/fetch")
 }
 
-// fetcher registers the fetcher plugin as "web/fetch" in a container of its own logging to logs.
+// fetcher registers lang's fetcher plugin as "web/fetch" in a container of its own logging to logs.
 //
 //nolint:ireturn // the plugin is served as the contract interface under test
-func fetcher(t *testing.T, logs io.Writer, opts ...plg.RegisterOption) testcontract.Fooer {
+func fetcher(t *testing.T, lang contractLanguage, logs io.Writer, opts ...plg.RegisterOption) testcontract.Fooer {
 	t.Helper()
 
-	return fetcherIn(t, httpContainer(t, logs), "web", opts...)
+	return fetcherIn(t, lang, httpContainer(t, logs), "web", opts...)
 }
 
 func TestPluginHTTPReachesAllowedHosts(t *testing.T) {
 	t.Parallel()
 
-	api := newAPIServer(t)
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	var logs bytes.Buffer
+		api := newAPIServer(t)
 
-	plug := fetcher(t, &logs, plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
+		var logs bytes.Buffer
 
-	got, err := plug.Foo(t.Context(), "GET "+api.URL+"/v1/items")
-	require.NoError(t, err)
-	assert.Equal(t, "200|from-api|GET /v1/items fetcher "+hostOf(t, api.URL)+" 0", got,
-		"status, response header and body reach the plugin; its header reaches the server")
+		plug := fetcher(t, lang, &logs, plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
 
-	got, err = plug.Foo(t.Context(), "POST "+api.URL+"/v1/items 5000")
-	require.NoError(t, err)
-	assert.Equal(t, "200|from-api|POST /v1/items  "+hostOf(t, api.URL)+" 5000", got, "request bodies too")
+		got, err := plug.Foo(t.Context(), "GET "+api.URL+"/v1/items")
+		require.NoError(t, err)
+		assert.Equal(t, "200|from-api|GET /v1/items fetcher "+hostOf(t, api.URL)+" 0", got,
+			"status, response header and body reach the plugin; its header reaches the server")
 
-	got, err = plug.Foo(t.Context(), "HOST "+api.URL+"/v1/x internal.service")
-	require.NoError(t, err)
-	assert.Equal(t, "200|from-api|GET /v1/x fetcher "+hostOf(t, api.URL)+" 0", got,
-		"a Host override never reaches another virtual host than the allowed one")
+		got, err = plug.Foo(t.Context(), "POST "+api.URL+"/v1/items 5000")
+		require.NoError(t, err)
+		assert.Equal(t, "200|from-api|POST /v1/items  "+hostOf(t, api.URL)+" 5000", got, "request bodies too")
 
-	assert.Contains(t, logs.String(), `"msg":"plg: http request","key":"web/fetch","method":"POST","url":"`+
-		api.URL+`/v1/items"`, "requests are logged by plugin key")
-	assert.Contains(t, logs.String(), `"status":200,"response_bytes":`)
+		got, err = plug.Foo(t.Context(), "HOST "+api.URL+"/v1/x internal.service")
+		require.NoError(t, err)
+		assert.Equal(t, "200|from-api|GET /v1/x fetcher "+hostOf(t, api.URL)+" 0", got,
+			"a Host override never reaches another virtual host than the allowed one")
+
+		assert.Contains(t, logs.String(), `"msg":"plg: http request","key":"web/fetch","method":"POST","url":"`+
+			api.URL+`/v1/items"`, "requests are logged by plugin key")
+		assert.Contains(t, logs.String(), `"status":200,"response_bytes":`)
+	})
 }
 
 func TestPluginHTTPRefusals(t *testing.T) {
 	t.Parallel()
+
+	eachLanguage(t, httpRefusals)
+}
+
+func httpRefusals(t *testing.T, lang contractLanguage) {
+	t.Helper()
 
 	api := newAPIServer(t)
 	_, port, err := net.SplitHostPort(hostOf(t, api.URL))
@@ -201,7 +213,7 @@ func TestPluginHTTPRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := fetcherIn(t, ctr, "r"+strconv.Itoa(i), tc.opts...).Foo(t.Context(), "GET "+tc.url)
+			_, err := fetcherIn(t, lang, ctr, "r"+strconv.Itoa(i), tc.opts...).Foo(t.Context(), "GET "+tc.url)
 			require.ErrorContains(t, err, tc.want.Error())
 			require.NotErrorIs(t, err, plg.ErrCall, "a refusal is the plugin's own error, the instance lives on")
 		})
@@ -211,19 +223,29 @@ func TestPluginHTTPRefusals(t *testing.T) {
 func TestPluginHTTPRedirectsAreCheckedHopByHop(t *testing.T) {
 	t.Parallel()
 
-	api := newAPIServer(t)
-	plug := fetcher(t, io.Discard, plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	got, err := plug.Foo(t.Context(), "GET "+api.URL+"/redirect?to=/landed")
-	require.NoError(t, err)
-	assert.Equal(t, "200|from-api|GET /landed fetcher "+hostOf(t, api.URL)+" 0", got)
+		api := newAPIServer(t)
+		plug := fetcher(t, lang, io.Discard, plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
 
-	_, err = plug.Foo(t.Context(), "GET "+api.URL+"/redirect?to=http://169.254.169.254/latest/meta-data")
-	require.ErrorContains(t, err, httpcap.ErrHostNotAllowed.Error(), "a redirect to the metadata service")
+		got, err := plug.Foo(t.Context(), "GET "+api.URL+"/redirect?to=/landed")
+		require.NoError(t, err)
+		assert.Equal(t, "200|from-api|GET /landed fetcher "+hostOf(t, api.URL)+" 0", got)
+
+		_, err = plug.Foo(t.Context(), "GET "+api.URL+"/redirect?to=http://169.254.169.254/latest/meta-data")
+		require.ErrorContains(t, err, httpcap.ErrHostNotAllowed.Error(), "a redirect to the metadata service")
+	})
 }
 
 func TestPluginHTTPLimits(t *testing.T) {
 	t.Parallel()
+
+	eachLanguage(t, httpLimits)
+}
+
+func httpLimits(t *testing.T, lang contractLanguage) {
+	t.Helper()
 
 	api := newAPIServer(t)
 	endless := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +263,7 @@ func TestPluginHTTPLimits(t *testing.T) {
 	policy.MaxRequestBytes = 4 << 10
 	policy.MaxResponseBytes = 64 << 10
 	policy.MaxRequestsPerCall = 3
-	plug := fetcher(t, io.Discard, plg.WithHTTP(policy))
+	plug := fetcher(t, lang, io.Discard, plg.WithHTTP(policy))
 
 	t.Run("request size", func(t *testing.T) {
 		t.Parallel()
@@ -322,13 +344,19 @@ func (expiring) Value(any) any { return nil }
 func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 	t.Parallel()
 
+	eachLanguage(t, httpEndsWithTheCall)
+}
+
+func httpEndsWithTheCall(t *testing.T, lang contractLanguage) {
+	t.Helper()
+
 	ctr := httpContainer(t, io.Discard)
 
 	t.Run("cancelled call", func(t *testing.T) {
 		t.Parallel()
 
 		srv := stallingServer(t)
-		plug := fetcherIn(t, ctr, "cancel", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
+		plug := fetcherIn(t, lang, ctr, "cancel", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
 
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error)
@@ -350,7 +378,7 @@ func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 		t.Parallel()
 
 		srv := stallingServer(t)
-		plug := fetcherIn(t, ctr, "deadline", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
+		plug := fetcherIn(t, lang, ctr, "deadline", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
 
 		ctx := make(expiring)
 		done := make(chan error)
@@ -376,7 +404,7 @@ func TestPluginHTTPEndsWithTheCall(t *testing.T) {
 		srv := stallingServer(t)
 		policy := openPolicy(hostOf(t, srv.URL))
 		policy.Timeout = 50 * time.Millisecond
-		plug := fetcherIn(t, ctr, "timeout", plg.WithHTTP(policy))
+		plug := fetcherIn(t, lang, ctr, "timeout", plg.WithHTTP(policy))
 
 		_, err := plug.Foo(t.Context(), "GET "+srv.URL)
 		require.ErrorContains(t, err, httpcap.ErrTimeout.Error())
@@ -398,7 +426,7 @@ type benchTarget struct {
 	cmd  string
 }
 
-func benchFetcher(b *testing.B) benchTarget {
+func benchFetcher(b *testing.B, lang contractLanguage) benchTarget {
 	b.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -411,7 +439,7 @@ func benchFetcher(b *testing.B) benchTarget {
 
 	b.Cleanup(func() { assert.NoError(b, ctr.Close(context.Background())) })
 
-	store := goStorage(b, "web", map[string]string{"fetch": "fetcher"})
+	store := lang.storage(b, "web", map[string]string{"fetch": "fetcher"})
 	require.NoError(b, plg.Register[testcontract.Fooer](b.Context(), ctr, "web", plg.WithStorage(store),
 		plg.WithHTTP(openPolicy(hostOf(b, srv.URL)))))
 
@@ -420,7 +448,17 @@ func benchFetcher(b *testing.B) benchTarget {
 
 // BenchmarkHTTPRoundTripGo is one plugin call making one http.Get through the host, every protection on.
 func BenchmarkHTTPRoundTripGo(b *testing.B) {
-	target := benchFetcher(b)
+	benchHTTP(b, golang())
+}
+
+func BenchmarkHTTPRoundTripGoParallel(b *testing.B) {
+	benchHTTPParallel(b, golang())
+}
+
+func benchHTTP(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	target := benchFetcher(b, lang)
 
 	b.ReportAllocs()
 
@@ -432,8 +470,10 @@ func BenchmarkHTTPRoundTripGo(b *testing.B) {
 	}
 }
 
-func BenchmarkHTTPRoundTripGoParallel(b *testing.B) {
-	target := benchFetcher(b)
+func benchHTTPParallel(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	target := benchFetcher(b, lang)
 
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {

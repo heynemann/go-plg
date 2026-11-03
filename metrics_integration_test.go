@@ -155,7 +155,7 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	require.NoError(t, plg.Register[testcontract.Fooer](ctx, ctr, "m", plg.WithStorage(store), plg.WithPool(1, 1),
 		plg.WithGolangPlugins()))
 
-	fetch := fetcherIn(t, ctr, "web", plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
+	fetch := fetcherIn(t, golang(), ctr, "web", plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
 	broken := goStorage(t, "broken", map[string]string{"bad": "createfails"})
 	require.ErrorIs(t, plg.Register[testcontract.Fooer](ctx, ctr, "broken", plg.WithStorage(broken)), plg.ErrLoad)
 

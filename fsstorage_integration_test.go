@@ -72,7 +72,7 @@ func TestFSStoragesLoadThroughRegister(t *testing.T) {
 		decodeRecords(t, &logs), "and its skip is logged")
 }
 
-func TestEnabledLanguageWithoutAGuestFailsRegister(t *testing.T) {
+func TestEnabledLuaPluginsLoadFromAStorage(t *testing.T) {
 	t.Parallel()
 
 	ctr := newContainer(t)
@@ -86,11 +86,15 @@ func TestEnabledLanguageWithoutAGuestFailsRegister(t *testing.T) {
 
 			err := plg.Register[testcontract.Fooer](t.Context(), ctr, name,
 				append(opts, plg.WithStorage(plg.NewFSStorage(diskDir)))...)
-			require.ErrorIs(t, err, plg.ErrUnsupportedLanguage)
-			require.ErrorContains(t, err, "plugin scripted (storage "+diskDir+")")
+			require.NoError(t, err)
 
-			_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, name+"/single")
-			require.ErrorIs(t, err, plg.ErrNotFound, "nothing is published")
+			got, err := getFooer(t, ctr, name+"/scripted").Foo(t.Context(), "disk")
+			require.NoError(t, err)
+			assert.Equal(t, "hello, disk", got, "the Lua plugin next to the Go ones")
+
+			got, err = getFooer(t, ctr, name+"/single").Foo(t.Context(), "disk")
+			require.NoError(t, err)
+			assert.Equal(t, "hello, disk (single)", got)
 		})
 	}
 }

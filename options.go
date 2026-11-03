@@ -135,9 +135,8 @@ func registerOptions(name string, opts []RegisterOption) (*registerConfig, error
 	return cfg, nil
 }
 
-// settle validates the pool and memory options and fills in their defaults: a pool of 1 to GOMAXPROCS
-// instances and the Go guest's memory limit (every guest linked so far is Go's; the Lua and TypeScript guests
-// bring their own 64 MiB default with them).
+// settle validates the pool and memory options and fills in the pool's default, 1 to GOMAXPROCS instances.
+// Without WithMemoryLimit, each plugin gets its language's default limit ([registerConfig.limit]).
 func (c *registerConfig) settle() error {
 	switch {
 	case !c.poolSet:
@@ -148,17 +147,26 @@ func (c *registerConfig) settle() error {
 	default: // the pool given is valid
 	}
 
-	switch {
-	case !c.limitSet:
-		c.memoryLimit = goMemoryLimit
-	case c.memoryLimit < engine.PageSize || c.memoryLimit > maxMemoryLimit:
-		return fmt.Errorf("%w: WithMemoryLimit(%d): want from one %d-byte page to 4 GiB", ErrInvalidOption,
-			c.memoryLimit, engine.PageSize)
-	default:
+	if c.limitSet {
+		if c.memoryLimit < engine.PageSize || c.memoryLimit > maxMemoryLimit {
+			return fmt.Errorf("%w: WithMemoryLimit(%d): want from one %d-byte page to 4 GiB", ErrInvalidOption,
+				c.memoryLimit, engine.PageSize)
+		}
+
 		c.memoryLimit = wholePages(c.memoryLimit)
 	}
 
 	return nil
+}
+
+// limit returns the Register's per-instance memory limit for plugins of a language: WithMemoryLimit's, or the
+// language's default.
+func (c *registerConfig) limit(ld loader) uint64 {
+	if c.limitSet {
+		return c.memoryLimit
+	}
+
+	return ld.memoryLimit()
 }
 
 // wholePages rounds a memory limit down to whole wasm pages.
@@ -202,8 +210,8 @@ func WithPool(minimum, maximum int) RegisterOption {
 // WithMemoryLimit caps the linear memory of each instance of the Register's plugins, in bytes, rounded down to
 // whole 64 KiB wasm pages. A call that needs more fails and its instance is discarded; other instances are
 // unaffected. A plugin's [Descriptor.MemoryLimit] (memoryLimit in plugin.json) may lower the limit, never
-// raise it. It must be from 64 KiB to 4 GiB, otherwise Register fails with [ErrInvalidOption]. The default is
-// 128 MiB for Go plugins.
+// raise it. It must be from 64 KiB to 4 GiB, otherwise Register fails with [ErrInvalidOption]. The default
+// depends on the plugin's language: 128 MiB for Go plugins, 64 MiB for Lua and TypeScript plugins.
 func WithMemoryLimit(limit uint64) RegisterOption {
 	return func(c *registerConfig) {
 		c.memoryLimit, c.limitSet = limit, true
@@ -273,10 +281,13 @@ func (c *registerConfig) customGoGuest() error {
 	return nil
 }
 
-// guestFor returns the guest that runs the Register's lang plugins: its custom Go guest, or the linked guest.
-func (c *registerConfig) guestFor(lang Language) (guestreg.Guest, error) {
+// guestFor returns the loader of lang and the guest that runs the Register's lang plugins: its custom Go guest,
+// or the linked guest.
+//
+//nolint:ireturn // the loader is the per-language seam
+func (c *registerConfig) guestFor(lang Language) (loader, guestreg.Guest, error) {
 	if lang == LanguageGo && c.goGuest != nil {
-		return *c.goGuest, nil
+		return goLoader{}, *c.goGuest, nil
 	}
 
 	return guestFor(lang)

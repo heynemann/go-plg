@@ -38,7 +38,38 @@ GUEST_SYMBOLS := guestsrc/golang/symbols
 GO_GUEST := guest/golang/golang.wasm.gz
 GO_GUEST_RAW := $(BIN)/golang.wasm
 
-.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests verify-guests clean
+# The script guests are C, built with a pinned wasi-sdk from pinned upstream sources. scripts/fetch-pinned.sh
+# downloads each archive once into PLG_BUILD_CACHE, checks its SHA-256 and unpacks it there.
+PLG_BUILD_CACHE ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/plg-build
+WASI_SDK_VERSION := 34.0
+WASI_SDK_URL := https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-$(WASI_SDK_VERSION)-x86_64-linux.tar.gz
+WASI_SDK_SHA256 := b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
+WASI_SDK := $(PLG_BUILD_CACHE)/wasi-sdk-$(WASI_SDK_VERSION)-x86_64-linux
+WASI_CC := $(WASI_SDK)/bin/clang
+# Reproducible C builds: no build paths in the output (the file prefix maps; debug info is stripped) and no
+# timestamps (nothing uses __DATE__ or __TIME__).
+WASI_CFLAGS := --target=wasm32-wasip1 -O2 -std=gnu23 -ffile-prefix-map=$(CURDIR)=. \
+	-ffile-prefix-map=$(PLG_BUILD_CACHE)=plg-build
+
+# Lua 5.4 and the plg glue (guestsrc/lua). Lua raises errors with setjmp/longjmp, compiled to wasm exception
+# handling (wazero's experimental feature, which every plg runtime enables). Plugins get the base, coroutine,
+# table, string, math and utf8 libraries (io, os, package and debug are not linked) and the glue's json. Lua's
+# own sources build as released, configured through LUA_USER_H (guestsrc/lua/luauser.h).
+LUA_VERSION := 5.4.9
+LUA_URL := https://www.lua.org/ftp/lua-$(LUA_VERSION).tar.gz
+LUA_SHA256 := 2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6
+LUA := $(PLG_BUILD_CACHE)/lua-$(LUA_VERSION)
+LUA_CORE := lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable \
+	ltm lundump lvm lzio lauxlib lbaselib lcorolib lmathlib lstrlib ltablib lutf8lib
+LUA_FLAGS := -I$(LUA)/src -Iguestsrc/lua '-DLUA_USER_H="luauser.h"' -mllvm -wasm-enable-sjlj \
+	-mllvm -wasm-use-legacy-eh=false
+LUA_GUEST := guest/lua/lua.wasm
+# The Lua guest's wasm stack, for the C recursion of Lua (bounded by LUAI_MAXCCALLS) and of the glue's codec
+# (about 100 bytes per level of the wire's 10000-level nesting limit). It comes first in memory, so overflowing
+# it traps instead of overwriting data.
+LUA_STACK := 2097152
+
+.PHONY: check fmt-check lint test coverage allocs budgets repeat bench symbols guests go-guest lua-guest verify-guests clean
 
 check: fmt-check lint test coverage allocs budgets repeat
 
@@ -88,15 +119,32 @@ symbols: $(BIN)/yaegi
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
+guests: go-guest lua-guest
+
 # Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
-guests:
+go-guest:
 	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(GO_GUEST_RAW) ./guestsrc/golang
 	go run scripts/gzipwasm.go $(GO_GUEST_RAW) $(GO_GUEST)
 
+$(WASI_CC):
+	scripts/fetch-pinned.sh $(WASI_SDK_URL) $(WASI_SDK_SHA256) $(WASI_SDK)
+
+$(LUA)/src/lua.h:
+	scripts/fetch-pinned.sh $(LUA_URL) $(LUA_SHA256) $(LUA)
+
+# Build the Lua guest: Lua and the plg glue as a wasip1 reactor. The glue is checked with every warning as an
+# error first; Lua's own sources are built as released.
+lua-guest: $(WASI_CC) $(LUA)/src/lua.h
+	$(WASI_CC) $(WASI_CFLAGS) $(LUA_FLAGS) -Wall -Wextra -Werror -fsyntax-only guestsrc/lua/*.c
+	$(WASI_CC) $(WASI_CFLAGS) $(LUA_FLAGS) -w -mexec-model=reactor -Wl,-z,stack-size=$(LUA_STACK) -Wl,--stack-first \
+		-Wl,--strip-debug \
+		-o $(LUA_GUEST) $(LUA_CORE:%=$(LUA)/src/%.c) guestsrc/lua/*.c -lsetjmp
+	chmod 644 $(LUA_GUEST)
+
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests
-	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST)
-	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST))"
+	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST)
+	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST))"
 
 clean:
 	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT)
