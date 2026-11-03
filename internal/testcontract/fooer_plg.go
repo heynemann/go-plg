@@ -9,6 +9,7 @@ import (
 	"time"
 
 	plg "github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/plgimpl"
 )
 
 // plgFooerSource is the package's Go source, which the Go guest interprets. plg leaves out the test
@@ -135,20 +136,2043 @@ func (a *plgHosted) Value(p0 context.Context) (string, error) {
 	return a.WValue(p0)
 }
 
+// plgFooerFast implements Fooer for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgFooerFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Fooer = (*plgFooerFast)(nil)
+
+func (a *plgFooerFast) Boil(p0 context.Context, p1 Celsius) (bool, float64, error) {
+	c := plgFooerBoilCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgFooerBoilCall{}
+	}
+
+	return c.r0, c.r1, err
+}
+
+// plgFooerBoilCall is one call of Fooer.Boil: its arguments, then its results.
+type plgFooerBoilCall struct {
+	p1 Celsius
+	r0 bool
+	r1 float64
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerBoilCall) AppendArgs(b []byte) ([]byte, error) {
+	b = plgimpl.AppendFloat(b, float64(c.p1))
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerBoilCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadBool[bool](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	c.r1, err = plgimpl.ReadFloat64[float64](r)
+	if err != nil {
+		return plgimpl.Result(err, 1)
+	}
+
+	return nil
+}
+
+func (a *plgFooerFast) Count(p0 context.Context) (int, error) {
+	c := plgFooerCountCall{}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgFooerCountCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgFooerCountCall is one call of Fooer.Count: its arguments, then its results.
+type plgFooerCountCall struct {
+	r0 int
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerCountCall) AppendArgs(b []byte) ([]byte, error) {
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerCountCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgFooerFast) Fail(p0 context.Context, p1 string) error {
+	c := plgFooerFailCall{p1: p1}
+
+	return a.inv.Invoke(p0, 2, &c)
+}
+
+// plgFooerFailCall is one call of Fooer.Fail: its arguments, then its results.
+type plgFooerFailCall struct {
+	p1 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerFailCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendString(b, string(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerFailCall) DecodeResults(r *plgimpl.Reader) error {
+	return nil
+}
+
+func (a *plgFooerFast) Foo(p0 context.Context, p1 string) (string, error) {
+	c := plgFooerFooCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 3, &c)
+	if err != nil {
+		c = plgFooerFooCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgFooerFooCall is one call of Fooer.Foo: its arguments, then its results.
+type plgFooerFooCall struct {
+	p1 string
+	r0 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerFooCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendString(b, string(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerFooCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgFooerFast) Scalars(p0 context.Context, p1 bool, p2 int, p3 int8, p4 int16, p5 int32, p6 int64, p7 uint, p8 uint8, p9 uint16, p10 uint32, p11 uint64, p12 float32, p13 float64, p14 string) (bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string, error) {
+	c := plgFooerScalarsCall{p1: p1, p2: p2, p3: p3, p4: p4, p5: p5, p6: p6, p7: p7, p8: p8, p9: p9, p10: p10, p11: p11, p12: p12, p13: p13, p14: p14}
+
+	err := a.inv.Invoke(p0, 4, &c)
+	if err != nil {
+		c = plgFooerScalarsCall{}
+	}
+
+	return c.r0, c.r1, c.r2, c.r3, c.r4, c.r5, c.r6, c.r7, c.r8, c.r9, c.r10, c.r11, c.r12, c.r13, err
+}
+
+// plgFooerScalarsCall is one call of Fooer.Scalars: its arguments, then its results.
+type plgFooerScalarsCall struct {
+	p1  bool
+	p2  int
+	p3  int8
+	p4  int16
+	p5  int32
+	p6  int64
+	p7  uint
+	p8  uint8
+	p9  uint16
+	p10 uint32
+	p11 uint64
+	p12 float32
+	p13 float64
+	p14 string
+	r0  bool
+	r1  int
+	r2  int8
+	r3  int16
+	r4  int32
+	r5  int64
+	r6  uint
+	r7  uint8
+	r8  uint16
+	r9  uint32
+	r10 uint64
+	r11 float32
+	r12 float64
+	r13 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerScalarsCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b = plgimpl.AppendBool(b, bool(c.p1))
+	b, err = plgimpl.AppendInt(b, int64(c.p2))
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p3))
+	if err != nil {
+		return b, plgimpl.Param(err, 3)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p4))
+	if err != nil {
+		return b, plgimpl.Param(err, 4)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p5))
+	if err != nil {
+		return b, plgimpl.Param(err, 5)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p6))
+	if err != nil {
+		return b, plgimpl.Param(err, 6)
+	}
+
+	b, err = plgimpl.AppendUint(b, uint64(c.p7))
+	if err != nil {
+		return b, plgimpl.Param(err, 7)
+	}
+
+	b, err = plgimpl.AppendUint(b, uint64(c.p8))
+	if err != nil {
+		return b, plgimpl.Param(err, 8)
+	}
+
+	b, err = plgimpl.AppendUint(b, uint64(c.p9))
+	if err != nil {
+		return b, plgimpl.Param(err, 9)
+	}
+
+	b, err = plgimpl.AppendUint(b, uint64(c.p10))
+	if err != nil {
+		return b, plgimpl.Param(err, 10)
+	}
+
+	b, err = plgimpl.AppendUint(b, uint64(c.p11))
+	if err != nil {
+		return b, plgimpl.Param(err, 11)
+	}
+
+	b = plgimpl.AppendFloat(b, float64(c.p12))
+	b = plgimpl.AppendFloat(b, float64(c.p13))
+	b, err = plgimpl.AppendString(b, string(c.p14))
+	if err != nil {
+		return b, plgimpl.Param(err, 14)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerScalarsCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadBool[bool](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	c.r1, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.Result(err, 1)
+	}
+
+	c.r2, err = plgimpl.ReadInt[int8](r, "int8")
+	if err != nil {
+		return plgimpl.Result(err, 2)
+	}
+
+	c.r3, err = plgimpl.ReadInt[int16](r, "int16")
+	if err != nil {
+		return plgimpl.Result(err, 3)
+	}
+
+	c.r4, err = plgimpl.ReadInt[int32](r, "int32")
+	if err != nil {
+		return plgimpl.Result(err, 4)
+	}
+
+	c.r5, err = plgimpl.ReadInt[int64](r, "int64")
+	if err != nil {
+		return plgimpl.Result(err, 5)
+	}
+
+	c.r6, err = plgimpl.ReadUint[uint](r, "uint")
+	if err != nil {
+		return plgimpl.Result(err, 6)
+	}
+
+	c.r7, err = plgimpl.ReadUint[uint8](r, "uint8")
+	if err != nil {
+		return plgimpl.Result(err, 7)
+	}
+
+	c.r8, err = plgimpl.ReadUint[uint16](r, "uint16")
+	if err != nil {
+		return plgimpl.Result(err, 8)
+	}
+
+	c.r9, err = plgimpl.ReadUint[uint32](r, "uint32")
+	if err != nil {
+		return plgimpl.Result(err, 9)
+	}
+
+	c.r10, err = plgimpl.ReadUint[uint64](r, "uint64")
+	if err != nil {
+		return plgimpl.Result(err, 10)
+	}
+
+	c.r11, err = plgimpl.ReadFloat32[float32](r, "float32")
+	if err != nil {
+		return plgimpl.Result(err, 11)
+	}
+
+	c.r12, err = plgimpl.ReadFloat64[float64](r)
+	if err != nil {
+		return plgimpl.Result(err, 12)
+	}
+
+	c.r13, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 13)
+	}
+
+	return nil
+}
+
+func (a *plgFooerFast) Spin(p0 context.Context, p1 int) (int, error) {
+	c := plgFooerSpinCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 5, &c)
+	if err != nil {
+		c = plgFooerSpinCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgFooerSpinCall is one call of Fooer.Spin: its arguments, then its results.
+type plgFooerSpinCall struct {
+	p1 int
+	r0 int
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFooerSpinCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendInt(b, int64(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFooerSpinCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+// plgShaperFast implements Shaper for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgShaperFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Shaper = (*plgShaperFast)(nil)
+
+func (a *plgShaperFast) Bump(p0 context.Context, p1 Order, p2 int) (Order, error) {
+	c := plgShaperBumpCall{p1: p1, p2: p2}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgShaperBumpCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperBumpCall is one call of Shaper.Bump: its arguments, then its results.
+type plgShaperBumpCall struct {
+	p1 Order
+	p2 int
+	r0 Order
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperBumpCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeOrder(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p2))
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperBumpCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeOrder(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Echo(p0 context.Context, p1 Order) (Order, error) {
+	c := plgShaperEchoCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgShaperEchoCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperEchoCall is one call of Shaper.Echo: its arguments, then its results.
+type plgShaperEchoCall struct {
+	p1 Order
+	r0 Order
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperEchoCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeOrder(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperEchoCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeOrder(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) EchoPtr(p0 context.Context, p1 *Order) (*Order, error) {
+	c := plgShaperEchoPtrCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 2, &c)
+	if err != nil {
+		c = plgShaperEchoPtrCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperEchoPtrCall is one call of Shaper.EchoPtr: its arguments, then its results.
+type plgShaperEchoPtrCall struct {
+	p1 *Order
+	r0 *Order
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperEchoPtrCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode9(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperEchoPtrCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode9(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Grow(p0 context.Context, p1 int, p2 int) (*Tree, error) {
+	c := plgShaperGrowCall{p1: p1, p2: p2}
+
+	err := a.inv.Invoke(p0, 3, &c)
+	if err != nil {
+		c = plgShaperGrowCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperGrowCall is one call of Shaper.Grow: its arguments, then its results.
+type plgShaperGrowCall struct {
+	p1 int
+	p2 int
+	r0 *Tree
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperGrowCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendInt(b, int64(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p2))
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperGrowCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode10(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Index(p0 context.Context, p1 []Line) (map[string][]Line, error) {
+	c := plgShaperIndexCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 4, &c)
+	if err != nil {
+		c = plgShaperIndexCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperIndexCall is one call of Shaper.Index: its arguments, then its results.
+type plgShaperIndexCall struct {
+	p1 []Line
+	r0 map[string][]Line
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperIndexCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperIndexCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode12(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Inspect(p0 context.Context, p1 Order) (Inspection, error) {
+	c := plgShaperInspectCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 5, &c)
+	if err != nil {
+		c = plgShaperInspectCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperInspectCall is one call of Shaper.Inspect: its arguments, then its results.
+type plgShaperInspectCall struct {
+	p1 Order
+	r0 Inspection
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperInspectCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeOrder(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperInspectCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeInspection(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Later(p0 context.Context, p1 time.Time, p2 int) (time.Time, error) {
+	c := plgShaperLaterCall{p1: p1, p2: p2}
+
+	err := a.inv.Invoke(p0, 6, &c)
+	if err != nil {
+		c = plgShaperLaterCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperLaterCall is one call of Shaper.Later: its arguments, then its results.
+type plgShaperLaterCall struct {
+	p1 time.Time
+	p2 int
+	r0 time.Time
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperLaterCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendTime(b, c.p1)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(c.p2))
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperLaterCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadTime(r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Reverse(p0 context.Context, p1 []byte) ([]byte, error) {
+	c := plgShaperReverseCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 7, &c)
+	if err != nil {
+		c = plgShaperReverseCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperReverseCall is one call of Shaper.Reverse: its arguments, then its results.
+type plgShaperReverseCall struct {
+	p1 []byte
+	r0 []byte
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperReverseCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendBytes(b, []byte(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperReverseCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadBytes[[]byte](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgShaperFast) Sum(p0 context.Context, p1 int, p2 ...int) (int, error) {
+	c := plgShaperSumCall{p1: p1, p2: p2}
+
+	err := a.inv.Invoke(p0, 8, &c)
+	if err != nil {
+		c = plgShaperSumCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgShaperSumCall is one call of Shaper.Sum: its arguments, then its results.
+type plgShaperSumCall struct {
+	p1 int
+	p2 []int
+	r0 int
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgShaperSumCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendInt(b, int64(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	b, err = plgEncode13(b, &c.p2, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgShaperSumCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+// plgHostedFast implements Hosted for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgHostedFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Hosted = (*plgHostedFast)(nil)
+
+func (a *plgHostedFast) Describe(p0 context.Context, p1 string) (User, error) {
+	c := plgHostedDescribeCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgHostedDescribeCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedDescribeCall is one call of Hosted.Describe: its arguments, then its results.
+type plgHostedDescribeCall struct {
+	p1 string
+	r0 User
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedDescribeCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendString(b, string(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedDescribeCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeUser(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgHostedFast) Origin(p0 context.Context) (string, error) {
+	c := plgHostedOriginCall{}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgHostedOriginCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedOriginCall is one call of Hosted.Origin: its arguments, then its results.
+type plgHostedOriginCall struct {
+	r0 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedOriginCall) AppendArgs(b []byte) ([]byte, error) {
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedOriginCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgHostedFast) Relay(p0 context.Context, p1 string) (string, error) {
+	c := plgHostedRelayCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 2, &c)
+	if err != nil {
+		c = plgHostedRelayCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedRelayCall is one call of Hosted.Relay: its arguments, then its results.
+type plgHostedRelayCall struct {
+	p1 string
+	r0 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedRelayCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendString(b, string(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedRelayCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgHostedFast) Total(p0 context.Context, p1 int, p2 ...int) (int, error) {
+	c := plgHostedTotalCall{p1: p1, p2: p2}
+
+	err := a.inv.Invoke(p0, 3, &c)
+	if err != nil {
+		c = plgHostedTotalCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedTotalCall is one call of Hosted.Total: its arguments, then its results.
+type plgHostedTotalCall struct {
+	p1 int
+	p2 []int
+	r0 int
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedTotalCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgimpl.AppendInt(b, int64(c.p1))
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	b, err = plgEncode13(b, &c.p2, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 2)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedTotalCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgHostedFast) Value(p0 context.Context) (string, error) {
+	c := plgHostedValueCall{}
+
+	err := a.inv.Invoke(p0, 4, &c)
+	if err != nil {
+		c = plgHostedValueCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedValueCall is one call of Hosted.Value: its arguments, then its results.
+type plgHostedValueCall struct {
+	r0 string
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedValueCall) AppendArgs(b []byte) ([]byte, error) {
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedValueCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	c.r0, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func plgEncodeBase(b []byte, v *Base, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.ID))
+	if err != nil {
+		return b, plgimpl.AtField(err, "ID")
+	}
+
+	return b, nil
+}
+
+func plgDecodeBase(r *plgimpl.Reader, v *Base, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.ID, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "ID")
+	}
+
+	return nil
+}
+
+func plgEncodeLine(b []byte, v *Line, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.SKU))
+	if err != nil {
+		return b, plgimpl.AtField(err, "SKU")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Qty))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Qty")
+	}
+
+	b = plgimpl.AppendFloat(b, float64(v.Price))
+	return b, nil
+}
+
+func plgDecodeLine(r *plgimpl.Reader, v *Line, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.SKU, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "SKU")
+	}
+
+	v.Qty, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Qty")
+	}
+
+	v.Price, err = plgimpl.ReadFloat64[float64](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Price")
+	}
+
+	return nil
+}
+
+func plgEncode(b []byte, v *[]Line, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncodeLine(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode(r *plgimpl.Reader, v *[]Line, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 20)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]Line, n)
+	for i := range s {
+		err = plgDecodeLine(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncode3(b []byte, v **Line, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeLine(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode3(r *plgimpl.Reader, v **Line, depth int) error {
+	present, err := plgimpl.ReadPresent(r, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Line)
+
+	err = plgDecodeLine(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode2(b []byte, v *map[string]*Line, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for k, e := range *v {
+		b, err = plgimpl.AppendString(b, string(k))
+		if err == nil {
+			b, err = plgEncode3(b, &e, depth+1)
+		}
+
+		if err != nil {
+			return b, plgimpl.AtKey(err, string(k))
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode2(r *plgimpl.Reader, v *map[string]*Line, depth int) error {
+	n, err := plgimpl.ReadMapLen(r, depth, 1)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	m := make(map[string]*Line, n)
+
+	for range n {
+		k, err := plgimpl.ReadKey(r, m)
+		if err != nil {
+			return err
+		}
+
+		var e *Line
+
+		err = plgDecode3(r, &e, depth+1)
+		if err != nil {
+			return plgimpl.AtKey(err, string(k))
+		}
+
+		m[k] = e
+	}
+
+	if len(m) != n {
+		return plgimpl.DuplicateKeys()
+	}
+
+	*v = m
+
+	return nil
+}
+
+func plgEncodePoint(b []byte, v *Point, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.X))
+	if err != nil {
+		return b, plgimpl.AtField(err, "X")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Y))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Y")
+	}
+
+	return b, nil
+}
+
+func plgDecodePoint(r *plgimpl.Reader, v *Point, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.X, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "X")
+	}
+
+	v.Y, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Y")
+	}
+
+	return nil
+}
+
+func plgEncode4(b []byte, v **Point, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodePoint(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode4(r *plgimpl.Reader, v **Point, depth int) error {
+	present, err := plgimpl.ReadPresent(r, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Point)
+
+	err = plgDecodePoint(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode5(b []byte, v *[]string, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgimpl.AppendString(b, string((*v)[i]))
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode5(r *plgimpl.Reader, v *[]string, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]string, n)
+	for i := range s {
+		s[i], err = plgimpl.ReadString[string](r)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncode6(b []byte, v *map[string][]string, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for k, e := range *v {
+		b, err = plgimpl.AppendString(b, string(k))
+		if err == nil {
+			b, err = plgEncode5(b, &e, depth+1)
+		}
+
+		if err != nil {
+			return b, plgimpl.AtKey(err, string(k))
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode6(r *plgimpl.Reader, v *map[string][]string, depth int) error {
+	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	m := make(map[string][]string, n)
+
+	for range n {
+		k, err := plgimpl.ReadKey(r, m)
+		if err != nil {
+			return err
+		}
+
+		var e []string
+
+		err = plgDecode5(r, &e, depth+1)
+		if err != nil {
+			return plgimpl.AtKey(err, string(k))
+		}
+
+		m[k] = e
+	}
+
+	if len(m) != n {
+		return plgimpl.DuplicateKeys()
+	}
+
+	*v = m
+
+	return nil
+}
+
+func plgEncode8(b []byte, v *[]float32, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b = plgimpl.AppendFloat(b, float64((*v)[i]))
+	}
+
+	return b, nil
+}
+
+func plgDecode8(r *plgimpl.Reader, v *[]float32, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]float32, n)
+	for i := range s {
+		s[i], err = plgimpl.ReadFloat32[float32](r, "float32")
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncode7(b []byte, v *[][]float32, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncode8(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode7(r *plgimpl.Reader, v *[][]float32, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([][]float32, n)
+	for i := range s {
+		err = plgDecode8(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncodeOrder(b []byte, v *Order, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgEncodeBase(b, &v.Base, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Base")
+	}
+
+	b, err = plgimpl.AppendTime(b, v.When)
+	if err != nil {
+		return b, plgimpl.AtField(err, "When")
+	}
+
+	b, err = plgEncode(b, &v.Lines, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Lines")
+	}
+
+	b, err = plgEncode2(b, &v.ByCode, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "ByCode")
+	}
+
+	b, err = plgimpl.AppendBytes(b, []byte(v.Raw))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Raw")
+	}
+
+	b, err = plgEncode4(b, &v.Origin, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Origin")
+	}
+
+	b, err = plgEncode5(b, &v.Tags, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Tags")
+	}
+
+	b, err = plgEncode6(b, &v.Notes, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Notes")
+	}
+
+	b, err = plgEncode7(b, &v.Grid, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Grid")
+	}
+
+	return b, nil
+}
+
+func plgDecodeOrder(r *plgimpl.Reader, v *Order, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	err = plgDecodeBase(r, &v.Base, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Base")
+	}
+
+	v.When, err = plgimpl.ReadTime(r)
+	if err != nil {
+		return plgimpl.AtField(err, "When")
+	}
+
+	err = plgDecode(r, &v.Lines, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Lines")
+	}
+
+	err = plgDecode2(r, &v.ByCode, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "ByCode")
+	}
+
+	v.Raw, err = plgimpl.ReadBytes[[]byte](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Raw")
+	}
+
+	err = plgDecode4(r, &v.Origin, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Origin")
+	}
+
+	err = plgDecode5(r, &v.Tags, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Tags")
+	}
+
+	err = plgDecode6(r, &v.Notes, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Notes")
+	}
+
+	err = plgDecode7(r, &v.Grid, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Grid")
+	}
+
+	return nil
+}
+
+func plgEncode9(b []byte, v **Order, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeOrder(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode9(r *plgimpl.Reader, v **Order, depth int) error {
+	present, err := plgimpl.ReadPresent(r, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Order)
+
+	err = plgDecodeOrder(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode11(b []byte, v *[]*Tree, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncode10(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode11(r *plgimpl.Reader, v *[]*Tree, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 1)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]*Tree, n)
+	for i := range s {
+		err = plgDecode10(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncodeTree(b []byte, v *Tree, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Name))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Name")
+	}
+
+	b, err = plgEncode11(b, &v.Kids, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Kids")
+	}
+
+	return b, nil
+}
+
+func plgDecodeTree(r *plgimpl.Reader, v *Tree, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.Name, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Name")
+	}
+
+	err = plgDecode11(r, &v.Kids, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Kids")
+	}
+
+	return nil
+}
+
+func plgEncode10(b []byte, v **Tree, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeTree(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode10(r *plgimpl.Reader, v **Tree, depth int) error {
+	present, err := plgimpl.ReadPresent(r, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Tree)
+
+	err = plgDecodeTree(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode12(b []byte, v *map[string][]Line, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for k, e := range *v {
+		b, err = plgimpl.AppendString(b, string(k))
+		if err == nil {
+			b, err = plgEncode(b, &e, depth+1)
+		}
+
+		if err != nil {
+			return b, plgimpl.AtKey(err, string(k))
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode12(r *plgimpl.Reader, v *map[string][]Line, depth int) error {
+	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	m := make(map[string][]Line, n)
+
+	for range n {
+		k, err := plgimpl.ReadKey(r, m)
+		if err != nil {
+			return err
+		}
+
+		var e []Line
+
+		err = plgDecode(r, &e, depth+1)
+		if err != nil {
+			return plgimpl.AtKey(err, string(k))
+		}
+
+		m[k] = e
+	}
+
+	if len(m) != n {
+		return plgimpl.DuplicateKeys()
+	}
+
+	*v = m
+
+	return nil
+}
+
+func plgEncodeInspection(b []byte, v *Inspection, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.ID))
+	if err != nil {
+		return b, plgimpl.AtField(err, "ID")
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Zone))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Zone")
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Internal))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Internal")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Unix))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Unix")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Nanos))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Nanos")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Lines))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Lines")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.ByCode))
+	if err != nil {
+		return b, plgimpl.AtField(err, "ByCode")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Raw))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Raw")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Tags))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Tags")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Notes))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Notes")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Grid))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Grid")
+	}
+
+	b = plgimpl.AppendBool(b, bool(v.Origin))
+	b = plgimpl.AppendBool(b, bool(v.NilEntry))
+	return b, nil
+}
+
+func plgDecodeInspection(r *plgimpl.Reader, v *Inspection, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.ID, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "ID")
+	}
+
+	v.Zone, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Zone")
+	}
+
+	v.Internal, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Internal")
+	}
+
+	v.Unix, err = plgimpl.ReadInt[int64](r, "int64")
+	if err != nil {
+		return plgimpl.AtField(err, "Unix")
+	}
+
+	v.Nanos, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Nanos")
+	}
+
+	v.Lines, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Lines")
+	}
+
+	v.ByCode, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "ByCode")
+	}
+
+	v.Raw, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Raw")
+	}
+
+	v.Tags, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Tags")
+	}
+
+	v.Notes, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Notes")
+	}
+
+	v.Grid, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Grid")
+	}
+
+	v.Origin, err = plgimpl.ReadBool[bool](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Origin")
+	}
+
+	v.NilEntry, err = plgimpl.ReadBool[bool](r)
+	if err != nil {
+		return plgimpl.AtField(err, "NilEntry")
+	}
+
+	return nil
+}
+
+func plgEncode13(b []byte, v *[]int, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgimpl.AppendInt(b, int64((*v)[i]))
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode13(r *plgimpl.Reader, v *[]int, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]int, n)
+	for i := range s {
+		s[i], err = plgimpl.ReadInt[int](r, "int")
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncode14(b []byte, v **User, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeUser(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode14(r *plgimpl.Reader, v **User, depth int) error {
+	present, err := plgimpl.ReadPresent(r, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(User)
+
+	err = plgDecodeUser(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncodeUser(b []byte, v *User, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendTime(b, v.Since)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Since")
+	}
+
+	b, err = plgEncode14(b, &v.Manager, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Manager")
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.ID))
+	if err != nil {
+		return b, plgimpl.AtField(err, "ID")
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Name))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Name")
+	}
+
+	b, err = plgEncode5(b, &v.Tags, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Tags")
+	}
+
+	return b, nil
+}
+
+func plgDecodeUser(r *plgimpl.Reader, v *User, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.Since, err = plgimpl.ReadTime(r)
+	if err != nil {
+		return plgimpl.AtField(err, "Since")
+	}
+
+	err = plgDecode14(r, &v.Manager, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Manager")
+	}
+
+	v.ID, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "ID")
+	}
+
+	v.Name, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Name")
+	}
+
+	err = plgDecode5(r, &v.Tags, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Tags")
+	}
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
 		Adapter:   reflect.TypeFor[plgFooer](),
 		Source:    plgFooerSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgFooerFast{inv: inv} },
+		Layout:    "22866fb64b6d2749efd0d8925b7758a8b273e20d9a01cc14ece986afb7017ffe",
 	})
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Shaper](),
 		Adapter:   reflect.TypeFor[plgShaper](),
 		Source:    plgFooerSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgShaperFast{inv: inv} },
+		Layout:    "287b7543ce1fb12500eb836f12c9020885176039f2a34185dc110a72a44f5b45",
 	})
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Hosted](),
 		Adapter:   reflect.TypeFor[plgHosted](),
 		Source:    plgFooerSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgHostedFast{inv: inv} },
+		Layout:    "254d1f3e69cec0be41216606dfdbd53288cc6e4c66ba6904e60a2cb731efbf0e",
 	})
 }

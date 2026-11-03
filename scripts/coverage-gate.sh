@@ -18,8 +18,10 @@
 #   - examples/service/main.go, for the same reason: the service's main only wires signals and os.Exit around
 #     `run`, which the tests call in process; TestServiceProgram runs the built program as a subprocess.
 #   - generated files (the Go convention's generated-code header line), found by scanning the tree: the
-#     yaegi symbol tables in guestsrc/golang/symbols and the `plg gen` output in internal/testcontract and
-#     examples/pricing. The symbol tables' interface wrapper methods only run when a plugin calls through them.
+#     yaegi symbol tables in guestsrc/golang/symbols and the `plg gen` output in internal/testcontract,
+#     internal/fastcontract and examples/pricing. The symbol tables' interface wrapper methods only run when a
+#     plugin calls through them; the generated codecs are held to the reflective codec by the fast-path parity
+#     fuzz test instead.
 #   - packages without statements (pure declarations) contribute nothing.
 set -euo pipefail
 

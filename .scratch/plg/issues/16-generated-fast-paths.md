@@ -4,9 +4,9 @@
 
 **Blocked by:** 04 (`plg gen`), 14 (OTel metrics and benchmark budgets)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Benchmarks compare generic vs generated per guest; the gains are recorded in PLAN.md
-- [ ] Generated paths pass the full shared contract test suite
-- [ ] If the gain is insignificant, the ticket closes with the data and no generated paths are shipped
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched
+- [x] Benchmarks compare generic vs generated per guest; the gains are recorded in PLAN.md
+- [x] Generated paths pass the full shared contract test suite
+- [x] If the gain is insignificant, the ticket closes with the data and no generated paths are shipped
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, unit tests for the happy path and every edge case (no test theater), integration tests with real storages/plugins where the behavior touches them, and benchmarks for any hot path touched

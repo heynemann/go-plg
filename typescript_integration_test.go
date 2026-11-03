@@ -649,17 +649,7 @@ func heapInUse() int64 {
 // BenchmarkCallTypeScript is one call into a TypeScript plugin (Foo: an imported function, string building), with
 // every protection on.
 func BenchmarkCallTypeScript(b *testing.B) {
-	ref := getFooer(b, fooerContainerIn(b, typescript(), map[string]string{"ref": "fooer"}), "fooer/ref")
-	ctx := b.Context()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := ref.Foo(ctx, "bench")
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCall(b, typescript())
 }
 
 // BenchmarkCallTypeScriptParallel calls a TypeScript plugin from GOMAXPROCS goroutines: with a pool of one
@@ -671,18 +661,7 @@ func BenchmarkCallTypeScriptParallel(b *testing.B) {
 // BenchmarkCallTypeScriptStruct is one call into a TypeScript plugin with SampleOrder as argument and result: the
 // glue builds the JS objects from the wire encoding and encodes them back.
 func BenchmarkCallTypeScriptStruct(b *testing.B) {
-	shaper, _ := getShaperIn(b, typescript())
-	ctx := b.Context()
-	order := testcontract.SampleOrder()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := shaper.Echo(ctx, order)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCallStruct(b, typescript())
 }
 
 // BenchmarkCallTypeScriptHost is one TypeScript plugin call awaiting one host call (Value).

@@ -13,10 +13,12 @@ import (
 	"github.com/heynemann/go-plg"
 	_ "github.com/heynemann/go-plg/guest/lua"
 	_ "github.com/heynemann/go-plg/guest/typescript"
+	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
 // contractLanguage is a guest language the contract suite holds to the same behaviour (RULES.md §2): the suite's
-// tests run once per language against equivalent plugins, testdata/plugins/<dir>/<case>/<entry>.
+// tests run once per language against equivalent plugins, testdata/plugins/<dir>/<case>/<entry>, and once per
+// binder: the fast paths plg gen generated for internal/testcontract, and plg's generic binder.
 type contractLanguage struct {
 	// field names a struct field as the language's conversion errors do: the Go name, or the json name the
 	// script guests know.
@@ -27,6 +29,8 @@ type contractLanguage struct {
 	// exactInts reports whether the language's integer arithmetic is exact beyond 2^53 (Go's and Lua's 64-bit
 	// integers), so a plugin computing such an integer fails to return it instead of rounding it.
 	exactInts bool
+	// generic serves the contracts with the generic binder instead of the generated fast paths.
+	generic bool
 }
 
 func goName(name, _ string) string { return name }
@@ -55,17 +59,39 @@ func contractLanguages() []contractLanguage {
 	return []contractLanguage{golang(), luaLanguage(), typescript()}
 }
 
-// eachLanguage runs test as a parallel subtest per contract language.
+// eachLanguage runs test as a parallel subtest per contract language and binder.
 func eachLanguage(t *testing.T, test func(t *testing.T, lang contractLanguage)) {
 	t.Helper()
 
 	for _, lang := range contractLanguages() {
-		t.Run(string(lang.lang), func(t *testing.T) {
-			t.Parallel()
+		for _, generic := range []bool{false, true} {
+			lang.generic = generic
 
-			test(t, lang)
-		})
+			t.Run(lang.name(), func(t *testing.T) {
+				t.Parallel()
+
+				test(t, lang)
+			})
+		}
 	}
+}
+
+// name names the language and its binder.
+func (l contractLanguage) name() string {
+	if l.generic {
+		return string(l.lang) + "/generic"
+	}
+
+	return string(l.lang) + "/generated"
+}
+
+// binder makes ctr serve the contracts with the language's binder; call it before registering.
+func (l contractLanguage) binder(ctr *plg.Container) *plg.Container {
+	if l.generic {
+		plg.UseGenericBinder(ctr)
+	}
+
+	return ctr
 }
 
 // files returns the source directory of the language's test plugin name.
@@ -85,4 +111,65 @@ func (l contractLanguage) storage(tb testing.TB, name string, cases map[string]s
 	}
 
 	return store
+}
+
+// eachBinder runs bench once per binder, as the sub-benchmarks binder=generated and binder=generic, so that
+// `benchstat -col /binder` compares the fast paths plg gen generated with the generic binder (ticket 16).
+func eachBinder(b *testing.B, lang contractLanguage, bench func(b *testing.B, lang contractLanguage)) {
+	b.Helper()
+
+	for _, generic := range []bool{false, true} {
+		lang.generic = generic
+
+		name := "binder=generated"
+		if generic {
+			name = "binder=generic"
+		}
+
+		b.Run(name, func(b *testing.B) { bench(b, lang) })
+	}
+}
+
+// benchCall is one Foo call into lang's fooer plugin, through each binder, with every protection on.
+func benchCall(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	eachBinder(b, lang, func(b *testing.B, lang contractLanguage) {
+		b.Helper()
+
+		ref := getFooer(b, fooerContainerIn(b, lang, map[string]string{"ref": "fooer"}), "fooer/ref")
+		ctx := b.Context()
+
+		b.ReportAllocs()
+
+		for b.Loop() {
+			_, err := ref.Foo(ctx, "bench")
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// benchCallStruct is one Echo call into lang's shaper plugin with SampleOrder as argument and result, through
+// each binder: nested slices, maps, pointers, bytes and a time cross both ways.
+func benchCallStruct(b *testing.B, lang contractLanguage) {
+	b.Helper()
+
+	eachBinder(b, lang, func(b *testing.B, lang contractLanguage) {
+		b.Helper()
+
+		shaper, _ := getShaperIn(b, lang)
+		ctx := b.Context()
+		order := testcontract.SampleOrder()
+
+		b.ReportAllocs()
+
+		for b.Loop() {
+			_, err := shaper.Echo(ctx, order)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

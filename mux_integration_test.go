@@ -29,12 +29,13 @@ func scriptLanguages() []contractLanguage {
 	return []contractLanguage{luaLanguage(), typescript()}
 }
 
-// eachScript runs test as a parallel subtest per script language.
+// eachScript runs test as a parallel subtest per script language, through the generated binder (the contract
+// suite holds the generic binder to the same behavior).
 func eachScript(t *testing.T, test func(t *testing.T, lang contractLanguage)) {
 	t.Helper()
 
 	for _, lang := range scriptLanguages() {
-		t.Run(string(lang.lang), func(t *testing.T) {
+		t.Run(lang.name(), func(t *testing.T) {
 			t.Parallel()
 
 			test(t, lang)

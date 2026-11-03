@@ -56,6 +56,9 @@ type Container struct {
 	budget       memoryBudget
 	closeTimeout time.Duration // closeTimeout; tests shorten it
 	closed       atomic.Bool
+	// genericBinder makes bind ignore the adapters plg gen generated (Contract.Fast), so tests and benchmarks
+	// can hold the generic binder to the same suite.
+	genericBinder atomic.Bool
 }
 
 // New returns an empty container.

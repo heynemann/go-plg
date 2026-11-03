@@ -26,49 +26,145 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-// TestTestContractIsUpToDate regenerates internal/testcontract, whose generated file the plg tests run on: it
-// must be exactly what is committed.
-func TestTestContractIsUpToDate(t *testing.T) {
+// TestCommittedContractsAreUpToDate regenerates internal/testcontract, whose generated file the plg tests run
+// on, and internal/fastcontract, whose generated codecs they hold to the reflective codec: each must be exactly
+// what is committed.
+func TestCommittedContractsAreUpToDate(t *testing.T) {
 	t.Parallel()
 
-	dir := filepath.Join("..", "testcontract")
+	for pkg, ifaces := range map[string][]string{
+		"testcontract": {"Fooer", "Shaper", "Hosted"},
+		"fastcontract": {"Kinds"},
+	} {
+		dir := filepath.Join("..", pkg)
 
-	file, err := gen.Generate(dir, []string{"Fooer", "Shaper", "Hosted"})
-	require.NoError(t, err)
-	assert.Equal(t, "fooer_plg.go", file.Name)
+		file, err := gen.Generate(dir, ifaces, gen.Options{})
+		require.NoError(t, err)
+		assert.Equal(t, strings.ToLower(ifaces[0])+"_plg.go", file.Name)
 
-	committed, err := fs.ReadFile(os.DirFS(dir), file.Name)
-	require.NoError(t, err)
-	assert.Equal(t, string(committed), string(file.Source), "run go generate ./internal/testcontract")
+		committed, err := fs.ReadFile(os.DirFS(dir), file.Name)
+		require.NoError(t, err)
+		assert.Equal(t, string(committed), string(file.Source), "run go generate ./%s", dir)
+	}
 }
 
-// plgStub is the part of package plg's API generated code uses. Type-checking generated code against it keeps
-// these tests in process; the real plg is compiled against generated code in internal/testcontract and in the
-// cmd/plg integration test.
-const plgStub = `package plg
+// TestGenerateGenericLeavesTheFastPathsOut: with Options.Generic the file has only the generic adapters, as
+// plg gen generated before fast paths existed.
+func TestGenerateGenericLeavesTheFastPathsOut(t *testing.T) {
+	t.Parallel()
+
+	dir := writeFiles(t, map[string]string{"c.go": `package c
+
+import "context"
+
+type Fooer interface {
+	Foo(ctx context.Context, s string) (string, error)
+}
+`})
+
+	file, err := gen.Generate(dir, []string{"Fooer"}, gen.Options{Generic: true})
+	require.NoError(t, err)
+	require.NoError(t, gen.Write(dir, file))
+
+	pkg := typeCheck(t, dir)
+	requireAdapter(t, pkg, "Fooer", "plgFooer")
+	assert.NotContains(t, string(file.Source), "plgimpl")
+	assert.NotContains(t, string(file.Source), "Fast")
+	assert.Nil(t, pkg.Scope().Lookup("plgFooerFast"))
+
+	fast, err := gen.Generate(dir, []string{"Fooer"}, gen.Options{})
+	require.NoError(t, err)
+	assert.Contains(t, string(fast.Source), "Fast:")
+}
+
+// plgStub and plgimplStub are the parts of the plg and plgimpl packages' API generated code uses. Type-checking
+// generated code against them keeps these tests in process; the real packages are compiled against generated
+// code in internal/testcontract, internal/fastcontract and the cmd/plg integration test.
+const (
+	plgStub = `package plg
 
 import (
 	"io/fs"
 	"reflect"
+
+	"github.com/heynemann/go-plg/plgimpl"
 )
 
 type Contract struct {
 	Interface reflect.Type
 	Adapter   reflect.Type
 	Source    fs.FS
+	Fast      func(plgimpl.Invoker) any
+	Layout    string
 }
 
 func MustRegisterContract(Contract) {}
 `
+	plgimplStub = `package plgimpl
 
+import (
+	"context"
+	"time"
+)
+
+type Reader struct{}
+
+type Call interface {
+	AppendArgs(b []byte) ([]byte, error)
+	DecodeResults(r *Reader) error
+}
+
+type Invoker interface {
+	Invoke(ctx context.Context, method int, call Call) error
+}
+
+type (
+	Signed interface{ ~int | ~int8 | ~int16 | ~int32 | ~int64 }
+	Unsigned interface{ ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 }
+)
+
+func AppendBool(b []byte, v bool) []byte                               { return b }
+func AppendInt(b []byte, v int64) ([]byte, error)                      { return b, nil }
+func AppendUint(b []byte, v uint64) ([]byte, error)                    { return b, nil }
+func AppendFloat(b []byte, v float64) []byte                           { return b }
+func AppendString(b []byte, v string) ([]byte, error)                  { return b, nil }
+func AppendBytes(b, v []byte) ([]byte, error)                          { return b, nil }
+func AppendByteSlice[S ~[]E, E ~uint8](b []byte, v S) ([]byte, error) { return b, nil }
+func AppendTime(b []byte, t time.Time) ([]byte, error)                 { return b, nil }
+func AppendNil(b []byte) []byte                                        { return b }
+func AppendLen(b []byte, n, depth int) ([]byte, error)               { return b, nil }
+func Deeper(depth int) error                                           { return nil }
+func ReadBool[T ~bool](r *Reader) (T, error)                           { return false, nil }
+func ReadInt[T Signed](r *Reader, typeName string) (T, error)          { return 0, nil }
+func ReadUint[T Unsigned](r *Reader, typeName string) (T, error)       { return 0, nil }
+func ReadFloat32[T ~float32](r *Reader, typeName string) (T, error)    { return 0, nil }
+func ReadFloat64[T ~float64](r *Reader) (T, error)                     { return 0, nil }
+func ReadString[T ~string](r *Reader) (T, error)                       { return "", nil }
+func ReadBytes[S ~[]byte](r *Reader) (S, error)                        { return nil, nil }
+func ReadByteSlice[S ~[]E, E ~uint8](r *Reader) (S, error)             { return nil, nil }
+func ReadTime(r *Reader) (time.Time, error)                            { return time.Time{}, nil }
+func ReadSliceLen(r *Reader, depth, minSize int) (int, error)        { return 0, nil }
+func ReadMapLen(r *Reader, depth, minSize int) (int, error)          { return 0, nil }
+func ReadKey[M ~map[K]V, K ~string, V any](r *Reader, _ M) (K, error) { return "", nil }
+func ReadPresent(r *Reader, depth int) (bool, error)                   { return false, nil }
+func DuplicateKeys() error                                             { return nil }
+func AtField(err error, goName string) error                           { return err }
+func AtIndex(err error, i int) error                                   { return err }
+func AtKey(err error, k string) error                                  { return err }
+func Param(err error, k int) error                                     { return err }
+func Result(err error, k int) error                                    { return err }
+`
+)
+
+// stubImporter imports the plg and plgimpl stubs, and the standard library.
 type stubImporter struct {
-	std types.Importer
-	plg *types.Package
+	std  types.Importer
+	pkgs map[string]*types.Package
 }
 
 func (i stubImporter) Import(path string) (*types.Package, error) {
-	if path == "github.com/heynemann/go-plg" {
-		return i.plg, nil
+	if pkg, ok := i.pkgs[path]; ok {
+		return pkg, nil
 	}
 
 	return i.std.Import(path) //nolint:wrapcheck // test double
@@ -80,13 +176,18 @@ func typeCheck(t *testing.T, dir string) *types.Package {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	std := importer.ForCompiler(fset, "gc", nil)
+	imports := stubImporter{std: importer.ForCompiler(fset, "gc", nil), pkgs: map[string]*types.Package{}}
 
-	stub, err := parser.ParseFile(fset, "plg.go", plgStub, 0)
-	require.NoError(t, err)
+	for _, stub := range []struct{ path, src string }{
+		{"github.com/heynemann/go-plg/plgimpl", plgimplStub},
+		{"github.com/heynemann/go-plg", plgStub},
+	} {
+		file, err := parser.ParseFile(fset, filepath.Base(stub.path)+".go", stub.src, 0)
+		require.NoError(t, err)
 
-	plg, err := (&types.Config{Importer: std}).Check("github.com/heynemann/go-plg", fset, []*ast.File{stub}, nil)
-	require.NoError(t, err)
+		imports.pkgs[stub.path], err = (&types.Config{Importer: imports}).Check(stub.path, fset, []*ast.File{file}, nil)
+		require.NoError(t, err)
+	}
 
 	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	require.NoError(t, err)
@@ -99,7 +200,7 @@ func typeCheck(t *testing.T, dir string) *types.Package {
 		}
 	}
 
-	pkg, err := (&types.Config{Importer: stubImporter{std: std, plg: plg}}).Check("contract", fset, files, nil)
+	pkg, err := (&types.Config{Importer: imports}).Check("contract", fset, files, nil)
 	require.NoError(t, err)
 
 	return pkg
@@ -156,6 +257,27 @@ func requireAdapter(t *testing.T, pkg *types.Package, iface, adapter string) {
 		"*%s implements %s", adapter, iface)
 }
 
+// requireImplements requires the pointer to the generated type adapter to implement the interface iface.
+func requireImplements(t *testing.T, pkg *types.Package, iface, adapter string) {
+	t.Helper()
+
+	ifaceObj, ok := pkg.Scope().Lookup(iface).(*types.TypeName)
+	require.True(t, ok, iface)
+
+	adapterObj, ok := pkg.Scope().Lookup(adapter).(*types.TypeName)
+	require.True(t, ok, adapter)
+
+	ifaceType, ok := ifaceObj.Type().Underlying().(*types.Interface)
+	require.True(t, ok)
+	assert.True(
+		t,
+		types.Implements(types.NewPointer(adapterObj.Type()), ifaceType),
+		"*%s implements %s",
+		adapter,
+		iface,
+	)
+}
+
 func writeFiles(t *testing.T, files map[string]string) string {
 	t.Helper()
 
@@ -171,11 +293,11 @@ func writeFiles(t *testing.T, files map[string]string) string {
 func generate(t *testing.T, dir string, ifaces ...string) gen.File {
 	t.Helper()
 
-	file, err := gen.Generate(dir, ifaces)
+	file, err := gen.Generate(dir, ifaces, gen.Options{})
 	require.NoError(t, err)
 	require.NoError(t, gen.Write(dir, file))
 
-	again, err := gen.Generate(dir, ifaces)
+	again, err := gen.Generate(dir, ifaces, gen.Options{})
 	require.NoError(t, err)
 	assert.Equal(t, string(file.Source), string(again.Source), "regenerating next to its own output is a no-op")
 
@@ -189,8 +311,8 @@ func TestGenerate(t *testing.T) {
 		name   string
 		files  map[string]string
 		ifaces []string
-		// adapters maps each interface to its adapter type.
-		adapters map[string]string
+		// adapters maps each interface to its adapter type, fast to its fast-path adapter type.
+		adapters, fast map[string]string
 		// want and unwanted are lines of the generated file, compared without their indentation.
 		want, unwanted []string
 	}{
@@ -221,7 +343,7 @@ type Shaper interface {
 				"var plgShaperSource embed.FS",
 				"Source:    plgShaperSource,",
 			},
-			unwanted: []string{"return a.WPing(p0)"},
+			unwanted: []string{"return a.WPing(p0)", "plgimpl", "Fast:"}, // Ping breaks the contract: no fast paths
 		},
 		{
 			name: "types of the package and of allowlisted packages",
@@ -255,6 +377,90 @@ type Typed interface {
 				"WGet func(context.Context, time.Time, *big.Int, *rand.Rand, *rand2.PCG) (Box[Celsius], error)",
 				"WMap func(context.Context, map[string][]time.Duration, struct {",
 			},
+			unwanted: []string{"Fast:"}, // *big.Int has unexported fields: no fast paths
+		},
+		{
+			name: "fast paths",
+			files: map[string]string{"c.go": `package c
+
+import (
+	"context"
+	"time"
+)
+
+type Code string
+
+type Octet byte
+
+type Point struct {
+	X, Y  int
+	Label Code ` + "`json:\"label\"`" + `
+	Skip  bool ` + "`json:\"-\"`" + `
+	Near  *Point
+	When  time.Time
+	Raw   []byte
+	Bits  []Octet
+	Tags  map[Code][]float32
+}
+
+type Fooer interface {
+	Move(ctx context.Context, p Point, by ...int) (*Point, error)
+	Many(ctx context.Context) (uint8, int64, float32, bool, error)
+	Ping(ctx context.Context) error
+}
+`},
+			ifaces:   []string{"Fooer"},
+			adapters: map[string]string{"Fooer": "plgFooer"},
+			fast:     map[string]string{"Fooer": "plgFooerFast"},
+			want: []string{
+				`"github.com/heynemann/go-plg/plgimpl"`,
+				"var _ Fooer = (*plgFooerFast)(nil)",
+				"Fast:      func(inv plgimpl.Invoker) any { return &plgFooerFast{inv: inv} },",
+				"c := plgFooerMoveCall{p1: p1, p2: p2}",
+				"return a.inv.Invoke(p0, 2, &c)",
+				"func plgEncodePoint(b []byte, v *Point, depth int) ([]byte, error) {",
+				"func plgDecodePoint(r *plgimpl.Reader, v *Point, depth int) error {",
+				`v.Label, err = plgimpl.ReadString[Code](r)`,
+				`c.r2, err = plgimpl.ReadFloat32[float32](r, "float32")`,
+				"b, err = plgimpl.AppendByteSlice(b, v.Bits)",
+				"v.Bits, err = plgimpl.ReadByteSlice[[]Octet](r)",
+				"b, err = plgimpl.AppendBytes(b, []byte(v.Raw))",
+				`return plgimpl.AtField(err, "Near")`,
+			},
+			unwanted: []string{"Skip"},
+		},
+		{
+			name: "no fast paths for what the codec cannot encode",
+			files: map[string]string{"c.go": `package c
+
+import "context"
+
+type hidden struct{ a int }
+
+type Clash struct {
+	A int ` + "`json:\"x\"`" + `
+	B int ` + "`json:\"x\"`" + `
+}
+
+type (
+	Chans    interface{ M(ctx context.Context, c chan int) error }
+	IntKeys  interface{ M(ctx context.Context, m map[int]string) error }
+	Arrays   interface{ M(ctx context.Context) ([2]int, error) }
+	Hidden   interface{ M(ctx context.Context, h hidden) error }
+	Clashing interface{ M(ctx context.Context, c []Clash) error }
+	Empty    interface{ M(ctx context.Context, e []struct{}) error }
+	NoCtx    interface{ M(s string) error }
+	NoErr    interface{ M(ctx context.Context) string }
+	NoResult interface{ M(ctx context.Context) }
+)
+`},
+			ifaces: []string{"Chans", "IntKeys", "Arrays", "Hidden", "Clashing", "Empty", "NoCtx", "NoErr", "NoResult"},
+			adapters: map[string]string{
+				"Chans": "plgChans", "IntKeys": "plgIntKeys", "Arrays": "plgArrays", "Hidden": "plgHidden",
+				"Clashing": "plgClashing", "Empty": "plgEmpty", "NoCtx": "plgNoCtx", "NoErr": "plgNoErr",
+				"NoResult": "plgNoResult",
+			},
+			unwanted: []string{"plgimpl", "Fast:", "Layout:"},
 		},
 		{
 			name: "names the package already declares",
@@ -263,28 +469,40 @@ type Typed interface {
 
 import ctx "context"
 
-var context, reflect, plg, embed = 1, 2, 3, 4
+var context, reflect, plg, embed, plgimpl = 1, 2, 3, 4, 5
+
+var b, v, r, depth, err, c, inv = 1, 2, 3, 4, 5, 6, 7
 
 type plgFooer struct{}
+
+type plgFooerFast struct{}
+
+type Point struct{ X int }
+
+type plgEncodePoint int
 
 type plgFooerSource int
 
 type Fooer interface {
-	Foo(c ctx.Context) error
+	Foo(c ctx.Context, p Point) (Point, error)
 }
 `,
 			},
 			ifaces:   []string{"Fooer"},
 			adapters: map[string]string{"Fooer": "plgFooer2"},
+			fast:     map[string]string{"Fooer": "plgFooerFast2"},
 			want: []string{
 				`context2 "context"`,
 				`embed2 "embed"`,
 				`reflect2 "reflect"`,
 				`plg2 "github.com/heynemann/go-plg"`,
+				`plgimpl2 "github.com/heynemann/go-plg/plgimpl"`,
 				"var plgFooerSource2 embed2.FS",
 				"plg2.MustRegisterContract(plg2.Contract{",
 				"Interface: reflect2.TypeFor[Fooer](),",
 				"Adapter:   reflect2.TypeFor[plgFooer2](),",
+				"Fast:      func(inv plgimpl2.Invoker) any { return &plgFooerFast2{inv2: inv} },",
+				"func plgEncodePoint2(b2 []byte, v2 *Point, depth2 int) ([]byte, error) {",
 			},
 		},
 		{
@@ -374,6 +592,10 @@ type Fooer interface {
 				requireAdapter(t, pkg, iface, adapter)
 			}
 
+			for iface, adapter := range tc.fast {
+				requireImplements(t, pkg, iface, adapter)
+			}
+
 			lines := map[string]bool{}
 			for line := range strings.Lines(src) {
 				lines[strings.TrimSpace(line)] = true
@@ -409,7 +631,7 @@ type Barer interface{ Bar(ctx context.Context) error }
 		{ifaces: []string{"HTTPFooer"}, want: "httpfooer_plg.go"},
 		{ifaces: []string{"Barer", "HTTPFooer"}, want: "barer_plg.go"},
 	} {
-		file, err := gen.Generate(dir, tc.ifaces)
+		file, err := gen.Generate(dir, tc.ifaces, gen.Options{})
 		require.NoError(t, err)
 		assert.Equal(t, tc.want, file.Name)
 	}
@@ -532,7 +754,7 @@ func TestGenerateErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			file, err := gen.Generate(writeFiles(t, tc.files), tc.ifaces)
+			file, err := gen.Generate(writeFiles(t, tc.files), tc.ifaces, gen.Options{})
 			require.ErrorIs(t, err, tc.err)
 			assert.Equal(t, gen.File{}, file)
 
@@ -546,7 +768,7 @@ func TestGenerateErrors(t *testing.T) {
 func TestGenerateUnreadablePackage(t *testing.T) {
 	t.Parallel()
 
-	_, err := gen.Generate(filepath.Join(t.TempDir(), "missing"), []string{"Fooer"})
+	_, err := gen.Generate(filepath.Join(t.TempDir(), "missing"), []string{"Fooer"}, gen.Options{})
 	require.ErrorIs(t, err, gen.ErrPackage)
 	require.ErrorIs(t, err, os.ErrNotExist)
 
@@ -557,7 +779,7 @@ func TestGenerateUnreadablePackage(t *testing.T) {
 	dir := writeFiles(t, map[string]string{"c.go": "package c\n"})
 	require.NoError(t, os.Chmod(filepath.Join(dir, "c.go"), 0))
 
-	_, err = gen.Generate(dir, []string{"Fooer"})
+	_, err = gen.Generate(dir, []string{"Fooer"}, gen.Options{})
 	require.ErrorIs(t, err, gen.ErrPackage)
 	require.ErrorIs(t, err, os.ErrPermission)
 }

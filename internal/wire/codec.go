@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -323,17 +322,6 @@ func within(err error, segment string) error {
 	return &pathError{err: err, path: []string{segment}}
 }
 
-func atIndex(err error, i int) error  { return within(err, "["+strconv.Itoa(i)+"]") }
-func atKey(err error, k string) error { return within(err, "["+strconv.Quote(k)+"]") }
-
-func tooDeep(depth int) error {
-	if depth >= MaxDepth {
-		return fmt.Errorf("%w: more than %d levels", ErrTooDeep, MaxDepth)
-	}
-
-	return nil
-}
-
 func encodeBool(b []byte, val reflect.Value, _ int) ([]byte, error) {
 	return AppendBool(b, val.Bool()), nil
 }
@@ -354,24 +342,17 @@ func imprecise[T int64 | uint64](num T) error {
 }
 
 func encodeInt(b []byte, val reflect.Value, _ int) ([]byte, error) {
-	num := val.Int()
-	if num > MaxSafeInt || num < -MaxSafeInt {
-		return b, imprecise(num)
-	}
-
-	return AppendInt(b, num), nil
+	return AppendInt53(b, val.Int())
 }
 
 func decodeInt(reader *Reader, val reflect.Value, _ int) error {
-	num, err := reader.Int64()
+	num, err := reader.Int53()
 
 	switch {
 	case err != nil:
 		return err
-	case num > MaxSafeInt || num < -MaxSafeInt:
-		return imprecise(num)
 	case val.OverflowInt(num):
-		return fmt.Errorf("%w: %d does not fit %s", ErrOverflow, num, val.Type())
+		return Overflow(num, val.Type().String())
 	}
 
 	val.SetInt(num)
@@ -380,24 +361,17 @@ func decodeInt(reader *Reader, val reflect.Value, _ int) error {
 }
 
 func encodeUint(b []byte, val reflect.Value, _ int) ([]byte, error) {
-	num := val.Uint()
-	if num > MaxSafeInt {
-		return b, imprecise(num)
-	}
-
-	return AppendUint(b, num), nil
+	return AppendUint53(b, val.Uint())
 }
 
 func decodeUint(reader *Reader, val reflect.Value, _ int) error {
-	num, err := reader.Uint64()
+	num, err := reader.Uint53()
 
 	switch {
 	case err != nil:
 		return err
-	case num > MaxSafeInt:
-		return imprecise(num)
 	case val.OverflowUint(num):
-		return fmt.Errorf("%w: %d does not fit %s", ErrOverflow, num, val.Type())
+		return Overflow(num, val.Type().String())
 	}
 
 	val.SetUint(num)
@@ -416,7 +390,7 @@ func decodeFloat(reader *Reader, val reflect.Value, _ int) error {
 	}
 
 	if val.OverflowFloat(num) {
-		return fmt.Errorf("%w: %g does not fit %s", ErrOverflow, num, val.Type())
+		return Overflow(num, val.Type().String())
 	}
 
 	val.SetFloat(num)
@@ -440,39 +414,21 @@ func decodeString(reader *Reader, val reflect.Value, _ int) error {
 }
 
 func encodeBytes(dst []byte, val reflect.Value, _ int) ([]byte, error) {
-	if val.IsNil() {
-		return appendNil(dst), nil
-	}
-
-	data := val.Bytes()
-
-	dst, err := appendLength(dst, len(data))
-	if err != nil {
-		return dst, err
-	}
-
-	return append(dst, data...), nil
+	return AppendBytes(dst, val.Bytes()) // a nil slice's Bytes is nil
 }
 
 func decodeBytes(reader *Reader, val reflect.Value, _ int) error {
-	n, err := reader.length()
+	data, err := reader.Bytes()
 	if err != nil {
 		return err
 	}
 
-	if n < 0 {
+	if data == nil {
 		val.SetZero()
 
 		return nil
 	}
 
-	p, err := reader.next(n)
-	if err != nil {
-		return err
-	}
-
-	data := make([]byte, n) // a copy, non-nil even when empty
-	copy(data, p)
 	val.SetBytes(data)
 
 	return nil
@@ -481,37 +437,19 @@ func decodeBytes(reader *Reader, val reflect.Value, _ int) error {
 // encodeTime writes the instant as Unix seconds and nanoseconds.
 func encodeTime(b []byte, val reflect.Value, _ int) ([]byte, error) {
 	t, _ := reflect.TypeAssert[time.Time](val) // the plan guarantees the type
-	sec := t.Unix()
 
-	if sec > MaxSafeInt || sec < -MaxSafeInt {
-		return b, imprecise(sec)
-	}
-
-	return AppendInt(AppendInt(b, sec), int64(t.Nanosecond())), nil
+	return AppendTime(b, t)
 }
-
-const nanosPerSecond = int64(time.Second)
 
 // decodeTime reads what encodeTime wrote, as a UTC time.
 func decodeTime(reader *Reader, val reflect.Value, _ int) error {
-	sec, err := reader.Int64()
+	t, err := reader.Time()
 	if err != nil {
 		return err
 	}
 
-	nsec, err := reader.Int64()
-
-	switch {
-	case err != nil:
-		return err
-	case sec > MaxSafeInt || sec < -MaxSafeInt:
-		return imprecise(sec)
-	case nsec < 0 || nsec >= nanosPerSecond:
-		return fmt.Errorf("%w: %d nanoseconds", ErrInvalid, nsec)
-	}
-
 	dst, _ := reflect.TypeAssert[*time.Time](val.Addr()) // settable, so addressable; the plan guarantees the type
-	*dst = time.Unix(sec, nsec).UTC()
+	*dst = t
 
 	return nil
 }
@@ -561,17 +499,12 @@ func decodeError(reader *Reader, val reflect.Value, _ int) error {
 
 func (n *node) encodeSlice(dst []byte, val reflect.Value, depth int) ([]byte, error) {
 	if val.IsNil() {
-		return appendNil(dst), nil
-	}
-
-	err := tooDeep(depth)
-	if err != nil {
-		return dst, err
+		return AppendNil(dst), nil
 	}
 
 	count := val.Len()
 
-	dst, err = appendLength(dst, count)
+	dst, err := AppendLen(dst, count, depth)
 	if err != nil {
 		return dst, err
 	}
@@ -579,7 +512,7 @@ func (n *node) encodeSlice(dst []byte, val reflect.Value, depth int) ([]byte, er
 	for i := range count {
 		dst, err = n.elem.enc(dst, val.Index(i), depth+1)
 		if err != nil {
-			return dst, atIndex(err, i)
+			return dst, AtIndex(err, i)
 		}
 	}
 
@@ -587,7 +520,7 @@ func (n *node) encodeSlice(dst []byte, val reflect.Value, depth int) ([]byte, er
 }
 
 func (n *node) decodeSlice(reader *Reader, val reflect.Value, depth int) error {
-	count, err := reader.length()
+	count, err := reader.SliceLen(depth, n.elem.minSize) // elem.minSize > 0: the plan rejects empty elements
 	if err != nil {
 		return err
 	}
@@ -598,20 +531,11 @@ func (n *node) decodeSlice(reader *Reader, val reflect.Value, depth int) error {
 		return nil
 	}
 
-	err = tooDeep(depth)
-	if err != nil {
-		return err
-	}
-
-	if count > reader.Len()/n.elem.minSize { // elem.minSize > 0: the plan rejects empty elements
-		return fmt.Errorf("%w: %d elements", ErrTruncated, count)
-	}
-
 	items := reflect.MakeSlice(n.typ, count, count)
 	for i := range count {
 		err = n.elem.dec(reader, items.Index(i), depth+1)
 		if err != nil {
-			return atIndex(err, i)
+			return AtIndex(err, i)
 		}
 	}
 
@@ -622,15 +546,10 @@ func (n *node) decodeSlice(reader *Reader, val reflect.Value, depth int) error {
 
 func (n *node) encodeMap(dst []byte, val reflect.Value, depth int) ([]byte, error) {
 	if val.IsNil() {
-		return appendNil(dst), nil
+		return AppendNil(dst), nil
 	}
 
-	err := tooDeep(depth)
-	if err != nil {
-		return dst, err
-	}
-
-	dst, err = appendLength(dst, val.Len())
+	dst, err := AppendLen(dst, val.Len(), depth)
 	if err != nil {
 		return dst, err
 	}
@@ -651,7 +570,7 @@ func (n *node) encodeMap(dst []byte, val reflect.Value, depth int) ([]byte, erro
 		}
 
 		if err != nil {
-			return dst, atKey(err, key.String())
+			return dst, AtKey(err, key.String())
 		}
 	}
 
@@ -659,7 +578,7 @@ func (n *node) encodeMap(dst []byte, val reflect.Value, depth int) ([]byte, erro
 }
 
 func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
-	count, err := reader.length()
+	count, err := reader.MapLen(depth, n.elem.minSize)
 	if err != nil {
 		return err
 	}
@@ -668,15 +587,6 @@ func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
 		val.SetZero()
 
 		return nil
-	}
-
-	err = tooDeep(depth)
-	if err != nil {
-		return err
-	}
-
-	if count > reader.Len()/(lengthSize+n.elem.minSize) {
-		return fmt.Errorf("%w: %d entries", ErrTruncated, count)
 	}
 
 	entries := reflect.MakeMapWithSize(n.typ, count)
@@ -692,7 +602,7 @@ func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
 
 		err = n.elem.dec(reader, elem, depth+1) // overwrites all of elem, so it is reused
 		if err != nil {
-			return atKey(err, name)
+			return AtKey(err, name)
 		}
 
 		key.SetString(name)
@@ -700,7 +610,7 @@ func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
 	}
 
 	if entries.Len() != count {
-		return fmt.Errorf("%w: duplicate map keys", ErrInvalid)
+		return DuplicateKeys()
 	}
 
 	val.Set(entries)
@@ -713,7 +623,7 @@ func (n *node) encodePointer(dst []byte, val reflect.Value, depth int) ([]byte, 
 		return AppendBool(dst, false), nil
 	}
 
-	err := tooDeep(depth)
+	err := Deeper(depth)
 	if err != nil {
 		return dst, err
 	}
@@ -722,7 +632,7 @@ func (n *node) encodePointer(dst []byte, val reflect.Value, depth int) ([]byte, 
 }
 
 func (n *node) decodePointer(reader *Reader, val reflect.Value, depth int) error {
-	present, err := reader.Bool()
+	present, err := reader.Present(depth)
 	if err != nil {
 		return err
 	}
@@ -731,11 +641,6 @@ func (n *node) decodePointer(reader *Reader, val reflect.Value, depth int) error
 		val.SetZero()
 
 		return nil
-	}
-
-	err = tooDeep(depth)
-	if err != nil {
-		return err
 	}
 
 	target := reflect.New(n.typ.Elem())
@@ -751,7 +656,7 @@ func (n *node) decodePointer(reader *Reader, val reflect.Value, depth int) error
 }
 
 func (n *node) encodeStruct(dst []byte, val reflect.Value, depth int) ([]byte, error) {
-	err := tooDeep(depth)
+	err := Deeper(depth)
 	if err != nil {
 		return dst, err
 	}
@@ -761,7 +666,7 @@ func (n *node) encodeStruct(dst []byte, val reflect.Value, depth int) ([]byte, e
 
 		dst, err = f.node.enc(dst, val.Field(f.index), depth+1)
 		if err != nil {
-			return dst, within(err, "."+f.goName)
+			return dst, AtField(err, f.goName)
 		}
 	}
 
@@ -769,7 +674,7 @@ func (n *node) encodeStruct(dst []byte, val reflect.Value, depth int) ([]byte, e
 }
 
 func (n *node) decodeStruct(reader *Reader, val reflect.Value, depth int) error {
-	err := tooDeep(depth)
+	err := Deeper(depth)
 	if err != nil {
 		return err
 	}
@@ -779,7 +684,7 @@ func (n *node) decodeStruct(reader *Reader, val reflect.Value, depth int) error 
 
 		err = f.node.dec(reader, val.Field(f.index), depth+1)
 		if err != nil {
-			return within(err, "."+f.goName)
+			return AtField(err, f.goName)
 		}
 	}
 

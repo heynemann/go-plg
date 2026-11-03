@@ -48,6 +48,14 @@ func TestGen(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, contractsrc.IsGenerated(src))
 	assert.Contains(t, string(src), "type plgFooer struct {")
+	assert.Contains(t, string(src), "type plgFooerFast struct {", "fast paths by default")
+
+	require.Equal(t, 0, cli.Main([]string{"gen", "-fast=false", "Fooer"}, dir, &stderr))
+
+	src, err = fs.ReadFile(os.DirFS(dir), "fooer_plg.go")
+	require.NoError(t, err)
+	assert.Contains(t, string(src), "type plgFooer struct {")
+	assert.NotContains(t, string(src), "plgFooerFast", "-fast=false leaves them out")
 }
 
 func TestErrors(t *testing.T) {
@@ -66,6 +74,17 @@ func TestErrors(t *testing.T) {
 		{
 			name:   "gen without interfaces",
 			args:   []string{"gen"},
+			code:   2,
+			prefix: "plg gen: name at least one interface",
+		},
+		{name: "gen help", args: []string{"gen", "-h"}, code: 2, prefix: "usage: plg <command>"},
+		{
+			name: "gen unknown flag", args: []string{"gen", "-generic", "Fooer"}, code: 2,
+			prefix: "plg gen: flag provided but not defined: -generic\n\nusage:",
+		},
+		{
+			name:   "gen flags without interfaces",
+			args:   []string{"gen", "-fast=false"},
 			code:   2,
 			prefix: "plg gen: name at least one interface",
 		},

@@ -67,7 +67,7 @@ func registerFooersIn(tb testing.TB, lang contractLanguage, ctr *plg.Container, 
 	tb.Helper()
 
 	opts = append(opts, plg.WithStorage(lang.storage(tb, name, dirs)))
-	require.NoError(tb, plg.Register[testcontract.Fooer](tb.Context(), ctr, name, opts...))
+	require.NoError(tb, plg.Register[testcontract.Fooer](tb.Context(), lang.binder(ctr), name, opts...))
 }
 
 // getFooer returns the plugin with the given key.
@@ -753,15 +753,5 @@ func BenchmarkAllParallel(b *testing.B) {
 // BenchmarkCallGo is one call into a Go plugin, with every protection on: the memory limit, the preemptive
 // stop on ctx and the guest's recover boundary.
 func BenchmarkCallGo(b *testing.B) {
-	ref := getFooer(b, benchContainer(b), "fooer/ref")
-	ctx := b.Context()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := ref.Foo(ctx, "bench")
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCall(b, golang())
 }

@@ -181,12 +181,12 @@ func TestDecodeResultsRejectsMalformedBodies(t *testing.T) {
 
 	valid = wire.AppendInt(valid, -7)
 
-	out, err := meth.decodeResults(valid)
-	require.NoError(t, err)
-	require.Len(t, out, 3)
-	assert.Equal(t, "x", out[0].String())
-	assert.Equal(t, int64(-7), out[1].Int())
-	assert.True(t, out[2].IsNil(), "a nil error")
+	call := reflectCall{meth: meth}
+	require.NoError(t, decodeResults(valid, &call))
+	require.Len(t, call.out, 3)
+	assert.Equal(t, "x", call.out[0].String())
+	assert.Equal(t, int64(-7), call.out[1].Int())
+	assert.True(t, call.out[2].IsNil(), "a nil error")
 
 	for name, tc := range map[string]struct {
 		want error
@@ -200,7 +200,7 @@ func TestDecodeResultsRejectsMalformedBodies(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := meth.decodeResults(tc.body)
+			err := decodeResults(tc.body, &reflectCall{meth: meth})
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
@@ -1157,7 +1157,11 @@ func TestCallFailuresArePanicErrors(t *testing.T) {
 			instances := warmPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
 			plug := &plugin{key: "test/k", desc: Descriptor{Language: LanguageGo}, pool: instances}
 
-			_, err := plug.call(t.Context(), meth, []reflect.Value{reflect.ValueOf(t.Context())})
+			err := plug.call(
+				t.Context(),
+				meth,
+				&reflectCall{meth: meth, args: []reflect.Value{reflect.ValueOf(t.Context())}},
+			)
 
 			assert.Equal(t, PhaseCall, requirePanicError(t, err, PhaseCall).Phase)
 			require.ErrorIs(t, err, ErrCall)

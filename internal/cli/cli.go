@@ -31,9 +31,12 @@ const (
 const usage = `usage: plg <command> [arguments]
 
 commands:
-  gen <Interface>...  generate the plg adapters and contract registration for interfaces declared in the Go
+  gen [-fast=false] <Interface>...
+                      generate the plg adapters and contract registration for interfaces declared in the Go
                       package in the current directory; run it from a go:generate line next to them:
                       //go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
+                      -fast=false leaves out the fast paths (typed adapters and codecs generated for the
+                      interfaces' types): plg then calls the plugins through its generic, reflective binder
   warm [-cache-dir dir]
                       compile every guest plg ships into the compilation cache (default: $PLG_CACHE_DIR, else
                       the user cache directory's plg/<wazero version>), e.g. in a Docker build, so services
@@ -77,11 +80,7 @@ func run(args []string, dir string, stderr io.Writer) outcome {
 
 	switch cmd {
 	case "gen":
-		if len(args) == 0 {
-			return usageError(cmd, "name at least one interface")
-		}
-
-		return failure(cmd, generate(dir, args))
+		return runGen(dir, args)
 	case "warm":
 		return runWarm(dir, args, stderr)
 	case "build-guest":
@@ -105,8 +104,29 @@ func failure(cmd string, err error) outcome {
 	return outcome{code: exitOK}
 }
 
-func generate(dir string, interfaces []string) error {
-	file, err := gen.Generate(dir, interfaces)
+// runGen runs `plg gen`.
+func runGen(dir string, args []string) outcome {
+	flags := flag.NewFlagSet("gen", flag.ContinueOnError)
+	fast := flags.Bool("fast", true, "generate the fast paths")
+
+	flags.SetOutput(io.Discard)
+
+	err := flags.Parse(args)
+
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return outcome{code: exitUsage, msg: usage}
+	case err != nil:
+		return usageError("gen", err.Error())
+	case flags.NArg() == 0:
+		return usageError("gen", "name at least one interface")
+	}
+
+	return failure("gen", generate(dir, flags.Args(), gen.Options{Generic: !*fast}))
+}
+
+func generate(dir string, interfaces []string, opts gen.Options) error {
+	file, err := gen.Generate(dir, interfaces, opts)
 	if err != nil {
 		return err //nolint:wrapcheck // gen's errors are complete; run prefixes the command
 	}

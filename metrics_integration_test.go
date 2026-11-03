@@ -296,7 +296,7 @@ func TestMetricsCoverEveryLanguage(t *testing.T) {
 		ctx := t.Context()
 		reader := newMetricsReader(t)
 		api := newAPIServer(t)
-		ctr := newContainer(t, plg.WithMeterProvider(reader.provider))
+		ctr := lang.binder(newContainer(t, plg.WithMeterProvider(reader.provider)))
 
 		store := lang.storage(t, "m", map[string]string{"ref": "fooer"})
 		require.NoError(t, plg.Register[testcontract.Fooer](ctx, ctr, "m", plg.WithStorage(store)))

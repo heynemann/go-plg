@@ -4,6 +4,12 @@
 // interface fails the build until the file is regenerated); for the file, an embed of the package's Go source,
 // which the Go guest interprets, and an init that registers the contracts.
 //
+// Unless [Options.Generic], each interface also gets fast paths (see plg.Contract.Fast): an adapter calling
+// plugins through plgimpl.Invoker with a call type per method, and an encoder and a decoder per composite type
+// its methods reach, which encode exactly as plg's reflective codec, with the fingerprint of that layout. An
+// interface whose methods break the interface contract or use types the encoding does not support gets none
+// (registering it fails at init anyway, with the precise reason).
+//
 // A contract package may import only the Go guest's allowlist: the guest receives its source, and nothing else.
 package gen
 
@@ -56,9 +62,15 @@ type File struct {
 	Source []byte
 }
 
+// Options configure [Generate].
+type Options struct {
+	// Generic leaves the fast paths out: plg then serves the interfaces with its generic binder.
+	Generic bool
+}
+
 // Generate generates the plg file for the named interfaces of the Go package in dir: `<first name in lower
-// case>_plg.go`. The output depends only on the package's source and the names, in order.
-func Generate(dir string, interfaces []string) (File, error) {
+// case>_plg.go`. The output depends only on the package's source, the names, in order, and opts.
+func Generate(dir string, interfaces []string, opts Options) (File, error) {
 	err := checkNames(interfaces)
 	if err != nil {
 		return File{}, err
@@ -77,7 +89,7 @@ func Generate(dir string, interfaces []string) (File, error) {
 		}
 	}
 
-	src, err := render(pkg, interfaces, ifaces)
+	src, err := render(pkg, interfaces, ifaces, opts)
 	if err != nil {
 		return File{}, err
 	}

@@ -23,7 +23,7 @@ import (
 func registerHosted(tb testing.TB, lang contractLanguage, ctr *plg.Container) {
 	tb.Helper()
 
-	err := plg.Register[testcontract.Hosted](withHostValue(tb.Context(), "register"), ctr, "hosted",
+	err := plg.Register[testcontract.Hosted](withHostValue(tb.Context(), "register"), lang.binder(ctr), "hosted",
 		plg.WithStorage(lang.storage(tb, "hosted", map[string]string{"ref": "hosted"})),
 		plg.WithHost[testcontract.Host](newTestHost()))
 	require.NoError(tb, err)
@@ -206,7 +206,7 @@ func TestHostServesConcurrentPlugins(t *testing.T) {
 	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
 		t.Helper()
 
-		ctr := newContainer(t)
+		ctr := lang.binder(newContainer(t))
 		err := plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
 			plg.WithStorage(lang.storage(t, "hosted", map[string]string{"a": "hosted", "b": "hosted", "c": "hosted"})),
 			plg.WithHost[testcontract.Host](newTestHost()))

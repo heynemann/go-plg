@@ -65,8 +65,9 @@ func (n *namer) qualify(pkg *types.Package) string {
 	return n.importAs(pkg.Path(), pkg.Name())
 }
 
-// render returns the generated file for the interfaces ifaces, declared as names in pkg.
-func render(pkg *types.Package, names []string, ifaces []*types.Interface) ([]byte, error) {
+// render returns the generated file for the interfaces ifaces, declared as names in pkg, with their fast paths
+// unless opts.Generic.
+func render(pkg *types.Package, names []string, ifaces []*types.Interface, opts Options) ([]byte, error) {
 	n := newNamer(pkg)
 	embedPkg := n.importAs("embed", "embed")
 	reflectPkg := n.importAs("reflect", "reflect")
@@ -87,12 +88,17 @@ func render(pkg *types.Package, names []string, ifaces []*types.Interface) ([]by
 		renderAdapter(&body, n, name, adapters[i], ifaces[i])
 	}
 
+	registrations := make([]string, len(names))
+	if !opts.Generic {
+		registrations = renderFastPaths(&body, n, names, ifaces)
+	}
+
 	body.WriteString("\nfunc init() {\n")
 
 	for i, name := range names {
 		fmt.Fprintf(&body, "\t%[1]s.MustRegisterContract(%[1]s.Contract{\n"+
-			"\t\tInterface: %[2]s.TypeFor[%[3]s](),\n\t\tAdapter: %[2]s.TypeFor[%[4]s](),\n\t\tSource: %[5]s,\n\t})\n",
-			plgPkg, reflectPkg, name, adapters[i], source)
+			"\t\tInterface: %[2]s.TypeFor[%[3]s](),\n\t\tAdapter: %[2]s.TypeFor[%[4]s](),\n\t\tSource: %[5]s,\n%[6]s\t})\n",
+			plgPkg, reflectPkg, name, adapters[i], source, registrations[i])
 	}
 
 	body.WriteString("}\n")

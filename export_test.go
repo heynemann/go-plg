@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/plgimpl"
 )
 
 // Hold takes an instance of the plugin with the given key, as a call in flight would, until the returned
@@ -145,4 +146,48 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Contai
 	}
 
 	return hst.handler(key, LanguageGo, ctr.panics), nil
+}
+
+// UseGenericBinder makes c serve every contract with the generic binder, ignoring the fast paths plg gen
+// generated, so tests and benchmarks can hold both binders to the same behavior. Call it before Register.
+func UseGenericBinder(c *Container) {
+	c.genericBinder.Store(true)
+}
+
+// FastAdapter returns the adapter plg gen generated for iface's registered contract, calling inv, or nil when
+// the contract has none.
+func FastAdapter(iface reflect.Type, inv plgimpl.Invoker) any {
+	ct, err := lookupContract(iface)
+	if err != nil || ct.fast == nil {
+		return nil
+	}
+
+	return ct.fast(inv)
+}
+
+// GenericCall is the generic binder's call of iface's method index with args (ctx first).
+//
+//nolint:ireturn // binders hand calls around as plgimpl.Call
+func GenericCall(iface reflect.Type, index int, args []reflect.Value) (plgimpl.Call, error) {
+	ct, err := lookupContract(iface)
+	if err != nil {
+		return nil, err
+	}
+
+	return &reflectCall{meth: ct.methods[index], args: args}, nil
+}
+
+// GenericResults returns the results a call from GenericCall decoded, ending with a nil error.
+func GenericResults(call plgimpl.Call) []reflect.Value {
+	generic, ok := call.(*reflectCall)
+	if !ok {
+		return nil
+	}
+
+	return generic.out
+}
+
+// DecodeAnswer decodes the results of a plugin's successful answer body into call, as every binder does.
+func DecodeAnswer(body []byte, call plgimpl.Call) error {
+	return decodeResults(body, call)
 }

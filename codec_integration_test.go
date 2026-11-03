@@ -33,7 +33,7 @@ func getShaper(tb testing.TB) testcontract.Shaper {
 func getShaperIn(tb testing.TB, lang contractLanguage) (testcontract.Shaper, *plg.Container) {
 	tb.Helper()
 
-	ctr := newContainer(tb)
+	ctr := lang.binder(newContainer(tb))
 	err := plg.Register[testcontract.Shaper](tb.Context(), ctr, "shaper",
 		plg.WithStorage(lang.storage(tb, "shaper", map[string]string{"ref": "shaper"})))
 	require.NoError(tb, err)
@@ -272,18 +272,7 @@ func errOf[T any](_ T, err error) error {
 // BenchmarkCallGoStruct is one call into a Go plugin with a representative struct argument and result
 // (SampleOrder: nested slices, maps, pointers, bytes and time), every protection on.
 func BenchmarkCallGoStruct(b *testing.B) {
-	shaper := getShaper(b)
-	ctx := b.Context()
-	order := testcontract.SampleOrder()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := shaper.Echo(ctx, order)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCallStruct(b, golang())
 }
 
 // BenchmarkCallGoStructParallel contends for the plugin's single instance with struct calls.

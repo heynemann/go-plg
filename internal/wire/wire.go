@@ -159,11 +159,6 @@ func appendLength(b []byte, n int) ([]byte, error) {
 	return binary.LittleEndian.AppendUint32(b, uint32(n)), nil //nolint:gosec // G115: bounded by the check above
 }
 
-// appendNil appends the length prefix of a nil slice or map.
-func appendNil(b []byte) []byte {
-	return binary.LittleEndian.AppendUint32(b, nilLength)
-}
-
 // MaxMessage bounds the status messages a result buffer carries, so a hostile plugin's error text cannot
 // inflate results without limit.
 const MaxMessage = 64 << 10

@@ -100,7 +100,7 @@ func fetcherIn(t *testing.T, lang contractLanguage, ctr *plg.Container, name str
 	t.Helper()
 
 	opts = append(opts, plg.WithStorage(lang.storage(t, name, map[string]string{"fetch": "fetcher"})))
-	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, name, opts...))
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), lang.binder(ctr), name, opts...))
 
 	return getFooer(t, ctr, name+"/fetch")
 }

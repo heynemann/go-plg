@@ -391,17 +391,7 @@ func TestLuaHostedPluginNeedsWithHost(t *testing.T) {
 // BenchmarkCallLua is one call into a Lua plugin (Foo: a require'd function, string building), with every
 // protection on.
 func BenchmarkCallLua(b *testing.B) {
-	ref := getFooer(b, fooerContainerIn(b, luaLanguage(), map[string]string{"ref": "fooer"}), "fooer/ref")
-	ctx := b.Context()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := ref.Foo(ctx, "bench")
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCall(b, luaLanguage())
 }
 
 // BenchmarkCallLuaParallel calls a Lua plugin from GOMAXPROCS goroutines: with a pool of one instance the calls
@@ -413,18 +403,7 @@ func BenchmarkCallLuaParallel(b *testing.B) {
 // BenchmarkCallLuaStruct is one call into a Lua plugin with SampleOrder as argument and result: the glue builds
 // the nested tables from the wire encoding and encodes them back.
 func BenchmarkCallLuaStruct(b *testing.B) {
-	shaper, _ := getShaperIn(b, luaLanguage())
-	ctx := b.Context()
-	order := testcontract.SampleOrder()
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_, err := shaper.Echo(ctx, order)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
+	benchCallStruct(b, luaLanguage())
 }
 
 // BenchmarkCallLuaHost is one Lua plugin call making one host call (Value).

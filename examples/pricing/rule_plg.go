@@ -8,6 +8,7 @@ import (
 	"reflect"
 
 	plg "github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/plgimpl"
 )
 
 // plgRuleSource is the package's Go source, which the Go guest interprets. plg leaves out the test
@@ -27,10 +28,234 @@ func (a *plgRule) Discount(p0 context.Context, p1 Order) (Discount, error) {
 	return a.WDiscount(p0, p1)
 }
 
+// plgRuleFast implements Rule for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgRuleFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Rule = (*plgRuleFast)(nil)
+
+func (a *plgRuleFast) Discount(p0 context.Context, p1 Order) (Discount, error) {
+	c := plgRuleDiscountCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgRuleDiscountCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgRuleDiscountCall is one call of Rule.Discount: its arguments, then its results.
+type plgRuleDiscountCall struct {
+	p1 Order
+	r0 Discount
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgRuleDiscountCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeOrder(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgRuleDiscountCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeDiscount(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func plgEncodeItem(b []byte, v *Item, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.SKU))
+	if err != nil {
+		return b, plgimpl.AtField(err, "SKU")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Quantity))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Quantity")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.UnitCents))
+	if err != nil {
+		return b, plgimpl.AtField(err, "UnitCents")
+	}
+
+	return b, nil
+}
+
+func plgDecodeItem(r *plgimpl.Reader, v *Item, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.SKU, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "SKU")
+	}
+
+	v.Quantity, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "Quantity")
+	}
+
+	v.UnitCents, err = plgimpl.ReadInt[int64](r, "int64")
+	if err != nil {
+		return plgimpl.AtField(err, "UnitCents")
+	}
+
+	return nil
+}
+
+func plgEncode(b []byte, v *[]Item, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncodeItem(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode(r *plgimpl.Reader, v *[]Item, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, depth, 20)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]Item, n)
+	for i := range s {
+		err = plgDecodeItem(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncodeOrder(b []byte, v *Order, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Customer))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Customer")
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Coupon))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Coupon")
+	}
+
+	b, err = plgEncode(b, &v.Items, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Items")
+	}
+
+	return b, nil
+}
+
+func plgDecodeOrder(r *plgimpl.Reader, v *Order, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.Customer, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Customer")
+	}
+
+	v.Coupon, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Coupon")
+	}
+
+	err = plgDecode(r, &v.Items, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Items")
+	}
+
+	return nil
+}
+
+func plgEncodeDiscount(b []byte, v *Discount, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendString(b, string(v.Reason))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Reason")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.Cents))
+	if err != nil {
+		return b, plgimpl.AtField(err, "Cents")
+	}
+
+	return b, nil
+}
+
+func plgDecodeDiscount(r *plgimpl.Reader, v *Discount, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.Reason, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.AtField(err, "Reason")
+	}
+
+	v.Cents, err = plgimpl.ReadInt[int64](r, "int64")
+	if err != nil {
+		return plgimpl.AtField(err, "Cents")
+	}
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Rule](),
 		Adapter:   reflect.TypeFor[plgRule](),
 		Source:    plgRuleSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgRuleFast{inv: inv} },
+		Layout:    "8d1062fba62fb81a1161628502f45cb897bd4097f659e55b962a861bd883247e",
 	})
 }

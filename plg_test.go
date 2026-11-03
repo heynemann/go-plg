@@ -21,13 +21,17 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/internal/layout"
 	"github.com/heynemann/go-plg/internal/testcontract"
+	"github.com/heynemann/go-plg/plgimpl"
 )
 
 func TestMain(m *testing.M) {
-	err := plg.RegisterContract(pingerContract())
-	if err != nil {
-		panic(err)
+	for _, contract := range []plg.Contract{pingerContract(), fastPingerContract()} {
+		err := plg.RegisterContract(contract)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	goleak.VerifyTestMain(m)
@@ -684,6 +688,30 @@ func TestRegisterContractRejectsInvalidContracts(t *testing.T) {
 				Interface: reflect.TypeFor[clashOut](), Adapter: reflect.TypeFor[clashOutAdapter](), Source: source,
 			},
 		},
+		{
+			name: "fast adapter not implementing the interface", want: "the Fast adapter does not implement",
+			contract: plg.Contract{
+				Interface: iface, Adapter: adapter, Source: source,
+				Fast: func(plgimpl.Invoker) any { return struct{}{} },
+			},
+		},
+		{
+			name: "nil fast adapter", want: "the Fast adapter does not implement",
+			contract: plg.Contract{
+				Interface: iface, Adapter: adapter, Source: source, Fast: func(plgimpl.Invoker) any { return nil },
+			},
+		},
+		{
+			// Generated code predating a change of the interface's types would encode the old layout.
+			name: "fast adapter for another layout", want: "generated for another layout",
+			contract: plg.Contract{
+				Interface: iface,
+				Adapter:   adapter,
+				Source:    source,
+				Layout:    fingerprint(t, reflect.TypeFor[pingerBefore]()),
+				Fast:      func(plgimpl.Invoker) any { return &pingerAdapter{} },
+			},
+		},
 		{name: "already registered", want: "already has a contract", contract: pingerContract()},
 	}
 
@@ -696,6 +724,70 @@ func TestRegisterContractRejectsInvalidContracts(t *testing.T) {
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
+}
+
+// pingerBefore is pinger as it was before its message became a string: the fast paths generated then encode
+// another layout.
+type pingerBefore interface {
+	Ping(ctx context.Context, msg []byte) (string, error)
+}
+
+// fastPinger has a hand-written fast adapter, as plg gen would generate.
+type (
+	fastPinger interface {
+		Ping(ctx context.Context, msg string, times int) (string, error)
+	}
+	fastPingerAdapter struct {
+		WPing func(ctx context.Context, msg string, times int) (string, error)
+	}
+	fastPingerFast struct {
+		inv plgimpl.Invoker
+	}
+)
+
+func (a *fastPingerAdapter) Ping(ctx context.Context, msg string, times int) (string, error) {
+	return a.WPing(ctx, msg, times)
+}
+
+func (*fastPingerFast) Ping(context.Context, string, int) (string, error) {
+	return "", nil
+}
+
+func fingerprint(t *testing.T, iface reflect.Type) string {
+	t.Helper()
+
+	plan, err := layout.OfInterface(iface)
+	require.NoError(t, err)
+
+	return plan.Fingerprint()
+}
+
+// fastPingerContract is registered by TestMain (contracts are process-global, and tests repeat with -count).
+func fastPingerContract() plg.Contract {
+	iface := reflect.TypeFor[fastPinger]()
+
+	plan, err := layout.OfInterface(iface)
+	if err != nil {
+		panic(err)
+	}
+
+	return plg.Contract{
+		Interface: iface, Adapter: reflect.TypeFor[fastPingerAdapter](),
+		Source: fstest.MapFS{"pinger.go": {Data: []byte("package plg_test\n")}},
+		Fast:   func(inv plgimpl.Invoker) any { return &fastPingerFast{inv: inv} },
+		Layout: plan.Fingerprint(),
+	}
+}
+
+func TestRegisterContractKeepsACurrentFastAdapter(t *testing.T) {
+	t.Parallel()
+
+	var given plgimpl.Invoker = new(answeringInvoker)
+
+	adapter, ok := plg.FastAdapter(reflect.TypeFor[fastPinger](), given).(*fastPingerFast)
+	require.True(t, ok, "registered with its fast adapter")
+	assert.Same(t, given, adapter.inv, "bound to the invoker")
+	assert.Nil(t, plg.FastAdapter(reflect.TypeFor[pinger](), given), "a contract without Fast has none")
 }
 
 func TestMustRegisterContractPanicsOnInvalidContracts(t *testing.T) {
