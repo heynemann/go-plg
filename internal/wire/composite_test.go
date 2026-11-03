@@ -3,6 +3,9 @@ package wire_test
 import (
 	"encoding/binary"
 	"reflect"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +67,18 @@ type (
 
 	forest map[string]forest
 	nest   []nest
+
+	// heavy takes 8 KiB in memory but encodes in one byte: its block never crosses.
+	heavy struct {
+		Block [1024]int `json:"-"`
+		OK    bool
+	}
+
+	// faulty takes 24 bytes in memory for two of encoding.
+	faulty struct {
+		Err error
+		OK  bool
+	}
 )
 
 func sampleOrder() order {
@@ -362,6 +377,132 @@ func TestNestingIsBounded(t *testing.T) {
 	}
 }
 
+// heavies is the encoding of n present pointers to heavy values.
+func heavies(n int) []byte {
+	body := appendLen(nil, uint32(n)) //nolint:gosec // G115: small
+	for range n {
+		body = append(body, 1, 1)
+	}
+
+	return body
+}
+
+// greedyNest is a nest encoding of size bytes whose first levels each claim as many elements as the input left
+// could hold, the first element of each being the next level; zeros (empty nests) fill the rest.
+func greedyNest(size, levels int) []byte {
+	body := make([]byte, 0, size)
+	for range levels {
+		body = appendLen(body, uint32((size-len(body)-4)/4)) //nolint:gosec // G115: small
+	}
+
+	return append(body, make([]byte, size-len(body))...)
+}
+
+// allocated returns the bytes the program allocated while fn ran.
+func allocated(fn func()) uint64 {
+	var before, after runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// Decoding claims memory for slices, maps and pointer targets against a bound proportional to the input, so a
+// short hostile encoding cannot make the decoder allocate far more than its size, whatever the element types
+// take in memory beyond their encoding (fields tagged `json:"-"`) and however deep its length prefixes claim.
+//
+//nolint:paralleltest // runtime.MemStats.TotalAlloc over one decode measures only it while no other test runs
+func TestDecodedMemoryIsBoundedByTheInput(t *testing.T) {
+	const count = 8192 // heavy values: 64 MiB
+
+	keyed := appendLen(nil, count)
+	for i := range uint16(count) { // distinct two-byte keys
+		keyed = append(binary.LittleEndian.AppendUint16(appendLen(keyed, 2), i), 1)
+	}
+
+	tests := []struct {
+		into reflect.Type
+		name string
+		in   []byte
+	}{
+		{reflect.TypeFor[[]heavy](), "slice", append(appendLen(nil, count), make([]byte, count)...)},
+		{reflect.TypeFor[map[string]heavy](), "map", keyed},
+		{reflect.TypeFor[[]*heavy](), "pointers", heavies(count)},
+		{reflect.TypeFor[nest](), "nested claims", greedyNest(64<<10, 256)},
+		{reflect.TypeFor[forest](), "nested map claims", greedyForest(64<<10, 256)},
+	}
+
+	var err error
+
+	for _, tc := range tests {
+		bytes := allocated(func() { _, err = decodeInto(t, tc.into, tc.in) })
+		t.Logf("%s: %d bytes for %d: %v", tc.name, bytes, len(tc.in), err)
+		require.ErrorIs(t, err, wire.ErrTooLarge, tc.name)
+		assert.Less(t, bytes, uint64(wire.AllocationRatio*len(tc.in)+wire.AllocationAllowance+1<<20), tc.name)
+	}
+
+	empties := appendLen(nil, count)
+	for range count {
+		empties = appendLen(empties, 0)
+	}
+
+	bytes := allocated(func() { _, err = decodeInto(t, reflect.TypeFor[[]map[string]heavy](), empties) })
+	t.Logf("empty maps: %d bytes for %d: %v", bytes, len(empties), err)
+	require.NoError(t, err)
+	assert.Less(t, bytes, uint64(2<<20), "empty maps of heavy values make no scratch value")
+}
+
+// greedyForest is a forest encoding of size bytes whose first levels each claim as many entries as the input
+// left could hold, the first entry of each (key "") being the next level; zeros fill the rest.
+func greedyForest(size, levels int) []byte {
+	body := make([]byte, 0, size)
+	for range levels {
+		body = appendLen(appendLen(body, uint32((size-len(body)-4)/8)), 0) //nolint:gosec // G115: small
+	}
+
+	return append(body, make([]byte, size-len(body))...)
+}
+
+// Legitimate values decode however large: every type the encoding supports stays within half the allocation
+// ratio, and values whose skipped fields take memory their encoding does not account for decode within the
+// allowance. The bound is the reader's, over all the values it decodes.
+func TestLargeValuesWithinTheBoundDecode(t *testing.T) {
+	t.Parallel()
+
+	nilErrors := make([]error, 1<<20) // 16 MiB from 1 MiB: the worst ratio
+	assert.Equal(t, nilErrors, roundTrip(t, nilErrors))
+
+	failures := make([]faulty, 1<<19)
+	assert.Equal(t, failures, roundTrip(t, failures))
+
+	pointers := make([]*faulty, 1<<18)
+	for i := range pointers {
+		pointers[i] = &faulty{}
+	}
+
+	assert.Equal(t, pointers, roundTrip(t, pointers))
+
+	byKey := make(map[string]faulty, 1<<16)
+	for i := range 1 << 16 {
+		byKey[strconv.Itoa(i)] = faulty{OK: true}
+	}
+
+	assert.Equal(t, byKey, roundTrip(t, byKey))
+
+	fits := wire.AllocationAllowance / int(reflect.TypeFor[heavy]().Size())
+	within := make([]heavy, fits)
+	assert.Equal(t, within, roundTrip(t, within), "heavy values within the allowance")
+
+	codec := codecFor(t, reflect.TypeFor[[]heavy]())
+	body := encodeValue(t, within)
+	reader := wire.NewReader(append(slices.Clone(body), body...))
+	require.NoError(t, codec.Decode(&reader, reflect.New(codec.Type()).Elem()))
+	require.ErrorIs(t, codec.Decode(&reader, reflect.New(codec.Type()).Elem()), wire.ErrTooLarge,
+		"the second value finds the bound spent")
+}
+
 // Decoded values never alias the input: the host decodes straight from guest memory, which the next call
 // overwrites.
 func TestDecodedValuesDoNotAliasTheInput(t *testing.T) {
@@ -471,7 +612,8 @@ func TestEncodingAndFixedSizeDecodingDoNotAllocate(t *testing.T) {
 func FuzzDecodeComposites(f *testing.F) {
 	types := []reflect.Type{
 		reflect.TypeFor[order](), reflect.TypeFor[tree](), reflect.TypeFor[*list](), reflect.TypeFor[forest](),
-		reflect.TypeFor[nest](), reflect.TypeFor[holder](), reflect.TypeFor[[]float32](),
+		reflect.TypeFor[nest](), reflect.TypeFor[holder](), reflect.TypeFor[[]float32](), reflect.TypeFor[[]heavy](),
+		reflect.TypeFor[map[string]heavy](), reflect.TypeFor[[]*heavy](), reflect.TypeFor[[]map[string]heavy](),
 	}
 
 	codecs := make([]*wire.Codec, len(types))
@@ -480,15 +622,19 @@ func FuzzDecodeComposites(f *testing.F) {
 	}
 
 	seed := encodeValue(f, sampleOrder())
-	for _, v := range []any{
+	for _, value := range []any{
 		tree{Name: "t", Kids: []tree{{Name: "k"}}, Index: map[string]*tree{"x": nil}},
 		chain(3),
 		forest{"a": {"b": nil}},
 		nest{{}, nil},
 		holder{B: []byte{1}, M: map[string]int{"m": 1}},
 		[]float32{1, 2},
+		[]heavy{{OK: true}, {}},
+		map[string]heavy{"h": {OK: true}},
+		[]*heavy{nil, {OK: true}},
+		[]map[string]heavy{nil, {}, {"h": {}}},
 	} {
-		seed = append(seed, encodeValue(f, v)...)
+		seed = append(seed, encodeValue(f, value)...)
 	}
 
 	f.Add(seed)

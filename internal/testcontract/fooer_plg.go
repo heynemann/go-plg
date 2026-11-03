@@ -1210,7 +1210,7 @@ func plgEncode(b []byte, v *[]Line, depth int) ([]byte, error) {
 }
 
 func plgDecode(r *plgimpl.Reader, v *[]Line, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 20)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 20)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1245,7 +1245,7 @@ func plgEncode3(b []byte, v **Line, depth int) ([]byte, error) {
 }
 
 func plgDecode3(r *plgimpl.Reader, v **Line, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -1287,7 +1287,7 @@ func plgEncode2(b []byte, v *map[string]*Line, depth int) ([]byte, error) {
 }
 
 func plgDecode2(r *plgimpl.Reader, v *map[string]*Line, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 1)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 1)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1374,7 +1374,7 @@ func plgEncode4(b []byte, v **Point, depth int) ([]byte, error) {
 }
 
 func plgDecode4(r *plgimpl.Reader, v **Point, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -1412,7 +1412,7 @@ func plgEncode5(b []byte, v *[]string, depth int) ([]byte, error) {
 }
 
 func plgDecode5(r *plgimpl.Reader, v *[]string, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1455,7 +1455,7 @@ func plgEncode6(b []byte, v *map[string][]string, depth int) ([]byte, error) {
 }
 
 func plgDecode6(r *plgimpl.Reader, v *map[string][]string, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1505,7 +1505,7 @@ func plgEncode8(b []byte, v *[]float32, depth int) ([]byte, error) {
 }
 
 func plgDecode8(r *plgimpl.Reader, v *[]float32, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1544,7 +1544,7 @@ func plgEncode7(b []byte, v *[][]float32, depth int) ([]byte, error) {
 }
 
 func plgDecode7(r *plgimpl.Reader, v *[][]float32, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1687,7 +1687,7 @@ func plgEncode9(b []byte, v **Order, depth int) ([]byte, error) {
 }
 
 func plgDecode9(r *plgimpl.Reader, v **Order, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -1725,7 +1725,7 @@ func plgEncode11(b []byte, v *[]*Tree, depth int) ([]byte, error) {
 }
 
 func plgDecode11(r *plgimpl.Reader, v *[]*Tree, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 1)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 1)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1798,7 +1798,7 @@ func plgEncode10(b []byte, v **Tree, depth int) ([]byte, error) {
 }
 
 func plgDecode10(r *plgimpl.Reader, v **Tree, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -1840,7 +1840,7 @@ func plgEncode12(b []byte, v *map[string][]Line, depth int) ([]byte, error) {
 }
 
 func plgDecode12(r *plgimpl.Reader, v *map[string][]Line, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -2033,7 +2033,7 @@ func plgEncode13(b []byte, v *[]int, depth int) ([]byte, error) {
 }
 
 func plgDecode13(r *plgimpl.Reader, v *[]int, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -2068,7 +2068,7 @@ func plgEncode14(b []byte, v **User, depth int) ([]byte, error) {
 }
 
 func plgDecode14(r *plgimpl.Reader, v **User, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}

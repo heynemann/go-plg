@@ -152,9 +152,9 @@ func (r *Reader) Time() (time.Time, error) {
 }
 
 // SliceLen decodes the element count of a slice nested depth levels deep whose elements encode in at least
-// minSize bytes (minSize > 0): -1 for a nil slice. A count the remaining input cannot hold fails with
-// [ErrTruncated].
-func (r *Reader) SliceLen(depth, minSize int) (int, error) {
+// minSize bytes (minSize > 0) and take size bytes in memory: -1 for a nil slice. A count the remaining input
+// cannot hold fails with [ErrTruncated], elements past the reader's memory bound with [ErrTooLarge].
+func (r *Reader) SliceLen(depth, minSize, size int) (int, error) {
 	count, err := r.length()
 	if err != nil || count < 0 {
 		return count, err
@@ -169,12 +169,13 @@ func (r *Reader) SliceLen(depth, minSize int) (int, error) {
 		return 0, fmt.Errorf("%w: %d elements", ErrTruncated, count)
 	}
 
-	return count, nil
+	return count, r.claim(count, size)
 }
 
 // MapLen decodes the entry count of a map nested depth levels deep whose values encode in at least minSize
-// bytes: -1 for a nil map. A count the remaining input cannot hold fails with [ErrTruncated].
-func (r *Reader) MapLen(depth, minSize int) (int, error) {
+// bytes and whose key and value take size bytes in memory: -1 for a nil map. A count the remaining input cannot
+// hold fails with [ErrTruncated], entries past the reader's memory bound with [ErrTooLarge].
+func (r *Reader) MapLen(depth, minSize, size int) (int, error) {
 	count, err := r.length()
 	if err != nil || count < 0 {
 		return count, err
@@ -189,17 +190,31 @@ func (r *Reader) MapLen(depth, minSize int) (int, error) {
 		return 0, fmt.Errorf("%w: %d entries", ErrTruncated, count)
 	}
 
-	return count, nil
+	return count, r.claim(count, mapEntrySize(size))
 }
 
-// Present decodes the presence byte of a pointer nested depth levels deep.
-func (r *Reader) Present(depth int) (bool, error) {
+// mapEntrySize is the memory a map whose key and value take size bytes may take per entry: a slot and its
+// control byte, at Go's maximum load of 7/8 in a table whose size is rounded up to a power of two.
+func mapEntrySize(size int) int {
+	const slots, entries = 16, 7 // 2 * 8/7
+
+	return ((size+1)*slots + entries - 1) / entries
+}
+
+// Present decodes the presence byte of a pointer nested depth levels deep to a target of size bytes. A target
+// past the reader's memory bound fails with [ErrTooLarge].
+func (r *Reader) Present(depth, size int) (bool, error) {
 	present, err := r.Bool()
 	if err != nil || !present {
 		return false, err
 	}
 
-	return true, Deeper(depth)
+	err = Deeper(depth)
+	if err != nil {
+		return false, err
+	}
+
+	return true, r.claim(1, size)
 }
 
 // Overflow is the error of a decoded number num that does not fit the Go type typeName (as reflect names it).

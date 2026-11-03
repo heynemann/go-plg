@@ -146,7 +146,7 @@ func plgEncode(b []byte, v *[]Item, depth int) ([]byte, error) {
 }
 
 func plgDecode(r *plgimpl.Reader, v *[]Item, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 20)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 20)
 	if err != nil || n < 0 {
 		return err
 	}

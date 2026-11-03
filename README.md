@@ -238,6 +238,12 @@ rules with `plg.ErrInvalidInterface`:
 - **nil and empty stay distinct:** a nil slice, map or pointer arrives as `nil` (Lua) or `null` (TypeScript), an
   empty one as an empty table or array.
 - **Times** cross as an instant (Unix seconds and nanoseconds), in UTC.
+- **Decoding is bounded by the bytes received:** the slices, maps and pointer targets decoded from n bytes may take
+  at most 32 × n + 4 MiB of memory, measured by their Go types' sizes. Every supported type stays well within that
+  (at most 16 bytes of memory per encoded byte), but a field tagged `json:"-"` takes memory its encoding does not
+  pay for: decoding a value whose skipped fields would exceed the bound fails the call (a plugin's result fails
+  with a `*plg.PanicError` and the instance is discarded) instead of letting a short, hostile answer allocate
+  gigabytes. Keep large state out of the types that cross.
 
 The interface lives in a package of its own (the **contract package**): Go plugins import it, so the Go guest
 interprets its source, and it may import only the packages the Go guest allows (see [Go plugins](#go-plugins)).

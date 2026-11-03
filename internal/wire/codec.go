@@ -30,6 +30,7 @@ type node struct {
 	fields  []field // structs: the encoded fields, in declaration order
 	skipped []int   // structs: the indexes of the fields tagged `json:"-"`
 	minSize int     // bytes of the smallest encoding, so a length prefix is checked against the input
+	claim   int     // bytes in memory of a slice's element, a map's entry (key and value) or a pointer's target
 	kind    Kind
 }
 
@@ -190,6 +191,8 @@ func (p *Planner) fillSlice(n *node) error {
 
 	n.set(KindSlice, lengthSize, n.encodeSlice, n.decodeSlice)
 
+	n.claim = sizeOf(n.typ.Elem())
+
 	elem, err := p.plan(n.typ.Elem())
 	n.elem = elem
 
@@ -203,6 +206,8 @@ func (p *Planner) fillMap(n *node) error {
 
 	n.set(KindMap, lengthSize, n.encodeMap, n.decodeMap)
 
+	n.claim = sizeOf(n.typ.Key()) + sizeOf(n.typ.Elem())
+
 	elem, err := p.plan(n.typ.Elem())
 	n.elem = elem
 
@@ -212,10 +217,17 @@ func (p *Planner) fillMap(n *node) error {
 func (p *Planner) fillPointer(n *node) error {
 	n.set(KindPointer, 1, n.encodePointer, n.decodePointer)
 
+	n.claim = sizeOf(n.typ.Elem())
+
 	elem, err := p.plan(n.typ.Elem())
 	n.elem = elem
 
 	return err
+}
+
+// sizeOf is the memory a value of typ takes, which a decoder claims for each one it makes.
+func sizeOf(typ reflect.Type) int {
+	return int(typ.Size())
 }
 
 func (p *Planner) fillStruct(n *node) error {
@@ -520,7 +532,7 @@ func (n *node) encodeSlice(dst []byte, val reflect.Value, depth int) ([]byte, er
 }
 
 func (n *node) decodeSlice(reader *Reader, val reflect.Value, depth int) error {
-	count, err := reader.SliceLen(depth, n.elem.minSize) // elem.minSize > 0: the plan rejects empty elements
+	count, err := reader.SliceLen(depth, n.elem.minSize, n.claim) // elem.minSize > 0: the plan rejects empty ones
 	if err != nil {
 		return err
 	}
@@ -578,7 +590,7 @@ func (n *node) encodeMap(dst []byte, val reflect.Value, depth int) ([]byte, erro
 }
 
 func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
-	count, err := reader.MapLen(depth, n.elem.minSize)
+	count, err := reader.MapLen(depth, n.elem.minSize, n.claim)
 	if err != nil {
 		return err
 	}
@@ -590,12 +602,24 @@ func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
 	}
 
 	entries := reflect.MakeMapWithSize(n.typ, count)
+	if count > 0 { // only then: the entries' scratch value may be large, and an empty map claims no memory
+		err = n.decodeEntries(reader, entries, count, depth)
+		if err != nil {
+			return err
+		}
+	}
+
+	val.Set(entries)
+
+	return nil
+}
+
+// decodeEntries decodes count entries into the empty map entries.
+func (n *node) decodeEntries(reader *Reader, entries reflect.Value, count, depth int) error {
 	key, elem := reflect.New(n.typ.Key()).Elem(), reflect.New(n.typ.Elem()).Elem()
 
 	for range count {
-		var name string
-
-		name, err = reader.Text()
+		name, err := reader.Text()
 		if err != nil {
 			return err
 		}
@@ -612,8 +636,6 @@ func (n *node) decodeMap(reader *Reader, val reflect.Value, depth int) error {
 	if entries.Len() != count {
 		return DuplicateKeys()
 	}
-
-	val.Set(entries)
 
 	return nil
 }
@@ -632,7 +654,7 @@ func (n *node) encodePointer(dst []byte, val reflect.Value, depth int) ([]byte, 
 }
 
 func (n *node) decodePointer(reader *Reader, val reflect.Value, depth int) error {
-	present, err := reader.Present(depth)
+	present, err := reader.Present(depth, n.claim)
 	if err != nil {
 		return err
 	}

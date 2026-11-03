@@ -1,7 +1,8 @@
 // Package fastcontract is a contract whose methods reach every kind of type plg gen's fast paths encode: named
 // scalars, byte slices of named bytes, recursive slices, named maps with named keys, anonymous structs,
-// pointers to structs and times, skipped and embedded fields, recursion through pointers and slices. The tests hold its
-// generated codecs to internal/wire's reflective codec. No plugin implements it.
+// pointers to structs and times, skipped and embedded fields, recursion through pointers and slices, and an element
+// type far larger in memory than its encoding. The tests hold its generated codecs to internal/wire's reflective
+// codec. No plugin implements it.
 package fastcontract
 
 import (
@@ -47,6 +48,22 @@ type Inner struct {
 type Meta struct {
 	Labels map[string]string
 }
+
+// Heavy takes 8 KiB in memory but encodes in one byte: its large field never crosses, so a decoder must not let
+// a short input claim many of them.
+type Heavy struct {
+	Cache Block8K `json:"-"`
+	OK    bool
+}
+
+// Block128 takes 128 bytes.
+type Block128 struct{ A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P int }
+
+// Block1K takes 1 KiB.
+type Block1K struct{ A, B, C, D, E, F, G, H Block128 }
+
+// Block8K takes 8 KiB.
+type Block8K struct{ A, B, C, D, E, F, G, H Block1K }
 
 // Every holds every kind once (in the order govet's fieldalignment wants).
 type Every struct {
@@ -106,4 +123,6 @@ type Kinds interface {
 	Tree(ctx context.Context, l List) (List, error)
 	// Point returns p.
 	Point(ctx context.Context, p *Inner) (*Inner, error)
+	// Weighty returns elements far larger in memory than their encoding, as a slice, a map and pointers.
+	Weighty(ctx context.Context, items []Heavy) ([]Heavy, map[string]Heavy, []*Heavy, error)
 }

@@ -603,7 +603,7 @@ func (g *fastGen) decoder(codec *typeCodec) string {
 }
 
 func (g *fastGen) sliceDecoder(node *layout.Node[types.Type]) string {
-	return `	{n}, {err} := {impl}.ReadSliceLen({r}, {depth}, ` + strconv.Itoa(node.Elem.MinSize) + `)
+	return `	{n}, {err} := {impl}.ReadSliceLen({r}, {v}, {depth}, ` + strconv.Itoa(node.Elem.MinSize) + `)
 	if {err} != nil || {n} < 0 {
 		return {err}
 	}
@@ -623,7 +623,7 @@ func (g *fastGen) sliceDecoder(node *layout.Node[types.Type]) string {
 }
 
 func (g *fastGen) mapDecoder(node *layout.Node[types.Type]) string {
-	return `	{n}, {err} := {impl}.ReadMapLen({r}, {depth}, ` + strconv.Itoa(node.Elem.MinSize) + `)
+	return `	{n}, {err} := {impl}.ReadMapLen({r}, {v}, {depth}, ` + strconv.Itoa(node.Elem.MinSize) + `)
 	if {err} != nil || {n} < 0 {
 		return {err}
 	}
@@ -657,7 +657,7 @@ func (g *fastGen) mapDecoder(node *layout.Node[types.Type]) string {
 }
 
 func (g *fastGen) pointerDecoder(node *layout.Node[types.Type]) string {
-	return `	{present}, {err} := {impl}.ReadPresent({r}, {depth})
+	return `	{present}, {err} := {impl}.ReadPresent({r}, {v}, {depth})
 	if {err} != nil || !{present} {
 		return {err}
 	}

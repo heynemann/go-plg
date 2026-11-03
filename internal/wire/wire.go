@@ -22,7 +22,10 @@
 //   - error: a presence byte followed, when present, by its message as a string.
 //
 // Nesting deeper than [MaxDepth] fails, so a hostile encoding cannot exhaust the decoder's stack and a pointer
-// cycle cannot hang its encoder. A length prefix never makes a decoder allocate more than its input justifies.
+// cycle cannot hang its encoder. A length prefix never claims more elements than the remaining input can hold,
+// and the memory of the slices, maps and pointers a decoder makes is bounded by the input's size
+// ([AllocationRatio], [AllocationAllowance]), so a hostile encoding cannot make a decoder allocate far more
+// than its input justifies, even for elements whose `json:"-"` fields take much more memory than they encode in.
 //
 // Every guest result buffer starts with a [Status] byte.
 package wire
@@ -30,6 +33,7 @@ package wire
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"unicode/utf8"
 )
@@ -95,6 +99,10 @@ var (
 	ErrTooLong = errors.New("wire: value too long")
 	// ErrTooDeep reports a value nested deeper than [MaxDepth] (on encoding, usually a pointer cycle).
 	ErrTooDeep = errors.New("wire: value nested too deeply")
+	// ErrTooLarge reports an encoding whose decoded values would take far more memory than its size justifies:
+	// length prefixes and pointers claiming more than [AllocationRatio] times the input plus
+	// [AllocationAllowance] bytes of elements.
+	ErrTooLarge = errors.New("wire: decoded value too large for its encoding")
 )
 
 const (
@@ -102,12 +110,26 @@ const (
 	MaxSafeInt = 1 << 53
 	// MaxDepth bounds the nesting of slices, maps, pointers and structs inside one value.
 	MaxDepth = 10000
+	// AllocationRatio bounds, with AllocationAllowance, the memory decoding an input of n bytes may claim for the
+	// elements of slices, the entries of maps and the targets of pointers: AllocationRatio*n +
+	// AllocationAllowance bytes, measured by their Go types' sizes (a map entry by the most a map table takes
+	// per entry). Past that, decoding fails with [ErrTooLarge] before allocating. Every element claimed encodes
+	// in bytes of its own, and no type the encoding supports claims more than 16 times the size of its smallest
+	// encoding (a nil error: one byte, a 16-byte interface), so any encoding of types without `json:"-"` fields
+	// stays within half the ratio; the allowance leaves room for values whose skipped fields take memory their
+	// encoding does not account for. Strings and byte slices copy their own bytes, and per-collection overhead
+	// (a map's header, a small map's first group) adds a small constant factor at most.
+	AllocationRatio = 32
+	// AllocationAllowance is the memory any input may claim on top of AllocationRatio times its size.
+	AllocationAllowance = 4 << 20
 )
 
 const (
 	wordSize   = 8
 	lengthSize = 4
 	nilLength  = math.MaxUint32 // the length prefix of a nil slice or map
+	// maxRoomBase is the largest input size whose room an int holds (on 32-bit platforms, inputs past 64 MiB).
+	maxRoomBase = (math.MaxInt - AllocationAllowance) / AllocationRatio
 )
 
 // AppendBool appends the encoding of v.
@@ -181,13 +203,15 @@ func AppendMessage(dst []byte, msg string) []byte {
 
 // Reader decodes values from a buffer, in order. The zero value reads from an empty buffer.
 type Reader struct {
-	buf []byte
-	off int
+	buf  []byte
+	off  int
+	room int // the bytes of elements, entries and pointer targets the decoders may still make
 }
 
-// NewReader returns a Reader over b. The Reader does not copy b; strings it returns are copies.
+// NewReader returns a Reader over b. The Reader does not copy b; strings it returns are copies. Decoding from it
+// claims at most [AllocationRatio]*len(b)+[AllocationAllowance] bytes of elements, entries and pointer targets.
 func NewReader(b []byte) Reader {
-	return Reader{buf: b}
+	return Reader{buf: b, room: AllocationAllowance + AllocationRatio*min(len(b), maxRoomBase)}
 }
 
 // Len returns the number of unread bytes.
@@ -287,4 +311,16 @@ func (r *Reader) next(n int) ([]byte, error) {
 	r.off += n
 
 	return p, nil
+}
+
+// claim reserves the memory of count values of size bytes each, failing with [ErrTooLarge] past the reader's
+// room.
+func (r *Reader) claim(count, size int) error {
+	if size > 0 && count > r.room/size {
+		return fmt.Errorf("%w: %d × %d bytes", ErrTooLarge, count, size)
+	}
+
+	r.room -= count * size
+
+	return nil
 }

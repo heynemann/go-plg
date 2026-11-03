@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unsafe"
 
 	"github.com/heynemann/go-plg/internal/wire"
 )
@@ -182,13 +183,18 @@ func ReadByteSlice[S ~[]E, E ~uint8](r *Reader) (S, error) {
 // ReadTime decodes an instant, in UTC.
 func ReadTime(r *Reader) (time.Time, error) { return r.Time() }
 
-// ReadSliceLen decodes the length of a slice nested depth levels deep whose elements encode in at least
-// minSize bytes: -1 for nil.
-func ReadSliceLen(r *Reader, depth, minSize int) (int, error) { return r.SliceLen(depth, minSize) }
+// ReadSliceLen decodes the length of the slice *v nested depth levels deep whose elements encode in at least
+// minSize bytes: -1 for nil. It claims the elements' memory from r's bound (see wire.AllocationRatio); v only
+// tells the type.
+func ReadSliceLen[S ~[]E, E any](r *Reader, _ *S, depth, minSize int) (int, error) {
+	return r.SliceLen(depth, minSize, sizeOf[E]())
+}
 
-// ReadMapLen decodes the length of a map nested depth levels deep whose values encode in at least minSize
-// bytes: -1 for nil.
-func ReadMapLen(r *Reader, depth, minSize int) (int, error) { return r.MapLen(depth, minSize) }
+// ReadMapLen decodes the length of the map *v nested depth levels deep whose values encode in at least minSize
+// bytes: -1 for nil. It claims the entries' memory from r's bound; v only tells the type.
+func ReadMapLen[M ~map[K]V, K ~string, V any](r *Reader, _ *M, depth, minSize int) (int, error) {
+	return r.MapLen(depth, minSize, sizeOf[K]()+sizeOf[V]())
+}
 
 // ReadKey decodes a key of the map type M; m only tells its type.
 func ReadKey[M ~map[K]V, K ~string, V any](r *Reader, _ M) (K, error) {
@@ -197,8 +203,18 @@ func ReadKey[M ~map[K]V, K ~string, V any](r *Reader, _ M) (K, error) {
 	return K(s), err
 }
 
-// ReadPresent decodes whether a pointer nested depth levels deep is non-nil.
-func ReadPresent(r *Reader, depth int) (bool, error) { return r.Present(depth) }
+// ReadPresent decodes whether the pointer *v nested depth levels deep is non-nil, claiming its target's memory
+// from r's bound when it is; v only tells the type.
+func ReadPresent[P ~*E, E any](r *Reader, _ *P, depth int) (bool, error) {
+	return r.Present(depth, sizeOf[E]())
+}
+
+// sizeOf is the memory a value of type T takes, as reflect's Type.Size reports it to the reflective codec.
+func sizeOf[T any]() int {
+	var v T
+
+	return int(unsafe.Sizeof(v))
+}
 
 // DuplicateKeys is the error of a map that repeats a key.
 func DuplicateKeys() error { return wire.DuplicateKeys() }

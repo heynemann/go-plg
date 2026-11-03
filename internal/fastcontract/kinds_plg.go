@@ -25,6 +25,7 @@ type plgKinds struct {
 	WNothing func(context.Context) error
 	WPoint   func(context.Context, *Inner) (*Inner, error)
 	WTree    func(context.Context, List) (List, error)
+	WWeighty func(context.Context, []Heavy) ([]Heavy, map[string]Heavy, []*Heavy, error)
 }
 
 var _ Kinds = (*plgKinds)(nil)
@@ -47,6 +48,10 @@ func (a *plgKinds) Point(p0 context.Context, p1 *Inner) (*Inner, error) {
 
 func (a *plgKinds) Tree(p0 context.Context, p1 List) (List, error) {
 	return a.WTree(p0, p1)
+}
+
+func (a *plgKinds) Weighty(p0 context.Context, p1 []Heavy) ([]Heavy, map[string]Heavy, []*Heavy, error) {
+	return a.WWeighty(p0, p1)
 }
 
 // plgKindsFast implements Kinds for plg with the fast paths plg gen generated: typed calls, and codecs
@@ -273,6 +278,59 @@ func (c *plgKindsTreeCall) DecodeResults(r *plgimpl.Reader) error {
 	return nil
 }
 
+func (a *plgKindsFast) Weighty(p0 context.Context, p1 []Heavy) ([]Heavy, map[string]Heavy, []*Heavy, error) {
+	c := plgKindsWeightyCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 5, &c)
+	if err != nil {
+		c = plgKindsWeightyCall{}
+	}
+
+	return c.r0, c.r1, c.r2, err
+}
+
+// plgKindsWeightyCall is one call of Kinds.Weighty: its arguments, then its results.
+type plgKindsWeightyCall struct {
+	p1 []Heavy
+	r0 []Heavy
+	r1 map[string]Heavy
+	r2 []*Heavy
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgKindsWeightyCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode16(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgKindsWeightyCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode16(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	err = plgDecode17(r, &c.r1, 0)
+	if err != nil {
+		return plgimpl.Result(err, 1)
+	}
+
+	err = plgDecode18(r, &c.r2, 0)
+	if err != nil {
+		return plgimpl.Result(err, 2)
+	}
+
+	return nil
+}
+
 func plgEncode(b []byte, v *map[string]string, depth int) ([]byte, error) {
 	if *v == nil {
 		return plgimpl.AppendNil(b), nil
@@ -298,7 +356,7 @@ func plgEncode(b []byte, v *map[string]string, depth int) ([]byte, error) {
 }
 
 func plgDecode(r *plgimpl.Reader, v *map[string]string, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -375,7 +433,7 @@ func plgEncode2(b []byte, v **time.Time, depth int) ([]byte, error) {
 }
 
 func plgDecode2(r *plgimpl.Reader, v **time.Time, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -413,7 +471,7 @@ func plgEncode3(b []byte, v *[]Small, depth int) ([]byte, error) {
 }
 
 func plgDecode3(r *plgimpl.Reader, v *[]Small, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -456,7 +514,7 @@ func plgEncodeIndex(b []byte, v *Index, depth int) ([]byte, error) {
 }
 
 func plgDecodeIndex(r *plgimpl.Reader, v *Index, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 4)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -509,7 +567,7 @@ func plgEncode5(b []byte, v *[]string, depth int) ([]byte, error) {
 }
 
 func plgDecode5(r *plgimpl.Reader, v *[]string, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -582,7 +640,7 @@ func plgEncode4(b []byte, v **Inner, depth int) ([]byte, error) {
 }
 
 func plgDecode4(r *plgimpl.Reader, v **Inner, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -624,7 +682,7 @@ func plgEncode6(b []byte, v *map[string]Inner, depth int) ([]byte, error) {
 }
 
 func plgDecode6(r *plgimpl.Reader, v *map[string]Inner, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 12)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 12)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -681,7 +739,7 @@ func plgEncode7(b []byte, v *map[string]*Inner, depth int) ([]byte, error) {
 }
 
 func plgDecode7(r *plgimpl.Reader, v *map[string]*Inner, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 1)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 1)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -730,7 +788,7 @@ func plgEncode8(b []byte, v **Every, depth int) ([]byte, error) {
 }
 
 func plgDecode8(r *plgimpl.Reader, v **Every, depth int) error {
-	present, err := plgimpl.ReadPresent(r, depth)
+	present, err := plgimpl.ReadPresent(r, v, depth)
 	if err != nil || !present {
 		return err
 	}
@@ -768,7 +826,7 @@ func plgEncodeList(b []byte, v *List, depth int) ([]byte, error) {
 }
 
 func plgDecodeList(r *plgimpl.Reader, v *List, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -807,7 +865,7 @@ func plgEncode10(b []byte, v *[]int16, depth int) ([]byte, error) {
 }
 
 func plgDecode10(r *plgimpl.Reader, v *[]int16, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -846,7 +904,7 @@ func plgEncode9(b []byte, v *[][]int16, depth int) ([]byte, error) {
 }
 
 func plgDecode9(r *plgimpl.Reader, v *[][]int16, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 4)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -885,7 +943,7 @@ func plgEncode11(b []byte, v *[]Every, depth int) ([]byte, error) {
 }
 
 func plgDecode11(r *plgimpl.Reader, v *[]Every, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 221)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 221)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -921,7 +979,7 @@ func plgEncode13(b []byte, v *[]Ratio, depth int) ([]byte, error) {
 }
 
 func plgDecode13(r *plgimpl.Reader, v *[]Ratio, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1355,7 +1413,7 @@ func plgEncode14(b []byte, v *[]Temp, depth int) ([]byte, error) {
 }
 
 func plgDecode14(r *plgimpl.Reader, v *[]Temp, depth int) error {
-	n, err := plgimpl.ReadSliceLen(r, depth, 8)
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1398,7 +1456,7 @@ func plgEncode15(b []byte, v *map[string]Small, depth int) ([]byte, error) {
 }
 
 func plgDecode15(r *plgimpl.Reader, v *map[string]Small, depth int) error {
-	n, err := plgimpl.ReadMapLen(r, depth, 8)
+	n, err := plgimpl.ReadMapLen(r, v, depth, 8)
 	if err != nil || n < 0 {
 		return err
 	}
@@ -1430,12 +1488,205 @@ func plgDecode15(r *plgimpl.Reader, v *map[string]Small, depth int) error {
 	return nil
 }
 
+func plgEncodeHeavy(b []byte, v *Heavy, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, bool(v.OK))
+	return b, nil
+}
+
+func plgDecodeHeavy(r *plgimpl.Reader, v *Heavy, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.OK, err = plgimpl.ReadBool[bool](r)
+	if err != nil {
+		return plgimpl.AtField(err, "OK")
+	}
+
+	return nil
+}
+
+func plgEncode16(b []byte, v *[]Heavy, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncodeHeavy(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode16(r *plgimpl.Reader, v *[]Heavy, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 1)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]Heavy, n)
+	for i := range s {
+		err = plgDecodeHeavy(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncode17(b []byte, v *map[string]Heavy, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for k, e := range *v {
+		b, err = plgimpl.AppendString(b, string(k))
+		if err == nil {
+			b, err = plgEncodeHeavy(b, &e, depth+1)
+		}
+
+		if err != nil {
+			return b, plgimpl.AtKey(err, string(k))
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode17(r *plgimpl.Reader, v *map[string]Heavy, depth int) error {
+	n, err := plgimpl.ReadMapLen(r, v, depth, 1)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	m := make(map[string]Heavy, n)
+
+	for range n {
+		k, err := plgimpl.ReadKey(r, m)
+		if err != nil {
+			return err
+		}
+
+		var e Heavy
+
+		err = plgDecodeHeavy(r, &e, depth+1)
+		if err != nil {
+			return plgimpl.AtKey(err, string(k))
+		}
+
+		m[k] = e
+	}
+
+	if len(m) != n {
+		return plgimpl.DuplicateKeys()
+	}
+
+	*v = m
+
+	return nil
+}
+
+func plgEncode19(b []byte, v **Heavy, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeHeavy(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode19(r *plgimpl.Reader, v **Heavy, depth int) error {
+	present, err := plgimpl.ReadPresent(r, v, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Heavy)
+
+	err = plgDecodeHeavy(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode18(b []byte, v *[]*Heavy, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncode19(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode18(r *plgimpl.Reader, v *[]*Heavy, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 1)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]*Heavy, n)
+	for i := range s {
+		err = plgDecode19(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Kinds](),
 		Adapter:   reflect.TypeFor[plgKinds](),
 		Source:    plgKindsSource,
 		Fast:      func(inv plgimpl.Invoker) any { return &plgKindsFast{inv: inv} },
-		Layout:    "4a29bd67ac5da327df3e2f169bf00581817180a7a5fea2e1104c8eca39ccd727",
+		Layout:    "439ff055d9a3784b96d903bffe0498112ca8e669a4d02a9270ab55f2d392d3d8",
 	})
 }

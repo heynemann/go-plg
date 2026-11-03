@@ -143,10 +143,10 @@ func ReadString[T ~string](r *Reader) (T, error)                       { return 
 func ReadBytes[S ~[]byte](r *Reader) (S, error)                        { return nil, nil }
 func ReadByteSlice[S ~[]E, E ~uint8](r *Reader) (S, error)             { return nil, nil }
 func ReadTime(r *Reader) (time.Time, error)                            { return time.Time{}, nil }
-func ReadSliceLen(r *Reader, depth, minSize int) (int, error)        { return 0, nil }
-func ReadMapLen(r *Reader, depth, minSize int) (int, error)          { return 0, nil }
+func ReadSliceLen[S ~[]E, E any](r *Reader, _ *S, depth, minSize int) (int, error) { return 0, nil }
+func ReadMapLen[M ~map[K]V, K ~string, V any](r *Reader, _ *M, depth, minSize int) (int, error) { return 0, nil }
 func ReadKey[M ~map[K]V, K ~string, V any](r *Reader, _ M) (K, error) { return "", nil }
-func ReadPresent(r *Reader, depth int) (bool, error)                   { return false, nil }
+func ReadPresent[P ~*E, E any](r *Reader, _ *P, depth int) (bool, error) { return false, nil }
 func DuplicateKeys() error                                             { return nil }
 func AtField(err error, goName string) error                           { return err }
 func AtIndex(err error, i int) error                                   { return err }

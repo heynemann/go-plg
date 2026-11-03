@@ -7,6 +7,9 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +121,7 @@ func requireSameError(t *testing.T, want, got error, what string) {
 
 	for _, sentinel := range []error{
 		wire.ErrTruncated, wire.ErrTrailing, wire.ErrInvalid, wire.ErrOverflow, wire.ErrPrecision, wire.ErrTooLong,
-		wire.ErrTooDeep,
+		wire.ErrTooDeep, wire.ErrTooLarge,
 	} {
 		assert.Equal(t, errors.Is(want, sentinel), errors.Is(got, sentinel), "%s: wraps %v", what, sentinel)
 	}
@@ -327,6 +330,10 @@ func FuzzFastPathsMatchTheGenericBinder(f *testing.F) {
 	f.Add(kinds, uint8(0), []byte(nil), encodeValues(f, fastcontract.Every{F32: math.MaxFloat32})[:200])
 	f.Add(uint8(0), uint8(4), encodeValues(f, true, 1, int8(2), int16(3), int32(4), int64(5), uint(6), uint8(7),
 		uint16(8), uint32(9), uint64(10), float32(11), 12.0, "s"), encodeValues(f, true, 1, int64(300)))
+	f.Add(kinds, uint8(5), encodeValues(f, []fastcontract.Heavy{{OK: true}}), encodeValues(f, // Weighty
+		[]fastcontract.Heavy{{OK: true}, {}}, map[string]fastcontract.Heavy{"h": {OK: true}},
+		[]*fastcontract.Heavy{nil, {OK: true}}))
+	f.Add(kinds, uint8(5), []byte(nil), append(binary.LittleEndian.AppendUint32(nil, 1024), make([]byte, 1024)...))
 
 	contracts := fastContracts()
 
@@ -476,6 +483,133 @@ func TestFastPathsDecodeIntoTheirOwnTypes(t *testing.T) {
 	inv.body = nil
 
 	require.NoError(t, kinds.Nothing(t.Context()))
+}
+
+// TestDecodersBoundMemoryByTheirInput feeds the generated and the generic decoders results whose length prefixes
+// claim far more memory than their bytes justify: elements whose large field never crosses (in a slice, as map
+// values with distinct keys, through pointers) and a recursive slice claiming the whole remaining input at
+// every level. Both fail with the same wire.ErrTooLarge having allocated a bounded amount, where they used to
+// allocate 64–100 MiB for 8–64 KiB.
+//
+//nolint:paralleltest // runtime.MemStats.TotalAlloc over one decode measures only it while no other test runs
+func TestDecodersBoundMemoryByTheirInput(t *testing.T) {
+	const count = 8192 // elements of 8 KiB claimed with one or two bytes each: 64 MiB
+
+	null := binary.LittleEndian.AppendUint32(nil, math.MaxUint32) // a nil slice or map
+	empty := binary.LittleEndian.AppendUint32(nil, 0)
+	keyed := binary.LittleEndian.AppendUint32(nil, count)
+	pointers := binary.LittleEndian.AppendUint32(nil, count)
+
+	for i := range uint16(count) {
+		keyed = append(binary.LittleEndian.AppendUint16(binary.LittleEndian.AppendUint32(keyed, 2), i), 0)
+		pointers = append(pointers, 1, 0) // present, OK false
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		body   []byte
+	}{
+		{
+			name: "slice", method: "Weighty",
+			body: append(binary.LittleEndian.AppendUint32(nil, count), make([]byte, count)...),
+		},
+		{name: "map", method: "Weighty", body: slices.Concat(empty, keyed, null)},
+		{name: "pointers", method: "Weighty", body: slices.Concat(empty, null, pointers)},
+		{name: "nested claims", method: "Tree", body: greedyList(64<<10, 256)},
+	}
+
+	kinds := reflect.TypeFor[fastcontract.Kinds]()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			method, ok := kinds.MethodByName(tc.method)
+			require.True(t, ok)
+
+			args := argsFrom(t.Context(), method.Type, nil)
+
+			generic, err := plg.GenericCall(kinds, method.Index, args)
+			require.NoError(t, err)
+
+			var wantErr, gotErr error
+
+			allocated := allocatedBy(func() { wantErr = plg.DecodeAnswer(tc.body, generic) })
+			t.Logf("generic: %d bytes for a %d byte body: %v", allocated, len(tc.body), wantErr)
+			require.ErrorIs(t, wantErr, wire.ErrTooLarge)
+			assert.Less(t, allocated, uint64(16<<20), "the generic decoder allocates a bounded amount")
+
+			fn := reflect.ValueOf(plg.FastAdapter(kinds, &answeringInvoker{body: tc.body})).MethodByName(tc.method)
+			allocated = allocatedBy(func() {
+				out := fn.Call(args)
+				gotErr, _ = reflect.TypeAssert[error](out[len(out)-1])
+			})
+			t.Logf("generated: %d bytes: %v", allocated, gotErr)
+			requireSameError(t, wantErr, gotErr, "decoding the results")
+			assert.Less(t, allocated, uint64(16<<20), "the generated decoder allocates a bounded amount")
+		})
+	}
+}
+
+// allocatedBy returns the bytes the program allocated while fn ran.
+func allocatedBy(fn func()) uint64 {
+	var before, after runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// greedyList is a List encoding of size bytes whose first levels each claim as many elements as the input
+// left could hold, the first element of each being the next level; zeros (empty lists) fill the rest.
+func greedyList(size, levels int) []byte {
+	body := make([]byte, 0, size)
+
+	for range levels {
+		body = binary.LittleEndian.AppendUint32(body, uint32((size-len(body)-4)/4)) //nolint:gosec // G115: small
+	}
+
+	return append(body, make([]byte, size-len(body))...)
+}
+
+// TestDecodersDecodeLargeLegitimateResults holds both decoders to the same large results within the bound:
+// values whose skipped fields take memory their encoding does not account for, within the allowance, and
+// a wide recursive slice.
+func TestDecodersDecodeLargeLegitimateResults(t *testing.T) {
+	t.Parallel()
+
+	kinds := reflect.TypeFor[fastcontract.Kinds]()
+	decodes := func(name string, body []byte) {
+		method, ok := kinds.MethodByName(name)
+		require.True(t, ok)
+
+		args := argsFrom(t.Context(), method.Type, nil)
+		checkParity(t, kinds, method.Index, args, body)
+
+		generic, err := plg.GenericCall(kinds, method.Index, args)
+		require.NoError(t, err)
+		require.NoError(t, plg.DecodeAnswer(body, generic), name)
+	}
+
+	items := make([]fastcontract.Heavy, 200)
+	byKey := map[string]fastcontract.Heavy{}
+	pointers := make([]*fastcontract.Heavy, 100)
+
+	for i := range 50 {
+		items[i].OK = true
+		byKey[strconv.Itoa(i)] = fastcontract.Heavy{OK: i%2 == 0}
+		pointers[2*i] = &fastcontract.Heavy{OK: true}
+	}
+
+	decodes("Weighty", encodeValues(t, items, byKey, pointers))
+
+	wide := make(fastcontract.List, 1<<16)
+	for i := range wide {
+		wide[i] = fastcontract.List{}
+	}
+
+	decodes("Tree", encodeValues(t, wide))
 }
 
 // bufferInvoker answers every call with body, reusing one argument buffer as plg's pool slots do.
