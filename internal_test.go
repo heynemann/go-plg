@@ -345,12 +345,25 @@ func newTestPool(spawner *fakeSpawner, cfg poolConfig) *pool {
 	return newPool(cfg)
 }
 
-// startPool warms a pool built by newTestPool.
-func startPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
+// warmPool warms a pool built by newTestPool.
+func warmPool(tb testing.TB, spawner *fakeSpawner, cfg poolConfig) *pool {
 	tb.Helper()
 
 	instances := newTestPool(spawner, cfg)
 	require.NoError(tb, instances.warm(tb.Context()))
+
+	return instances
+}
+
+// startPool warms a pool built by newTestPool in a synctest bubble, then waits for its refiller to find the pool
+// at its minimum and wait for a signal. Otherwise the refiller's first look at the pool races the test's first
+// callers: seeing one waiting, it could start the instance the test expects that caller to start.
+func startPool(t *testing.T, spawner *fakeSpawner, cfg poolConfig) *pool {
+	t.Helper()
+
+	instances := warmPool(t, spawner, cfg)
+
+	synctest.Wait()
 
 	return instances
 }
@@ -794,7 +807,7 @@ func TestPoolUnderContention(t *testing.T) {
 	const workers, rounds, maxSize = 64, 1000, 8
 
 	spawner, budget := &fakeSpawner{}, &memoryBudget{total: maxSize * testLimit}
-	instances := startPool(t, spawner, poolConfig{budget: budget, minSize: 2, maxSize: maxSize})
+	instances := warmPool(t, spawner, poolConfig{budget: budget, minSize: 2, maxSize: maxSize})
 	errs := make(chan error, workers)
 
 	var wg sync.WaitGroup
@@ -869,7 +882,7 @@ func TestMemoryBudgetAccounting(t *testing.T) {
 
 // BenchmarkPoolAcquireRelease is one call's pool overhead with an instance idle.
 func BenchmarkPoolAcquireRelease(b *testing.B) {
-	instances := startPool(b, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 1})
+	instances := warmPool(b, &fakeSpawner{}, poolConfig{minSize: 1, maxSize: 1})
 	b.Cleanup(func() { assert.NoError(b, instances.close(context.Background())) })
 
 	ctx := b.Context()
@@ -891,7 +904,7 @@ func BenchmarkPoolAcquireRelease(b *testing.B) {
 func BenchmarkPoolAcquireReleaseParallel(b *testing.B) {
 	for _, size := range []int32{1, int32(runtime.GOMAXPROCS(0))} { //nolint:gosec // G115: a handful of CPUs
 		b.Run("pool="+strconv.Itoa(int(size)), func(b *testing.B) {
-			instances := startPool(b, &fakeSpawner{}, poolConfig{minSize: size, maxSize: size})
+			instances := warmPool(b, &fakeSpawner{}, poolConfig{minSize: size, maxSize: size})
 			b.Cleanup(func() { assert.NoError(b, instances.close(context.Background())) })
 
 			ctx := b.Context()
@@ -1109,7 +1122,7 @@ func TestCallFailuresArePanicErrors(t *testing.T) {
 
 			reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 16)
 			spawner := &fakeSpawner{call: tc.call, guest: tc.guest}
-			instances := startPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+			instances := warmPool(t, spawner, poolConfig{panics: reporter, minSize: 1, maxSize: 1})
 			plug := &plugin{key: "test/k", desc: Descriptor{Language: LanguageGo}, pool: instances}
 
 			_, err := plug.call(t.Context(), meth, []reflect.Value{reflect.ValueOf(t.Context())})
@@ -1358,6 +1371,23 @@ func TestPanicHistoryUnderConcurrency(t *testing.T) {
 	final := history.recent()
 	require.NoError(t, historyInOrder(final, size))
 	assert.Len(t, final, size, "quiescent: the ring is full")
+}
+
+// TestPanicHistoryKeepsANewerEntryFromALateWriter has a writer store its entry after a newer one took the same
+// slot, as one delayed between taking its sequence number and storing does: the newer entry stays.
+func TestPanicHistoryKeepsANewerEntryFromALateWriter(t *testing.T) {
+	t.Parallel()
+
+	history := &newPanicReporter(slog.New(slog.DiscardHandler), nil, 2).history
+	late := history.next.Add(1) - 1
+	newer := []*PanicError{{Value: "second"}, {Value: "third"}} // the third takes the late first's slot
+
+	for _, failure := range newer {
+		history.record(failure)
+	}
+
+	history.store(late, &PanicError{Value: "first"})
+	assert.Equal(t, newer, history.recent(), "the newest entries, the late one out")
 }
 
 // unreadable is a filesystem whose named file cannot be read.

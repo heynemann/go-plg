@@ -195,8 +195,9 @@ func (r *panicReporter) log(ctx context.Context, failure *PanicError) {
 }
 
 // panicHistory keeps the newest PanicErrors in a ring, without locks: a writer takes the next sequence number
-// and stores its entry in that number's slot; a reader keeps only the entries whose slot still holds the
-// sequence number it expects, so entries overwritten or not yet stored meanwhile are left out.
+// and stores its entry in that number's slot, unless a newer entry holds it already; a reader keeps only the
+// entries whose slot still holds the sequence number it expects, so entries overwritten or not yet stored
+// meanwhile are left out.
 type panicHistory struct {
 	ring []atomic.Pointer[panicEntry]
 	next atomic.Uint64 // sequence number of the next entry
@@ -212,8 +213,25 @@ func (h *panicHistory) record(pe *PanicError) {
 		return
 	}
 
-	seq := h.next.Add(1) - 1
-	h.ring[seq%uint64(len(h.ring))].Store(&panicEntry{pe: pe, seq: seq})
+	h.store(h.next.Add(1)-1, pe)
+}
+
+// store puts pe, numbered seq, in its slot. A writer delayed between taking its number and storing may find
+// the slot taken by an entry recorded after its own, one ring length later: it leaves that newer entry in place
+// (its own is out of the history already), so that the history holds the newest entries once writers are done.
+func (h *panicHistory) store(seq uint64, pe *PanicError) {
+	slot, entry := &h.ring[seq%uint64(len(h.ring))], &panicEntry{pe: pe, seq: seq}
+
+	for {
+		held := slot.Load()
+		if held != nil && held.seq > seq {
+			return
+		}
+
+		if slot.CompareAndSwap(held, entry) {
+			return
+		}
+	}
 }
 
 // recent returns the newest entries, oldest first.

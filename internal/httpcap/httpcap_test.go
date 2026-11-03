@@ -333,27 +333,29 @@ func TestResponseLimits(t *testing.T) {
 func TestRequestsEndWithTheirContext(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{}, 2)
+	canceled := make(chan struct{}, 1)
 	srv := newServer(t, func(_ http.ResponseWriter, r *http.Request) {
-		started <- struct{}{}
+		if r.URL.Path == "/canceled" {
+			canceled <- struct{}{}
+		}
 
 		<-r.Context().Done()
 	})
 	short, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}, Timeout: 50 * time.Millisecond})
 
-	got := serve(t.Context(), t, short, request("GET", srv.URL, nil, ""), 1)
+	// The timeout ends the request wherever it is: on a loaded machine it may not have reached the server yet.
+	got := serve(t.Context(), t, short, request("GET", srv.URL+"/timeout", nil, ""), 1)
 	assert.Equal(t, httpcap.ErrTimeout.Error(), got.refused, "the policy's timeout")
 
-	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
+	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}, Timeout: time.Hour})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan []byte)
 
 	go func() {
-		done <- client.Handler("web/p", unexpectedPanic(t))(ctx, nil, request("GET", srv.URL, nil, ""), 1)
+		done <- client.Handler("web/p", unexpectedPanic(t))(ctx, nil, request("GET", srv.URL+"/canceled", nil, ""), 1)
 	}()
 
-	<-started
-	<-started
+	<-canceled // the server holds the request, which only the call's context can end within the hour
 	cancel()
 
 	_, err := httpabi.DecodeResponse(<-done)
@@ -369,13 +371,18 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 func TestTransportFailures(t *testing.T) {
 	t.Parallel()
 
-	closed := httptest.NewServer(http.NotFoundHandler())
-	closed.Close()
+	// The server hangs up without answering, so the request fails in transit. Dialing the port of a closed server
+	// would not do: a server started meanwhile, by another test or process, may be listening on it again.
+	srv := newServer(t, func(writer http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(writer).Hijack()
+		if assert.NoError(t, err) {
+			assert.NoError(t, conn.Close())
+		}
+	})
+	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
 
-	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{"127.0.0.1"}})
-
-	got := serve(t.Context(), t, client, request("GET", closed.URL, nil, ""), 1)
-	assert.Contains(t, got.refused, httpcap.ErrFailed.Error(), "connection refused")
+	got := serve(t.Context(), t, client, request("GET", srv.URL, nil, ""), 1)
+	assert.Contains(t, got.refused, httpcap.ErrFailed.Error(), "the server hung up")
 }
 
 type panickingTransport struct{}
