@@ -41,6 +41,8 @@ type stepper interface {
 	EndCall(call uint32)
 	// Drop makes the guest forget a call in flight with none of its requests in flight, which the host gave up on.
 	Drop(ctx context.Context, call uint32) error
+	// Stopped is closed once the instance is stopped ([engine.Instance.Stopped]): the container closed under it.
+	Stopped() <-chan struct{}
 }
 
 // muxError fails a call on a multiplexed instance without a guest failure of its own: another call broke the
@@ -90,6 +92,7 @@ type muxInstance struct {
 	discarding atomic.Bool
 	leaving    atomic.Bool // a caller left while its call waited, since the owner's last sweep
 	last       uint32      // the number of the last call started
+	stopped    bool        // owner-only: the instance broke because it was stopped (see fail)
 }
 
 // refusal is a request http_start refused at once, waiting for the owner to deliver its answer.
@@ -180,11 +183,11 @@ func newMux(p *pool, inst stepper, lanes int) []*muxLane {
 }
 
 // run is the owner goroutine: it runs operations, and delivers the refusals waiting one at a time among them,
-// until the last lane is closed.
+// until the last lane is closed. When the instance is stopped, it fails every call in flight (see fail).
 func (m *muxInstance) run() {
 	defer close(m.exited)
 
-	discarded := m.discarded
+	discarded, stopped := m.discarded, m.inst.Stopped()
 
 	for {
 		var refusals chan struct{}
@@ -204,6 +207,10 @@ func (m *muxInstance) run() {
 			discarded = nil
 
 			m.do(func() { m.fail(nil, engine.Result{}, errMuxDiscarded) })
+		case <-stopped:
+			stopped = nil
+
+			m.do(func() { m.fail(nil, engine.Result{}, engine.ErrStopped) })
 		case <-m.stop:
 			for _, state := range m.flight {
 				state.cancel()
@@ -252,9 +259,12 @@ func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32
 	}
 
 	if m.broken.Load() {
-		mailbox.answer(engine.Result{}, &muxError{
-			err: fmt.Errorf("%w: %w", ErrInstanceLost, errMuxDiscarded), discard: true,
-		}, "")
+		lost := fmt.Errorf("%w: %w", ErrInstanceLost, errMuxDiscarded)
+		if m.stopped {
+			lost = engine.ErrStopped
+		}
+
+		mailbox.answer(engine.Result{}, &muxError{err: lost, discard: true}, "")
 
 		return
 	}
@@ -544,9 +554,12 @@ func (m *muxInstance) forget(state *callState) {
 // fail breaks the instance: culprit, the call whose step failed (nil when no call is to blame), gets res and
 // err, and every other call in flight [ErrInstanceLost]. Their requests end; the refusals waiting are dropped. A
 // culprit nobody waits for any more (abandoned at its deadline, or its caller left) is reported here, since no
-// caller will.
+// caller will. An instance stopped as the container closed ([engine.ErrStopped]) has no call to blame: every
+// call fails with [engine.ErrStopped], culprit's with err, and none is reported.
 func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	m.broken.Store(true)
+
+	m.stopped = m.stopped || errors.Is(err, engine.ErrStopped)
 
 	var cause any = err
 
@@ -555,26 +568,37 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	}
 
 	guest := m.inst.Guest()
+	answered := culprit != nil && culprit.mailbox != nil && culprit.mailbox.answer(res, err, guest)
 
-	if culprit != nil && (culprit.mailbox == nil || !culprit.mailbox.answer(res, err, guest)) {
+	if culprit != nil && !answered && !m.stopped {
 		m.pool.panics.report(culprit.ctx, &PanicError{
 			Key: m.pool.key, Language: m.pool.lang, Phase: PhaseCall, Value: cause, Guest: guest,
 		})
 	}
 
+	lost := m.lost(cause)
+
 	for _, state := range m.flight {
 		state.cancel()
 
 		if mailbox := state.mailbox; mailbox != nil {
-			mailbox.answer(engine.Result{}, &muxError{
-				err: fmt.Errorf("%w: another call on its instance failed: %v", ErrInstanceLost, cause), discard: true,
-			}, "")
+			mailbox.answer(engine.Result{}, &muxError{err: lost, discard: true}, "")
 		}
 	}
 
 	clear(m.flight)
 
 	m.refused = nil
+}
+
+// lost is the error the calls on the broken instance fail with, but the one to blame: [engine.ErrStopped] when it
+// was stopped, otherwise [ErrInstanceLost] with cause, what broke it.
+func (m *muxInstance) lost(cause any) error {
+	if m.stopped {
+		return engine.ErrStopped
+	}
+
+	return fmt.Errorf("%w: another call on its instance failed: %v", ErrInstanceLost, cause)
 }
 
 // begin is the owner's side of a step of the call's own starting, under its context, the call waiting at stage

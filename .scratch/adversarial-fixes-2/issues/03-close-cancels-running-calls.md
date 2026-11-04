@@ -10,9 +10,11 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests where Close's ctx ends while a Go plugin sleeps, while a plugin waits on a slow HTTP server, and while a Host method blocks on its ctx reproduces the bug (fails on the current code) and passes with the fix
-Each call returns promptly with a clear closed-container error after Close; Close returns; goleak clean
-Calls not affected by Close are unchanged (existing deadline tests pass)
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+**Resolution:** closing a runtime stops its instances first: the Host method or HTTP request an instance waits in sees its context end (cause `engine.ErrStopped`), a sleep returns at once, a multiplexed instance fails its calls in flight, and what the instance does fails with `engine.ErrStopped`, which the binder (and `Create`) turns into `ErrClosed`, unreported. Only waiting host functions pay for it (two allocations per Host call or request); plain calls are unchanged. See PLAN.md, "Second adversarial review fixes", 03.
+
+- [x] Tests where Close's ctx ends while a Go plugin sleeps, while a plugin waits on a slow HTTP server, and while a Host method blocks on its ctx reproduces the bug (fails on the current code) and passes with the fix
+- [x] Each call returns promptly with a clear closed-container error after Close; Close returns; goleak clean
+- [x] Calls not affected by Close are unchanged (existing deadline tests pass)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

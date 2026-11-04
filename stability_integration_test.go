@@ -105,8 +105,8 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 		deadline bool
 	}{
 		{msg: "panic", guest: []string{
-			"/gopath/src/plg.local/plugin/plugin.go:72:2: panic: plg.local/plugin.deeper(...)\n" +
-				"/gopath/src/plg.local/plugin/plugin.go:68:2: panic: plg.local/plugin.explode(...)\n" +
+			"/gopath/src/plg.local/plugin/plugin.go:75:2: panic: plg.local/plugin.deeper(...)\n" +
+				"/gopath/src/plg.local/plugin/plugin.go:71:2: panic: plg.local/plugin.explode(...)\n" +
 				"/gopath/src/plg.local/plugin/plugin.go:37:9: panic: plg.local/plugin.Fail(...)\n",
 		}},
 		{msg: "oom", guest: []string{"fatal error: out of memory", "runtime.throw", "runtime.mallocgc"}},
@@ -195,7 +195,7 @@ func TestGuestOutputIsLoggedWithThePluginKey(t *testing.T) {
 	assert.Contains(t, logged, `"msg":"plg: guest output","key":"chatty/hostile","stream":"stdout",`+
 		`"line":"and through the println builtin"`)
 	assert.Contains(t, logged, `"level":"WARN","msg":"plg: guest output","key":"chatty/hostile","stream":"stderr",`+
-		`"line":"/gopath/src/plg.local/plugin/plugin.go:72:2: panic: plg.local/plugin.deeper(...)"`)
+		`"line":"/gopath/src/plg.local/plugin/plugin.go:75:2: panic: plg.local/plugin.deeper(...)"`)
 }
 
 func TestGoStatementsFailRegisterWithTheirPosition(t *testing.T) {

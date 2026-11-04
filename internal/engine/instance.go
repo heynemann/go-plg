@@ -100,6 +100,12 @@ func (in *Instance) Broken() bool {
 	return in.broken
 }
 
+// Stopped is closed once the instance is stopped: its runtime closes ([Runtime.Close]). It is safe for
+// concurrent use.
+func (in *Instance) Stopped() <-chan struct{} {
+	return in.host.stopped
+}
+
 // Memory returns the size of the instance's linear memory in bytes. It reads the size in whole pages (growing
 // by zero pages changes nothing), which is exact up to the 4 GiB maximum, unlike the byte size wazero reports as
 // a uint32.
@@ -133,13 +139,13 @@ func (in *Instance) Call(ctx context.Context, method uint32, args []byte) (Resul
 	return in.invoke(ctx, &in.call, in.stack[:2])
 }
 
-// Close frees the instance. First, on a healthy instance and while ctx lives, it runs plg_close, which calls the
-// plugin's optional Close: one that fails or panics is reported as a [*CloseError], a guest that traps or is
-// stopped by ctx meanwhile as the trap; the instance is freed all the same.
+// Close frees the instance. First, on a healthy instance not stopped and while ctx lives, it runs plg_close,
+// which calls the plugin's optional Close: one that fails or panics is reported as a [*CloseError], a guest that
+// traps or is stopped by ctx meanwhile as the trap; the instance is freed all the same.
 func (in *Instance) Close(ctx context.Context) error {
 	var err error
 
-	if !in.broken && ctx.Err() == nil {
+	if !in.broken && !in.host.isStopped() && ctx.Err() == nil {
 		var res Result
 
 		res, err = in.invoke(ctx, &in.close, in.stack[:1])
@@ -163,6 +169,10 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 		in.stack[0] = uint64(size)
 
 		err := in.alloc.CallWithStack(ctx, in.stack[:1])
+		if in.host.isStopped() {
+			return in.fail(fmt.Errorf("%s: %w", exportAlloc, ErrStopped))
+		}
+
 		if err != nil {
 			return in.fail(fmt.Errorf("%s: %w", exportAlloc, err))
 		}
@@ -179,13 +189,18 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 
 // invoke calls *fn, whose packed result names a status-prefixed buffer, and validates that buffer. After a step
 // flagged [FlagDeepStack], *fn becomes a fresh function of the same export: the old one holds the native
-// stack wazero grew for the step (tens of MiB for a deep JS recursion) and never shrinks it.
+// stack wazero grew for the step (tens of MiB for a deep JS recursion) and never shrinks it. An instance stopped
+// before or during the call fails it with [ErrStopped], whatever the guest answered.
 //
 //nolint:gocritic // ptrToRefParam: the pointer is the point, invoke replaces the caller's function
 func (in *Instance) invoke(ctx context.Context, fn *api.Function, stack []uint64) (Result, error) {
 	in.host.begin()
 
 	err := (*fn).CallWithStack(ctx, stack)
+	if in.host.isStopped() {
+		return Result{}, in.fail(fmt.Errorf("%s: %w", exportName(*fn), ErrStopped))
+	}
+
 	if err != nil {
 		return Result{}, in.fail(fmt.Errorf("%s: %w", exportName(*fn), err))
 	}

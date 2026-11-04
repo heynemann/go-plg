@@ -467,7 +467,10 @@ plg.Register[pricing.Rule](ctx, c, "pricing",
   replaced; others are unaffected.
 - **CPU and time:** every call stops when its `ctx` ends (deadline or cancellation), even in an infinite loop or
   a Go plugin's `time.Sleep` (or any wait for a timer), and that instance is replaced. `Create` stops the same way
-  at Register's `ctx`, and at `Container.Close` when the pool was starting it. Always call plugins with a deadline.
+  at Register's `ctx`, and at `Container.Close` when the pool was starting it. When `Container.Close`'s `ctx` ends
+  before the calls in flight do, it stops them, wherever they wait (running, sleeping, in an HTTP request, whose
+  context ends, or in a Host method, whose `ctx` ends): each fails with `plg.ErrClosed`, as does a `Create` it
+  stops, and none counts as a plugin failure. Always call plugins with a deadline.
 - **Pool:** `WithPool(min, max)` (default `1, GOMAXPROCS`; `1 ≤ min ≤ max ≤ 4096`). Register starts `min`
   instances of each plugin (so a broken `Create` fails Register), a background goroutine keeps `min` warm and
   replaces discarded ones (retrying a failing `Create` with backoff from 100 ms to 30 s), and a call takes an idle

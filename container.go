@@ -107,7 +107,9 @@ func containerOptions(opts []Option) containerConfig {
 // Close stops the pollers and serves no more calls: it waits on ctx for the calls in flight to finish, closes
 // every instance (each running the plugin's optional Close), stops the refill goroutines and releases the
 // runtimes and the compiled guests, so a closed container that stays referenced keeps almost no memory. Calls
-// still running when ctx ends are stopped. It returns the failures, those of closing the plugins included.
+// still running when ctx ends are stopped, wherever they wait: in the guest, a sleep, an HTTP request or a Host
+// method (whose context ends); each fails with [ErrClosed], and so does a Create in progress. It returns the
+// failures, those of closing the plugins included.
 // Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed]. Closing a closed
 // container does nothing.
 func (c *Container) Close(ctx context.Context) error {

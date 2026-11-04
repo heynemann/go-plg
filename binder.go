@@ -297,12 +297,8 @@ func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, call p
 	}
 
 	res, err := held.inst.Call(ctx, meth.index, held.buf)
-	if lost, ok := errors.AsType[*muxError](err); ok { // no guest failure of its own: nothing to report
-		return lost.discard, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, lost)
-	}
-
 	if err != nil {
-		return true, p.failed(ctx, held, meth, err)
+		return p.callFailed(ctx, held, meth, err)
 	}
 
 	switch res.Status { //nolint:exhaustive // load and ABI statuses (or worse) fail the call and break the instance
@@ -322,6 +318,21 @@ func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, call p
 	default:
 		return true, p.failed(ctx, held, meth, fmt.Errorf("%w %s: %s", errGuestStatus, res.Status, res.Message))
 	}
+}
+
+// callFailed handles a call its instance failed with err: the container closed under it ([ErrClosed]), a
+// multiplexed instance failed it without a guest failure of its own, or the guest failed, which is reported. The
+// boolean reports an instance that must not serve another call.
+func (p *plugin) callFailed(ctx context.Context, held *slot, meth *method, err error) (bool, error) {
+	if errors.Is(err, engine.ErrStopped) { // no guest failure to report
+		return true, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, ErrClosed)
+	}
+
+	if lost, ok := errors.AsType[*muxError](err); ok { // no guest failure of its own: nothing to report
+		return lost.discard, fmt.Errorf("plg: %s.%s: %w", p.key, meth.name, lost)
+	}
+
+	return true, p.failed(ctx, held, meth, err)
 }
 
 // decodeResults decodes a successful call's results from body into call, which must consume all of it.

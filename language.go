@@ -126,12 +126,15 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 	return &guestInstance{Instance: inst, launcher: l, out: out}, nil
 }
 
-// create runs the plugin's Create in inst and ends out's step, returning why Create failed.
+// create runs the plugin's Create in inst and ends out's step, returning why Create failed. A Create stopped as
+// the container closed fails with [ErrClosed], no guest failure to report.
 func (l *launcher) create(ctx context.Context, inst *engine.Instance, out *guestout.Capture) error {
 	res, err := inst.Init(ctx, l.payload)
 	out.End(ctx)
 
 	switch {
+	case errors.Is(err, engine.ErrStopped):
+		return fmt.Errorf("%w: %w", errCreate, ErrClosed)
 	case err != nil:
 		return l.failed(ctx, PhaseCreate, err, out)
 	case res.Status == wire.StatusOK:

@@ -47,15 +47,16 @@ const (
 	errnoNotsup  errno = 58
 )
 
-// instantiateWASI adds WASI preview 1 to rt: wazero's functions, except poll_oneoff, which [pollOneoff] serves.
-func instantiateWASI(ctx context.Context, rt wazero.Runtime) {
+// instantiateWASI adds WASI preview 1 to rt: wazero's functions, except poll_oneoff, which
+// [Runtime.pollOneoff] serves.
+func (r *Runtime) instantiateWASI(ctx context.Context, rt wazero.Runtime) {
 	i32 := api.ValueTypeI32
 
 	wasi := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasi)
 
 	_, err := wasi.NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(pollOneoff), []api.ValueType{i32, i32, i32, i32}, []api.ValueType{i32}).
+		WithGoModuleFunction(api.GoModuleFunc(r.pollOneoff), []api.ValueType{i32, i32, i32, i32}, []api.ValueType{i32}).
 		Export(importPoll). // replaces wazero's
 		Instantiate(ctx)
 	if err != nil { // only a programming error in the definitions above, on a fresh runtime
@@ -69,24 +70,26 @@ func instantiateWASI(ctx context.Context, rt wazero.Runtime) {
 // the call's deadline, one sleeping in Create blocked Register, and one sleeping in a refill's Create blocked
 // the pool's close.
 //
-// pollOneoff waits until its earliest clock expires or ctx ends; ctx is the context of the guest call in progress
-// (the instantiation running the guest's initialization, an ABI export or a step). When ctx ends first,
-// it closes the module with the exit code close-on-context-done uses and returns EINTR: the guest stops at its
-// next check exactly as when it is stopped while running, so the call fails with the [sys.ExitError] matching
-// ctx's error and the instance is broken.
+// pollOneoff waits until its earliest clock expires, ctx ends or the instance is stopped ([Runtime.Close]); ctx
+// is the context of the guest call in progress (the instantiation running the guest's initialization, an ABI
+// export or a step). When ctx ends first, it closes the module with the exit code close-on-context-done uses and
+// returns EINTR: the guest stops at its next check exactly as when it is stopped while running, so the call fails
+// with the [sys.ExitError] matching ctx's error and the instance is broken. When the instance is stopped first,
+// it does the same, and the call fails with [ErrStopped].
 //
 // It serves relative clocks only; wazero does not support absolute ones either. Any other subscription fails the
 // poll with ENOTSUP: nothing in a plg instance can be waited for. It has no sockets or pipes, an empty stdin and
 // read-only in-memory files, and the Go runtime polls a file descriptor only after an I/O on it would block,
 // which never happens there; the Lua and TypeScript guests do not import poll_oneoff.
-func pollOneoff(ctx context.Context, mod api.Module, stack []uint64) {
-	stack[0] = uint64(poll(ctx, mod, api.DecodeU32(stack[0]), api.DecodeU32(stack[1]), api.DecodeU32(stack[2]),
-		api.DecodeU32(stack[3])))
+func (r *Runtime) pollOneoff(ctx context.Context, mod api.Module, stack []uint64) {
+	stack[0] = uint64(poll(ctx, mod, r.state(mod).stopped, api.DecodeU32(stack[0]), api.DecodeU32(stack[1]),
+		api.DecodeU32(stack[2]), api.DecodeU32(stack[3])))
 }
 
 // poll is pollOneoff with decoded parameters: the subscriptions at inPtr, the events to write at outPtr and their
-// count at neventsPtr.
-func poll(ctx context.Context, mod api.Module, inPtr, outPtr, count, neventsPtr uint32) errno {
+// count at neventsPtr; stopped is closed once the instance is stopped.
+func poll(ctx context.Context, mod api.Module, stopped <-chan struct{}, inPtr, outPtr, count, neventsPtr uint32,
+) errno {
 	if count == 0 {
 		return errnoInval
 	}
@@ -109,7 +112,7 @@ func poll(ctx context.Context, mod api.Module, inPtr, outPtr, count, neventsPtr 
 		return code
 	}
 
-	if !wait(ctx, timeout) {
+	if !wait(ctx, stopped, timeout) {
 		//nolint:errcheck // as in wazero's own stop (FailIfClosed): closing a stopped module's files reports nothing useful
 		_ = mod.CloseWithExitCode(ctx, exitCode(ctx.Err()))
 
@@ -144,9 +147,9 @@ func earliest(subs []byte) (uint64, errno) {
 	return timeout, errnoSuccess
 }
 
-// wait waits for timeout nanoseconds or until ctx ends, reporting whether the timeout elapsed. A timeout beyond
-// [time.Duration] lasts until ctx ends.
-func wait(ctx context.Context, timeout uint64) bool {
+// wait waits for timeout nanoseconds, until ctx ends or until stopped is closed, reporting whether the timeout
+// elapsed. A timeout beyond [time.Duration] lasts until ctx ends or stopped is closed.
+func wait(ctx context.Context, stopped <-chan struct{}, timeout uint64) bool {
 	if timeout == 0 {
 		return true
 	}
@@ -158,6 +161,8 @@ func wait(ctx context.Context, timeout uint64) bool {
 	case <-timer.C:
 		return true
 	case <-ctx.Done():
+		return false
+	case <-stopped:
 		return false
 	}
 }

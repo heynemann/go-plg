@@ -55,9 +55,9 @@ func (e *Engine) NewRuntime(ctx context.Context, opts RuntimeOptions) *Runtime {
 		WithMemoryLimitPages(limitPages(opts.MemoryLimit))
 
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg)
-	instantiateWASI(ctx, rt)
 
 	created := &Runtime{rt: rt, logger: e.logger, hosts: xsync.NewMap[string, *hostState]()}
+	created.instantiateWASI(ctx, rt)
 	created.instantiateHostModule(ctx, rt)
 
 	return created
@@ -71,8 +71,14 @@ func limitPages(limit uint64) uint32 {
 	return uint32(max(limit/PageSize, 1))
 }
 
-// Close closes the runtime and every instance it created.
+// Close closes the runtime and every instance it created. It stops each instance first: what an instance still
+// does fails with [ErrStopped], including a host function it waits in (a sleep, an HTTP request, a Host method),
+// which closing its module alone would not end.
 func (r *Runtime) Close(ctx context.Context) error {
+	for _, state := range r.hosts.All() {
+		state.stop()
+	}
+
 	err := r.rt.Close(ctx)
 	if err != nil {
 		return fmt.Errorf("closing runtime: %w", err)
@@ -139,9 +145,9 @@ type InstanceOptions struct {
 }
 
 // Instantiate creates an instance of the module and runs the guest's reactor initialization. Instances have
-// clocks, sleeps that end with the context of the call in progress (see [pollOneoff]), a cryptographic random
-// source, the given mounts, the argument list ["plugin"] and HTTP only through opts.HTTP; no environment and no
-// sockets.
+// clocks, sleeps that end with the context of the call in progress or the instance's stop (see
+// [Runtime.pollOneoff]), a cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP
+// only through opts.HTTP; no environment and no sockets.
 func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Instance, error) {
 	fsCfg := wazero.NewFSConfig()
 	for _, mnt := range opts.Mounts {
@@ -150,7 +156,7 @@ func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Insta
 
 	// The host imports find the instance's state by its module name, unique within the runtime.
 	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := &hostState{http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host}
+	state := newHostState(opts)
 	m.rt.hosts.Store(name, state)
 
 	cfg := wazero.NewModuleConfig().

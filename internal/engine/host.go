@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -33,6 +34,11 @@ const keepPending = 64 << 10
 // ErrHTTPDisabled is the refusal instances created without an [HTTPFunc] answer every request with.
 var ErrHTTPDisabled = errors.New("plg: HTTP is not enabled for this plugin")
 
+// ErrStopped fails what an instance does once its runtime closes ([Runtime.Close]): the call, init or step in
+// progress (the host function it waits in sees its context end with ErrStopped as the cause) and every later
+// one. The instance is broken.
+var ErrStopped = errors.New("engine: instance stopped: its runtime closed")
+
 // HTTPFunc serves a guest's http_roundtrip: it makes (or refuses) the [httpabi]-encoded request req and appends
 // the encoded answer to dst. req aliases guest memory and is valid only until it returns. ctx is the context of
 // the plg_init or plg_call in progress and n counts that call's requests, from 1. One HTTPFunc serves every
@@ -48,23 +54,87 @@ type HTTPFunc func(ctx context.Context, dst, req []byte, n int) []byte
 type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) ([]byte, error)
 
 // hostState is what the host imports know about one instance. Only the goroutine calling the instance touches
-// it: a guest calls its imports synchronously.
+// it, a guest calling its imports synchronously, except for its stop (stage, stopped and the cancel the stage
+// hands over), which [Runtime.Close] triggers from another goroutine.
 type hostState struct {
 	http        HTTPFunc
 	refuses     func(n, size int) bool // see InstanceOptions.HTTPRefuses
 	host        HostFunc
-	calls       map[uint32]int // the multiplexed calls in flight: the requests each started with http_start
-	pending     []byte         // the result take_result hands over
-	started     []Request      // the requests http_start took during the current step
-	requests    int            // http_roundtrip calls in the current plg_init, plg_call or step
-	lastRequest uint32         // the number of the last request http_start took
-	ready       bool           // pending holds a result not taken yet
-	stepping    bool           // a multiplexed step is running: http_start is allowed
+	cancel      context.CancelCauseFunc // ends the context of the host function waiting (stage hostBusy)
+	calls       map[uint32]int          // the multiplexed calls in flight: the requests each started with http_start
+	stopped     chan struct{}           // closed once the instance is stopped
+	pending     []byte                  // the result take_result hands over
+	started     []Request               // the requests http_start took during the current step
+	requests    int                     // http_roundtrip calls in the current plg_init, plg_call or step
+	stage       atomic.Int32            // hostIdle, hostBusy or hostStopped
+	lastRequest uint32                  // the number of the last request http_start took
+	ready       bool                    // pending holds a result not taken yet
+	stepping    bool                    // a multiplexed step is running: http_start is allowed
+}
+
+// The stages of a hostState: whether a host function that waits (http_roundtrip, host_call) runs, and whether
+// the instance was stopped. Only the calling goroutine moves it between hostIdle and hostBusy; only stop moves it
+// to hostStopped, for good.
+const (
+	hostIdle int32 = iota
+	hostBusy
+	hostStopped
+)
+
+func newHostState(opts *InstanceOptions) *hostState {
+	return &hostState{http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host, stopped: make(chan struct{})}
 }
 
 // begin resets the per-call state before a plg_init or plg_call.
 func (st *hostState) begin() {
 	st.requests, st.ready = 0, false
+}
+
+// enter starts a host function that waits, returning the context it runs under, ended too with [ErrStopped] when
+// the instance is stopped (already, or before leave), and the cancel to hand leave. The calling goroutine hands
+// the cancel over to stop through the stage: it writes st.cancel only while the stage is not hostStopped, then
+// moves the stage to hostBusy, and stop reads st.cancel only when it finds hostBusy, so the write happens before
+// the read; once the stage is hostStopped, st.cancel is never written again.
+func (st *hostState) enter(ctx context.Context) (context.Context, context.CancelCauseFunc) {
+	ctx, cancel := context.WithCancelCause(ctx)
+
+	if st.stage.Load() != hostStopped {
+		st.cancel = cancel
+
+		if st.stage.CompareAndSwap(hostIdle, hostBusy) {
+			return ctx, cancel
+		}
+	}
+
+	cancel(ErrStopped)
+
+	return ctx, cancel
+}
+
+// leave ends the host function enter started, releasing its context.
+func (st *hostState) leave(cancel context.CancelCauseFunc) {
+	st.stage.CompareAndSwap(hostBusy, hostIdle) // fails once stopped: the stage stays hostStopped
+	cancel(nil)                                 // no effect once stop cancelled it
+}
+
+// stop stops the instance: the host function waiting, if any, sees its context end with [ErrStopped], and so does
+// every later one; poll_oneoff returns at once; stopped is closed. It is safe for concurrent use.
+func (st *hostState) stop() {
+	previous := st.stage.Swap(hostStopped)
+	if previous == hostStopped {
+		return
+	}
+
+	if previous == hostBusy {
+		st.cancel(ErrStopped)
+	}
+
+	close(st.stopped)
+}
+
+// isStopped reports whether the instance was stopped.
+func (st *hostState) isStopped() bool {
+	return st.stage.Load() == hostStopped
 }
 
 // instantiateHostModule adds the plg host module to rt.
@@ -99,7 +169,7 @@ func (r *Runtime) state(mod api.Module) *hostState {
 }
 
 // httpRoundTrip serves http_roundtrip. A host function panic traps the call, so ABI violations panic: the
-// instance is then broken and discarded.
+// instance is then broken and discarded. The request runs under a context the instance's stop ends.
 func (r *Runtime) httpRoundTrip(ctx context.Context, mod api.Module, stack []uint64) {
 	state := r.state(mod)
 
@@ -113,15 +183,24 @@ func (r *Runtime) httpRoundTrip(ctx context.Context, mod api.Module, stack []uin
 	if state.http == nil {
 		state.pending = httpabi.AppendFailure(state.pending[:0], ErrHTTPDisabled.Error())
 	} else {
-		state.pending = state.http(ctx, state.pending[:0], req, state.requests)
+		state.pending = state.roundTrip(ctx, req)
 	}
 
 	state.ready = true
 	stack[0] = api.EncodeU32(uint32(len(state.pending))) //nolint:gosec // G115: answers are bounded far below 4 GiB
 }
 
+// roundTrip makes the request req through http, under ctx ended too by the instance's stop.
+func (st *hostState) roundTrip(ctx context.Context, req []byte) []byte {
+	ctx, cancel := st.enter(ctx)
+	defer st.leave(cancel)
+
+	return st.http(ctx, st.pending[:0], req, st.requests)
+}
+
 // hostCall serves host_call. As in httpRoundTrip, ABI violations panic, which traps the call and breaks the
 // instance; so does a host_call from an instance created without a [HostFunc], whose guest has no Host to call.
+// The Host method runs under a context the instance's stop ends.
 func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) {
 	state := r.state(mod)
 
@@ -134,13 +213,21 @@ func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) 
 		panic(fmt.Errorf("%w: %s from an instance without a host", ErrABI, importHost))
 	}
 
-	answer, err := state.host(ctx, state.pending[:0], api.DecodeU32(stack[0]), args)
+	answer, err := state.callHost(ctx, api.DecodeU32(stack[0]), args)
 	if err != nil {
 		panic(fmt.Errorf("%w: %s: %w", ErrABI, importHost, err))
 	}
 
 	state.pending, state.ready = answer, true
 	stack[0] = api.EncodeU32(uint32(len(answer))) //nolint:gosec // G115: answers are bounded far below 4 GiB
+}
+
+// callHost calls the Host method with the given index through host, under ctx ended too by the instance's stop.
+func (st *hostState) callHost(ctx context.Context, method uint32, args []byte) ([]byte, error) {
+	ctx, cancel := st.enter(ctx)
+	defer st.leave(cancel)
+
+	return st.host(ctx, st.pending[:0], method, args)
 }
 
 // takeResult serves take_result.

@@ -2704,6 +2704,7 @@ type scriptedGuest struct {
 	steps   chan *guestStep
 	ended   chan uint32      // the calls the owner ended, while there is room
 	dropped chan droppedCall // the calls the owner dropped, while there is room
+	stopped chan struct{}    // what Stopped returns: the test closes it to stop the instance
 	dropErr error            // what Drop returns
 	output  string           // what Guest returns
 	closed  atomic.Int32
@@ -2738,6 +2739,7 @@ const scriptedMemory = 3 * engine.PageSize
 func newScriptedGuest() *scriptedGuest {
 	return &scriptedGuest{
 		steps: make(chan *guestStep), ended: make(chan uint32, 16), dropped: make(chan droppedCall, 16),
+		stopped: make(chan struct{}),
 	}
 }
 
@@ -2784,6 +2786,8 @@ func (g *scriptedGuest) Drop(ctx context.Context, call uint32) error {
 
 	return g.dropErr
 }
+
+func (g *scriptedGuest) Stopped() <-chan struct{} { return g.stopped }
 
 func (g *scriptedGuest) play(ctx context.Context, s *guestStep) (engine.Step, error) {
 	s.done, s.reply = ctx.Done(), make(chan stepReply, 1)
@@ -2982,6 +2986,58 @@ func TestMuxAbandonsACallAtItsDeadline(t *testing.T) {
 		assert.NotContains(t, string(got.res.Body), "nobody", "an abandoned call's result reaches nobody")
 		assert.False(t, lane.inst.Broken())
 		instances.release(t.Context(), lane)
+	}
+}
+
+// TestMuxFailsEveryCallWhenItsInstanceIsStopped stops a multiplexed instance (its container closing) while a call
+// waits for its request, between steps or while another call's step runs (which the stop fails, as the engine
+// does): every call in flight fails with engine.ErrStopped, its request ending with it, and so does a call started
+// afterwards; the instance is broken and nothing is reported as a panic.
+func TestMuxFailsEveryCallWhenItsInstanceIsStopped(t *testing.T) {
+	t.Parallel()
+
+	for name, during := range map[string]bool{"between steps": false, "during a step": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			guest, web := newScriptedGuest(), newFakeWeb()
+			instances := muxPool(t, guest, 3, web.serve, nil)
+			held := acquireN(t, instances, 3)
+
+			results := []<-chan laneResult{callLane(t.Context(), held[0], "waiting")}
+
+			guest.next().wait(1)
+
+			request := <-web.requests
+
+			if during {
+				results = append(results, callLane(t.Context(), held[1], "stepping"))
+				step := guest.next()
+
+				close(guest.stopped)
+
+				step.reply <- stepReply{err: fmt.Errorf("plg_start: %w", engine.ErrStopped)}
+			} else {
+				close(guest.stopped)
+			}
+
+			for _, result := range results {
+				got := <-result
+				require.ErrorIs(t, got.err, engine.ErrStopped)
+			}
+
+			<-request.done // the waiting call's request ended with it
+
+			got := <-callLane(t.Context(), held[2], "later")
+			require.ErrorIs(t, got.err, engine.ErrStopped, "a call started on the stopped instance")
+
+			for _, lane := range held {
+				assert.True(t, lane.inst.Broken())
+				instances.discard(t.Context(), lane)
+			}
+
+			assert.Empty(t, instances.panics.history.recent(), "a stop is no plugin failure")
+		})
 	}
 }
 
