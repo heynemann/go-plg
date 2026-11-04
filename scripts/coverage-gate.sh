@@ -23,6 +23,9 @@
 #     plugin calls through them; the generated codecs are held to the reflective codec by the fast-path parity
 #     fuzz test instead.
 #   - packages without statements (pure declarations) contribute nothing.
+#
+# The gate fails closed: a missing or empty profile, one without its mode line, with a line that is not a
+# coverage block, or covering no statement of a gated package fails it.
 set -euo pipefail
 
 profile=${1:?usage: coverage-gate.sh <coverprofile> <min-percent>}
@@ -36,12 +39,19 @@ case $module in
 *) excluded="$excluded $module/cmd/plg/main.go" ;;
 esac
 
-awk -v min="$min" -v excluded="$excluded" '
+awk -v min="$min" -v excluded="$excluded" -v profile="$profile" '
 	BEGIN {
 		n = split(excluded, g, " ")
 		for (i = 1; i <= n; i++) skip[g[i]] = 1
 	}
-	NR == 1 { next } # mode line
+	NR == 1 {
+		if ($0 !~ /^mode: (set|count|atomic)$/) bad = "its first line is not a mode line"
+		next
+	}
+	bad == "" && $0 !~ /^[^ ]+:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+ [0-9]+ [0-9]+$/ {
+		bad = "line " NR " is not a coverage block"
+	}
+	bad != "" { exit }
 	{
 		# github.com/x/pkg/file.go:12.3,14.5 2 1
 		split($1, loc, ":")
@@ -55,6 +65,11 @@ awk -v min="$min" -v excluded="$excluded" '
 		pkgOf[key] = pkg
 	}
 	END {
+		if (NR == 0) bad = "it is empty"
+		if (bad != "") {
+			printf "coverage gate: %s is not a usable coverage profile: %s\n", profile, bad
+			exit 1
+		}
 		for (key in stmts) {
 			p = pkgOf[key]
 			total[p] += stmts[key]
@@ -68,13 +83,19 @@ awk -v min="$min" -v excluded="$excluded" '
 			while (j > 0 && names[j] > v) { names[j + 1] = names[j]; j-- }
 			names[j + 1] = v
 		}
+		gated = 0
 		for (i = 1; i <= n; i++) {
 			p = names[i]
 			if (total[p] == 0) continue
+			gated++
 			pct = 100 * covered[p] / total[p]
 			status = "ok"
 			if (pct < min) { status = "FAIL"; failed = 1 }
 			printf "%-4s %6.1f%%  %s\n", status, pct, p
+		}
+		if (gated == 0) {
+			printf "coverage gate: %s covers no statement of a gated package\n", profile
+			exit 1
 		}
 		if (failed) {
 			printf "coverage gate: some packages are below %s%%\n", min

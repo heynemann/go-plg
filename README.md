@@ -744,7 +744,7 @@ Docker: `make examples`.
 ## Development
 
 - `make check` runs every gate CI runs: formatting, golangci-lint (host and wasip1), the unit and integration
-  tests with `-race`, the 95% per-package coverage gate, allocation and benchmark budgets, a `-count=10` repeat
+  tests with `-race`, the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh` tests it), allocation and benchmark budgets, a `-count=10` repeat
   of the unit tests, and `make examples` (lint and tests of the examples module, Docker required).
 - `make guests` rebuilds the guest artifacts with pinned toolchains; `make verify-guests` checks that the
   committed ones are reproducible.

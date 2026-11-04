@@ -82,10 +82,10 @@ TS_STACK := 2097152
 TS_GUEST := guest/typescript/typescript.wasm
 TS_SRC := guestsrc/typescript
 
-.PHONY: check fmt-check lint test coverage allocs budgets repeat examples bench symbols guests go-guest lua-guest \
+.PHONY: check fmt-check lint test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest lua-guest \
 	ts-guest verify-guests clean
 
-check: fmt-check lint test coverage allocs budgets repeat examples
+check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
 # Formatting must leave no diff.
 fmt-check:
@@ -101,11 +101,18 @@ lint:
 # at about 6.8 GiB RSS (5.6 GiB at -parallel 2, 8.6 GiB at 16), which leaves room on this 30 GB machine with
 # about 12 GB free. Closed containers used to keep their decoded guest modules, so the run grew to about 14 GB
 # and was OOM-killed whatever -parallel (PLAN.md, "Closed containers release their compiled guests").
+# The previous profile is removed first, so a failed or interrupted run leaves none for the gate to pass on.
 test:
+	rm -f $(COVERAGE)
 	go test -race -shuffle=on -tags integration -parallel 8 -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 
-coverage:
+# The gate checks the profile of this run's tests: it depends on them, so `make -j check` cannot run it first.
+coverage: test
 	scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
+
+# The gates' own tests: the coverage gate fails closed on unusable profiles and runs after the tests.
+gate-test:
+	scripts/gate-test.sh
 
 # Allocation budgets (RULES.md §3). Coverage instrumentation changes inlining, so they run uninstrumented.
 allocs:
@@ -116,6 +123,7 @@ allocs:
 # budget applies to the fastest run, so one run slowed by other work on the machine cannot fail the gate.
 budgets:
 	mkdir -p $(BIN)
+	rm -f $(BUDGET_OUT)
 	go test -tags integration -run='^$$' -bench='^Benchmark(Get|All)$$' -benchmem -count=$(BUDGET_RUNS) . | \
 		tee $(BUDGET_OUT)
 	scripts/bench-budget.sh $(BUDGET_OUT)
@@ -133,6 +141,7 @@ examples:
 	git diff --exit-code -- 'examples/*.go'
 	cd examples && golangci-lint run --build-tags integration ./...
 	cd examples && go mod tidy -diff
+	rm -f examples/$(COVERAGE)
 	cd examples && go test -race -shuffle=on -tags integration -covermode=atomic -coverpkg=./... \
 		-coverprofile=$(COVERAGE) ./...
 	cd examples && ../scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)

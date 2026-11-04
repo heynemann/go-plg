@@ -8,9 +8,9 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A script test (or Makefile dry-run check) showing an empty/header-only profile reproduces the bug (fails on the current code) and passes with the fix
+- [x] A script test (or Makefile dry-run check) showing an empty/header-only profile reproduces the bug (fails on the current code) and passes with the fix
 Gate fails on an empty/header-only profile; `make -n -j check` shows coverage ordered after test
 `make check` still passes normally
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

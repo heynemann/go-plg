@@ -28,7 +28,7 @@ jobs:
         with:
           path: ~/.cache/plg
           key: plg-cache-${{ hashFiles('guest/**/*.wasm*', 'go.sum') }}
-      # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate, goleak,
+      # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate (and its own tests), goleak,
       # allocation budgets (uninstrumented), benchmark budgets (Get <= 50 ns/op, Get/All 0 allocs/op, no race
       # detector, fastest of 5 runs), unit tests repeated with -count=10, and `make examples`: the examples module
       # (lint, tidy, tests against MinIO and PostgreSQL containers through the runner's Docker, coverage, repeat).
