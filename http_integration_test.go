@@ -149,6 +149,20 @@ func TestPluginHTTPReachesAllowedHosts(t *testing.T) {
 	})
 }
 
+// TestGoPluginHTTPRequestsWithACancelledContextAreNotSent: a Go plugin's request whose own context is already
+// cancelled fails with the context's error, closes its body and never reaches the server.
+func TestGoPluginHTTPRequestsWithACancelledContextAreNotSent(t *testing.T) {
+	t.Parallel()
+
+	api := newAPIServer(t)
+	plug := fetcher(t, golang(), io.Discard, plg.WithHTTP(openPolicy(hostOf(t, api.URL))))
+
+	got, err := plug.Foo(t.Context(), "CANCELLED "+api.URL+"/v1/items")
+	require.NoError(t, err)
+	assert.Equal(t, `Post "`+api.URL+`/v1/items": context canceled|true`, got)
+	assert.Zero(t, api.hits.Load(), "the server saw nothing")
+}
+
 func TestPluginHTTPRefusals(t *testing.T) {
 	t.Parallel()
 

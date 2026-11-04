@@ -31,11 +31,18 @@ type Transport struct {
 	Exchange func(req []byte) []byte
 }
 
-// RoundTrip sends req through the host. It always closes req's body.
+// RoundTrip sends req through the host. It always closes req's body. A request whose context has ended is not
+// sent: RoundTrip returns the context's error. The host makes the request under the plugin call's context, so a
+// deadline or cancellation of req's own that comes once the request is sent does not reach it.
 func (t Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	enc, err := encodeRequest(req)
 	if err != nil {
 		return nil, err
+	}
+
+	err = req.Context().Err() // ended while the body was read
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the context's own error, as net/http's transport returns it
 	}
 
 	decoded, err := httpabi.DecodeResponse(t.Exchange(enc))
@@ -62,6 +69,11 @@ func encodeRequest(req *http.Request) ([]byte, error) {
 		defer req.Body.Close() //nolint:errcheck // the body was read to the end; closing it reports nothing useful
 	}
 
+	err := req.Context().Err()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the context's own error, as net/http's transport returns it
+	}
+
 	if req.URL == nil {
 		return nil, ErrNoURL
 	}
@@ -81,7 +93,7 @@ func encodeRequest(req *http.Request) ([]byte, error) {
 		return enc, nil
 	}
 
-	enc, err := httpabi.AppendBody(enc, req.Body, maxRequest-len(enc))
+	enc, err = httpabi.AppendBody(enc, req.Body, maxRequest-len(enc))
 	if err != nil {
 		return nil, err //nolint:wrapcheck // httpabi errors already say what failed
 	}

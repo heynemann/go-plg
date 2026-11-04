@@ -5,9 +5,11 @@
 //	REPEAT <n> <url>      n GETs in a row
 //	HOST <url> <host>     one GET with the Host header overridden
 //	CREDS <url>           one GET with the six headers carrying credentials set (Authorization, Cookie, ...)
+//	CANCELLED <url>       one POST whose context is already cancelled
 //
 // and returns "<status code>|<X-Reply header>|<body>" of the last response; CREDS adds "|<how many of the six
-// headers the request still holds once answered>".
+// headers the request still holds once answered>". CANCELLED returns "<the request's error>|<whether its body
+// was closed>".
 package fetcher
 
 import (
@@ -41,6 +43,8 @@ func (fetcher) Foo(_ context.Context, cmd string) (string, error) {
 		return get(args[1], args[2])
 	case "CREDS":
 		return creds(args[1])
+	case "CANCELLED":
+		return cancelled(args[1])
 	case "POST":
 		n, _ := strconv.Atoi(args[2])
 
@@ -124,6 +128,33 @@ func creds(url string) (string, error) {
 	}
 
 	return got + "|" + strconv.Itoa(held), nil
+}
+
+// cancelled POSTs to url under a context already cancelled. The body is a pipe whose writer is already closed: a
+// closed reader then reads io.ErrClosedPipe, an open one the writer's io.EOF, so the plugin tells whether the
+// request closed its body (an interpreted type's Close would not reach net/http, which sees only its Read).
+func cancelled(url string) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	body, writer := io.Pipe()
+	writer.CloseWithError(io.EOF)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+
+		return "", errors.New("sent")
+	}
+
+	_, readErr := body.Read(make([]byte, 1))
+
+	return err.Error() + "|" + strconv.FormatBool(errors.Is(readErr, io.ErrClosedPipe)), nil
 }
 
 func describe(resp *http.Response) (string, error) {

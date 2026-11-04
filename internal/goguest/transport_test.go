@@ -1,6 +1,7 @@
 package goguest_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -219,6 +220,24 @@ func TestTransportDropsCredentialsAfterAHopWithoutURL(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	assert.Empty(t, fake.seen[0].Header, "a hop after one without an origin is another origin's")
+}
+
+func TestTransportRefusesARequestWhoseContextEnded(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	fake := &host{answer: ok(http.StatusOK, nil, "")}
+	body := &trackedBody{Reader: strings.NewReader("payload")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://api.example/items", body)
+	require.NoError(t, err)
+
+	resp, err := goguest.Transport{Exchange: fake.exchange}.RoundTrip(req) //nolint:bodyclose // no response
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, resp)
+	assert.Empty(t, fake.seen, "nothing reached the host")
+	assert.True(t, body.closed, "the body is closed, as RoundTrip must")
 }
 
 func TestTransportDefaultsToGET(t *testing.T) {

@@ -499,6 +499,12 @@ entries of `AllowedHosts` included. This is stricter than Go's `http.Client`, wh
 on any port or scheme and for its subdomains; Go plugins get the stricter rule too. The plugin's own headers (the
 Go request's `Header`, `fetch`'s `headers`, `http.request`'s `headers` table) are left as they were.
 
+A Go plugin's request whose own context (`http.NewRequestWithContext`) has already ended is not sent: it fails with
+the context's error (`context.Canceled`, `context.DeadlineExceeded`) and its body is closed. Once sent, a request
+runs under the call's `ctx` and the policy's `Timeout` only: a shorter deadline or a cancellation of the request's
+own context does not stop it on the host yet (an `http.Client.Timeout` likewise ends the plugin's wait, not the
+host's request).
+
 ### Many I/O-bound calls on one instance: `WithConcurrentCalls`
 
 By default an instance serves one call at a time, so a call waiting 100 ms for a response holds a whole instance.
