@@ -8,9 +8,11 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A TS test with a getter that makes a nested host call (and a nested fetch) during argument encoding reproduces the bug (fails on the current code) and passes with the fix
+- [x] A TS test with a getter that makes a nested host call (and a nested fetch) during argument encoding reproduces the bug (fails on the current code) and passes with the fix
 The host receives exactly the outer and inner arguments; no per-call allocation added to the non-reentrant path (benchmark unchanged)
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+
+**Resolution:** every encoding in the TypeScript glue (a host call's arguments, a method's results) has its own state — output buffer, failure reason, path and message — and a host call or HTTP request made while another request is being encoded gets a request buffer of its own; requests that do not nest keep the shared buffer, allocating nothing new. See PLAN.md, "Adversarial review fixes", 12. Test: `TestTypeScriptReentrantHostCallsKeepTheirOwnArguments`.

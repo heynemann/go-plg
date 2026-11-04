@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -515,6 +516,151 @@ func TestTypeScriptHostArgumentsThatDoNotFitReject(t *testing.T) {
 	total, err := hosted.Total(t.Context(), 1, 2, 3)
 	require.NoError(t, err)
 	assert.Equal(t, 6, total, "the instance kept serving")
+}
+
+// sumRecorder is testHost recording the arguments of every Sum call it serves, in order.
+type sumRecorder struct {
+	*testHost
+
+	sums chan string
+}
+
+func (h *sumRecorder) Sum(ctx context.Context, base int, more ...int) (int, error) {
+	h.sums <- fmt.Sprint(base, more)
+
+	return h.testHost.Sum(ctx, base, more...)
+}
+
+// received returns the Sum calls recorded since the last time, in order.
+func (h *sumRecorder) received() []string {
+	var got []string
+
+	for {
+		select {
+		case sum := <-h.sums:
+			got = append(got, sum)
+		default:
+			return got
+		}
+	}
+}
+
+// reentrantMembers is a Hosted plugin whose host call arguments and results run getters that call the host or
+// fetch while the glue encodes them. Relay(op [url]) calls host.Sum(1, more), more[0] being a getter returning
+// 2 after making the op's nested request (more[1], for "path", a value that does not fit). For "silent", that
+// request (Lookup of an 8-byte id) is exactly as long as what the outer call encodes before more[0]: overwritten by
+// it, the outer call reached the host as a valid Sum(8, [2]). Describe(op) returns a user whose id getter makes a
+// host call that does not fit, then throws (op "throw") or returns, before name (a number, for op "path") does not
+// fit either.
+const reentrantMembers = `
+	async Relay(cmd: string) {
+		const [op, url] = cmd.split(" ");
+		let inner: Promise<unknown> = Promise.resolve("-");
+		const nested: Record<string, () => void> = {
+			host: () => { inner = host.Sum(99, [7]); },
+			silent: () => { inner = host.Lookup(String.fromCharCode(0, 0, 0, 0, 1, 0, 0, 0)).catch(() => "no user"); },
+			fetch: () => { inner = fetch(url, { method: "POST", body: "inner" }).then((r) => r.text()); },
+			throw: () => { host.Sum(1, [1, 2, "x"]).catch(() => {}); throw new Error("getter failed"); },
+			path: () => { inner = host.Sum(1, [1, 2, "x"]).catch((e: any) => e.message); },
+		};
+		const more: unknown[] = op === "path" ? [0, "y"] : [0];
+		Object.defineProperty(more, 0, { enumerable: true, get() { nested[op](); return 2; } });
+		try {
+			const outer = await host.Sum(1, more);
+			return outer + " " + await inner;
+		} catch (e: any) {
+			return e.name + ": " + e.message + " | " + await inner;
+		}
+	},
+	async Describe(op: string) {
+		const user: Record<string, unknown> = { name: op === "path" ? 5 : "n" };
+		Object.defineProperty(user, "id", { enumerable: true, get() {
+			host.Sum(1, [1, 2, "x"]).catch(() => {});
+			if (op === "throw") throw new Error("getter failed");
+			return "u";
+		} });
+		return user;
+	},
+	Value: () => host.Value(),
+	Origin: () => "",
+	Total: (base: number, more: number[]) => host.Sum(base, more),
+	Keys: (keys: object) => host.Keys(keys)`
+
+// TestTypeScriptReentrantHostCallsKeepTheirOwnArguments: the glue runs the plugin's getters while it encodes a host
+// call's arguments or a method's results, and a getter may call the host or fetch meanwhile. Each request reaches
+// the host exactly as its caller made it, blocking or multiplexed, and each failure to convert names its own value
+// (or is the getter's own exception), not the nested call's.
+func TestTypeScriptReentrantHostCallsKeepTheirOwnArguments(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		assert.NoError(t, err)
+
+		reply := req.Method + " " + req.URL.Path + " " + string(body)
+		_, err = io.WriteString(writer, reply) //nolint:gosec // G705: a test server echoing its own test's request
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(srv.Close)
+
+	const notAnInteger = "host.Sum: parameter 2: [2]: want an integer number, got string"
+
+	calls := []struct {
+		cmd, want string
+		sums      []string
+	}{
+		{cmd: "host", want: "3 106", sums: []string{"99 [7]", "1 [2]"}},
+		{cmd: "silent", want: "3 no user", sums: []string{"1 [2]"}},
+		{cmd: "fetch " + srv.URL + "/inner", want: "3 POST /inner inner", sums: []string{"1 [2]"}},
+		{cmd: "throw", want: "Error: getter failed | -"},
+		{
+			cmd:  "path",
+			want: "TypeError: host.Sum: parameter 2: [1]: want an integer number, got string | " + notAnInteger,
+		},
+	}
+
+	for _, mode := range []struct {
+		name string
+		opts []plg.RegisterOption
+	}{
+		{name: "blocking"},
+		{name: "multiplexed", opts: []plg.RegisterOption{plg.WithConcurrentCalls(2)}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Parallel()
+
+			recorder := &sumRecorder{testHost: newTestHost(), sums: make(chan string, 8)}
+			opts := append([]plg.RegisterOption{
+				plg.WithStorage(tsSource(t, tsPlugin(reentrantMembers))), plg.WithPool(1, 1),
+				plg.WithHost[testcontract.Host](recorder), plg.WithHTTP(openPolicy(hostOf(t, srv.URL))),
+			}, mode.opts...)
+			ctr := newContainer(t)
+			require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "reentrant", opts...))
+
+			hosted, err := plg.Get[testcontract.Hosted](t.Context(), ctr, "reentrant/p")
+			require.NoError(t, err)
+
+			for _, call := range calls {
+				got, relayErr := hosted.Relay(t.Context(), call.cmd)
+				require.NoError(t, relayErr, call.cmd)
+				assert.Equal(t, call.want, got, call.cmd)
+				assert.Equal(t, call.sums, recorder.received(), "%s: the Sum calls the host served", call.cmd)
+			}
+
+			_, err = hosted.Describe(t.Context(), "path")
+			require.ErrorIs(t, err, plg.ErrConversion)
+			require.ErrorContains(t, err, ": result 0: name: want a string, got number")
+
+			_, err = hosted.Describe(t.Context(), "throw")
+			require.NotErrorIs(t, err, plg.ErrConversion)
+			require.EqualError(t, err, "getter failed", "the getter's own exception")
+
+			user, err := hosted.Describe(t.Context(), "ok")
+			require.NoError(t, err)
+			assert.Equal(t, testcontract.User{ID: "u", Name: "n"}, user)
+			assert.Empty(t, recorder.received(), "no host call that does not fit reached the host")
+		})
+	}
 }
 
 // TestTypeScriptFetch exercises the parts of fetch the contract suite does not: JSON bodies, consumed bodies,

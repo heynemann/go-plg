@@ -202,8 +202,9 @@ static uint32_t nmethods, nplugin; // methods [0, nplugin) are the interface's, 
 
 static buf_t in;     // the input buffer plg_alloc hands out
 static buf_t out;    // the result buffer
-static buf_t req;    // host_call and http_roundtrip requests
-static buf_t answer; // their answers
+static buf_t req;     // host_call and http requests (see request)
+static bool req_busy; // req holds a request still being made
+static buf_t answer;  // their answers
 
 static JSAtom a_seconds, a_nanos, a_message, a_getTime, a_close, a_create;
 
@@ -668,53 +669,61 @@ static JSValue decode(rd_t *r, uint32_t ti, int depth) {
 
 // ---- JS -> wire ----
 
-// why is why encoding failed, set together with a -1 return; a -1 with an empty why means a JS exception is
-// pending (a throwing getter, out of memory). The path to the failing value is collected only then, as the
-// failure unwinds: trail receives each enclosing segment (Go codec style: .qty, [1], ["a"]), innermost first and
-// each reversed, so that reversing trail once gives the path. conv is the finished message.
-static char why[512];
-static buf_t trail;
-static char conv[1024];
+// An encoding writes values into b. It fails with -1 and why set, or with -1 and why empty when a JS exception is
+// pending instead (a throwing getter, out of memory). The path to the failing value is collected only then, as
+// the failure unwinds: trail receives each enclosing segment (Go codec style: .qty, [1], ["a"]), innermost first
+// and each reversed, so that reversing trail once gives the path. conv is the finished message.
+//
+// Encoding runs plugin code (getters, toString, a Date's getTime), which may make a host call or an HTTP request
+// of its own: that one is encoded in the middle of this one. So every encoding has its own enc_t, a local of the
+// function that owns it (which frees trail), and none sees another's request or failure.
+typedef struct {
+  buf_t *b;
+  buf_t trail;
+  char why[512];
+  char conv[1024];
+} enc_t;
 #define PATH_SHOWN 400 // at most this much of the path is shown, so the reason always fits conv
 
-static int fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static int fail(enc_t *enc, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
-static int fail(const char *fmt, ...) {
+static int fail(enc_t *enc, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(why, sizeof why, fmt, ap);
+  vsnprintf(enc->why, sizeof enc->why, fmt, ap);
   va_end(ap);
   return -1;
 }
 
 // unwind adds a segment of the path to the value that failed to encode, on the way out; it passes r through.
-static int unwind(int r, const char *s, size_t n) {
-  if (r < 0 && why[0])
-    while (n > 0) put_u8(&trail, (uint8_t)s[--n]);
+static int unwind(enc_t *enc, int r, const char *s, size_t n) {
+  if (r < 0 && enc->why[0])
+    while (n > 0) put_u8(&enc->trail, (uint8_t)s[--n]);
   return r;
 }
 
 // finish writes conv: "<label> <k>: <path>: <why>", the path without its leading dot; a path deeper than a
 // message can show (a cyclic value) keeps its start and its end.
-static void finish(const char *label, unsigned k) {
-  size_t n = trail.failed ? 0 : trail.len;
+static void finish(enc_t *enc, const char *label, unsigned k) {
+  size_t n = enc->trail.failed ? 0 : enc->trail.len;
+  uint8_t *path = enc->trail.p;
   for (size_t i = 0; i < n / 2; i++) {
-    uint8_t c = trail.p[i];
-    trail.p[i] = trail.p[n - 1 - i];
-    trail.p[n - 1 - i] = c;
+    uint8_t c = path[i];
+    path[i] = path[n - 1 - i];
+    path[n - 1 - i] = c;
   }
-  const char *p = n ? (const char *)trail.p : "";
+  const char *p = n ? (const char *)path : "";
   if (n && p[0] == '.') {
     p++;
     n--;
   }
   if (n > PATH_SHOWN)
-    snprintf(conv, sizeof conv, "%s %u: %.*s…%.*s: %s", label, k, PATH_SHOWN / 2, p, PATH_SHOWN / 2,
-             p + n - PATH_SHOWN / 2, why);
+    snprintf(enc->conv, sizeof enc->conv, "%s %u: %.*s…%.*s: %s", label, k, PATH_SHOWN / 2, p, PATH_SHOWN / 2,
+             p + n - PATH_SHOWN / 2, enc->why);
   else if (n)
-    snprintf(conv, sizeof conv, "%s %u: %.*s: %s", label, k, (int)n, p, why);
+    snprintf(enc->conv, sizeof enc->conv, "%s %u: %.*s: %s", label, k, (int)n, p, enc->why);
   else
-    snprintf(conv, sizeof conv, "%s %u: %s", label, k, why);
+    snprintf(enc->conv, sizeof enc->conv, "%s %u: %s", label, k, enc->why);
 }
 
 static const char *type_name(JSValueConst v) {
@@ -740,7 +749,7 @@ static const char *go_name(const type_t *t) {
   return name;
 }
 
-static int encode(buf_t *b, JSValueConst v, uint32_t ti, int depth);
+static int encode(enc_t *enc, JSValueConst v, uint32_t ti, int depth);
 
 static void encode_zero(buf_t *b, uint32_t ti) {
   const type_t *t = &types[ti];
@@ -756,30 +765,30 @@ static void encode_zero(buf_t *b, uint32_t ti) {
   }
 }
 
-static int number(JSValueConst v, double *d, const char *want) {
-  if (!JS_IsNumber(v)) return fail("want %s, got %s", want, type_name(v));
+static int number(enc_t *enc, JSValueConst v, double *d, const char *want) {
+  if (!JS_IsNumber(v)) return fail(enc, "want %s, got %s", want, type_name(v));
   JS_ToFloat64(ctx, d, v);
   return 0;
 }
 
-static int encode_int(buf_t *b, JSValueConst v, const type_t *t) {
+static int encode_int(enc_t *enc, JSValueConst v, const type_t *t) {
   double d;
-  if (number(v, &d, "an integer number") < 0) return -1;
-  if (!isfinite(d) || d != trunc(d)) return fail("wire: not an integer: %g", d);
-  if (fabs(d) > MAX_SAFE) return fail("wire: integer beyond ±2^53: %.0f", d);
+  if (number(enc, v, &d, "an integer number") < 0) return -1;
+  if (!isfinite(d) || d != trunc(d)) return fail(enc, "wire: not an integer: %g", d);
+  if (fabs(d) > MAX_SAFE) return fail(enc, "wire: integer beyond ±2^53: %.0f", d);
   if (t->kind == K_UINT) {
     if (d < 0 || (t->bits < 64 && d >= ldexp(1, t->bits)))
-      return fail("wire: value out of range: %.0f does not fit %s", d, go_name(t));
-    put_u64(b, (uint64_t)d);
+      return fail(enc, "wire: value out of range: %.0f does not fit %s", d, go_name(t));
+    put_u64(enc->b, (uint64_t)d);
   } else {
     if (t->bits < 64 && (d >= ldexp(1, t->bits - 1) || d < -ldexp(1, t->bits - 1)))
-      return fail("wire: value out of range: %.0f does not fit %s", d, go_name(t));
-    put_u64(b, (uint64_t)(int64_t)d);
+      return fail(enc, "wire: value out of range: %.0f does not fit %s", d, go_name(t));
+    put_u64(enc->b, (uint64_t)(int64_t)d);
   }
   return 0;
 }
 
-static int encode_time(buf_t *b, JSValueConst v) {
+static int encode_time(enc_t *enc, JSValueConst v) {
   double sec, nsec = 0;
   if (JS_IsDate(v)) {
     double ms;
@@ -787,7 +796,7 @@ static int encode_time(buf_t *b, JSValueConst v) {
     if (JS_IsException(r)) return -1;
     JS_ToFloat64(ctx, &ms, r);
     JS_FreeValue(ctx, r);
-    if (!isfinite(ms)) return fail("wire: invalid Date");
+    if (!isfinite(ms)) return fail(enc, "wire: invalid Date");
     sec = floor(ms / 1000);
     nsec = (ms - sec * 1000) * 1e6;
   } else if (JS_IsObject(v) && !JS_IsArray(v) && !JS_IsFunction(ctx, v)) {
@@ -800,24 +809,24 @@ static int encode_time(buf_t *b, JSValueConst v) {
     JS_FreeValue(ctx, s);
     JS_FreeValue(ctx, n);
     if (exc) return -1;
-    if (bad_s || bad_n) return fail("want a Date or {seconds, nanos} with numbers");
+    if (bad_s || bad_n) return fail(enc, "want a Date or {seconds, nanos} with numbers");
   } else {
-    return fail("want a Date or {seconds, nanos}, got %s", type_name(v));
+    return fail(enc, "want a Date or {seconds, nanos}, got %s", type_name(v));
   }
   if (!isfinite(sec) || sec != trunc(sec) || !isfinite(nsec) || nsec != trunc(nsec))
-    return fail("wire: seconds and nanos must be integers");
-  if (fabs(sec) > MAX_SAFE) return fail("wire: integer beyond ±2^53: %.0f", sec);
-  if (nsec < 0 || nsec > 999999999) return fail("wire: invalid encoding: %.0f nanoseconds", nsec);
-  put_u64(b, (uint64_t)(int64_t)sec);
-  put_u64(b, (uint64_t)(int64_t)nsec);
+    return fail(enc, "wire: seconds and nanos must be integers");
+  if (fabs(sec) > MAX_SAFE) return fail(enc, "wire: integer beyond ±2^53: %.0f", sec);
+  if (nsec < 0 || nsec > 999999999) return fail(enc, "wire: invalid encoding: %.0f nanoseconds", nsec);
+  put_u64(enc->b, (uint64_t)(int64_t)sec);
+  put_u64(enc->b, (uint64_t)(int64_t)nsec);
   return 0;
 }
 
-static int encode_bytes(buf_t *b, JSValueConst v) {
+static int encode_bytes(enc_t *enc, JSValueConst v) {
   size_t n;
   uint8_t *p;
   if (JS_IsNull(v) || JS_IsUndefined(v)) {
-    put_u32(b, NIL_LENGTH);
+    put_u32(enc->b, NIL_LENGTH);
     return 0;
   }
   if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
@@ -825,49 +834,50 @@ static int encode_bytes(buf_t *b, JSValueConst v) {
   } else if (JS_IsArrayBuffer(v)) {
     p = JS_GetArrayBuffer(ctx, &n, v);
   } else {
-    return fail("want a Uint8Array, got %s", type_name(v));
+    return fail(enc, "want a Uint8Array, got %s", type_name(v));
   }
   if (!p && n) return -1;
-  if (n >= NIL_LENGTH) return fail("wire: value too long");
-  put_u32(b, (uint32_t)n);
-  put(b, p, n);
+  if (n >= NIL_LENGTH) return fail(enc, "wire: value too long");
+  put_u32(enc->b, (uint32_t)n);
+  put(enc->b, p, n);
   return 0;
 }
 
-static int encode_list(buf_t *b, JSValueConst v, const type_t *t, int depth) {
+static int encode_list(enc_t *enc, JSValueConst v, const type_t *t, int depth) {
   if (JS_IsNull(v) || JS_IsUndefined(v)) {
-    put_u32(b, NIL_LENGTH);
+    put_u32(enc->b, NIL_LENGTH);
     return 0;
   }
-  if (!JS_IsArray(v)) return fail("want an array, got %s", type_name(v));
+  if (!JS_IsArray(v)) return fail(enc, "want an array, got %s", type_name(v));
   int64_t n;
   if (JS_GetLength(ctx, v, &n) < 0) return -1;
-  if (n >= NIL_LENGTH) return fail("wire: value too long");
-  put_u32(b, (uint32_t)n);
+  if (n >= NIL_LENGTH) return fail(enc, "wire: value too long");
+  put_u32(enc->b, (uint32_t)n);
   for (int64_t i = 0; i < n; i++) {
     JSValue e = JS_GetPropertyInt64(ctx, v, i);
     if (JS_IsException(e)) return -1;
-    int r = encode(b, e, t->elem, depth + 1);
+    int r = encode(enc, e, t->elem, depth + 1);
     JS_FreeValue(ctx, e);
     if (r < 0) {
       char seg[24];
-      return unwind(r, seg, (size_t)snprintf(seg, sizeof seg, "[%lld]", (long long)i));
+      return unwind(enc, r, seg, (size_t)snprintf(seg, sizeof seg, "[%lld]", (long long)i));
     }
   }
   return 0;
 }
 
-static int encode_map(buf_t *b, JSValueConst v, const type_t *t, int depth) {
+static int encode_map(enc_t *enc, JSValueConst v, const type_t *t, int depth) {
   if (JS_IsNull(v) || JS_IsUndefined(v)) {
-    put_u32(b, NIL_LENGTH);
+    put_u32(enc->b, NIL_LENGTH);
     return 0;
   }
-  if (!JS_IsObject(v) || JS_IsArray(v) || JS_IsFunction(ctx, v)) return fail("want an object, got %s", type_name(v));
+  if (!JS_IsObject(v) || JS_IsArray(v) || JS_IsFunction(ctx, v))
+    return fail(enc, "want an object, got %s", type_name(v));
   JSPropertyEnum *props;
   uint32_t n;
   if (JS_GetOwnPropertyNames(ctx, &props, &n, v, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) return -1;
   int r = 0;
-  put_u32(b, n);
+  put_u32(enc->b, n);
   for (uint32_t i = 0; i < n && r == 0; i++) {
     size_t kn;
     const char *k = JS_AtomToCStringLen(ctx, &kn, props[i].atom);
@@ -875,114 +885,122 @@ static int encode_map(buf_t *b, JSValueConst v, const type_t *t, int depth) {
       r = -1;
       break;
     }
-    put_str(b, k, kn);
+    put_str(enc->b, k, kn);
     JSValue e = JS_GetProperty(ctx, v, props[i].atom);
-    r = JS_IsException(e) ? -1 : encode(b, e, t->elem, depth + 1);
+    r = JS_IsException(e) ? -1 : encode(enc, e, t->elem, depth + 1);
     JS_FreeValue(ctx, e);
-    unwind(unwind(unwind(r, "\"]", 2), k, kn), "[\"", 2); // ["key"], added back to front
+    unwind(enc, unwind(enc, unwind(enc, r, "\"]", 2), k, kn), "[\"", 2); // ["key"], added back to front
     JS_FreeCString(ctx, k);
   }
   JS_FreePropertyEnum(ctx, props, n);
   return r;
 }
 
-static int encode_struct(buf_t *b, JSValueConst v, const type_t *t, int depth) {
-  if (!JS_IsObject(v) || JS_IsArray(v) || JS_IsFunction(ctx, v)) return fail("want an object, got %s", type_name(v));
+static int encode_struct(enc_t *enc, JSValueConst v, const type_t *t, int depth) {
+  if (!JS_IsObject(v) || JS_IsArray(v) || JS_IsFunction(ctx, v))
+    return fail(enc, "want an object, got %s", type_name(v));
   for (uint32_t f = 0; f < t->nfields; f++) {
     const field_t *fd = &t->fields[f];
     JSValue e = JS_GetProperty(ctx, v, fd->atom);
     if (JS_IsException(e)) return -1;
     if (JS_IsUndefined(e)) {
-      encode_zero(b, fd->type); // an absent field is the zero value, as in Go
+      encode_zero(enc->b, fd->type); // an absent field is the zero value, as in Go
       continue;
     }
-    int r = encode(b, e, fd->type, depth + 1);
+    int r = encode(enc, e, fd->type, depth + 1);
     JS_FreeValue(ctx, e);
-    if (r < 0) return unwind(unwind(r, fd->name, strlen(fd->name)), ".", 1);
+    if (r < 0) return unwind(enc, unwind(enc, r, fd->name, strlen(fd->name)), ".", 1);
   }
   return 0;
 }
 
-static int encode(buf_t *b, JSValueConst v, uint32_t ti, int depth) {
+static int encode(enc_t *enc, JSValueConst v, uint32_t ti, int depth) {
   const type_t *t = &types[ti];
-  if (depth > MAX_DEPTH) return fail("wire: value nested too deeply");
+  if (depth > MAX_DEPTH) return fail(enc, "wire: value nested too deeply");
   switch (t->kind) {
   case K_BOOL:
-    if (!JS_IsBool(v)) return fail("want a boolean, got %s", type_name(v));
-    put_u8(b, JS_ToBool(ctx, v));
+    if (!JS_IsBool(v)) return fail(enc, "want a boolean, got %s", type_name(v));
+    put_u8(enc->b, JS_ToBool(ctx, v));
     return 0;
   case K_INT:
   case K_UINT:
-    return encode_int(b, v, t);
+    return encode_int(enc, v, t);
   case K_FLOAT: {
     double d;
-    if (number(v, &d, "a number") < 0) return -1;
+    if (number(enc, v, &d, "a number") < 0) return -1;
     if (t->bits == 32) d = (double)(float)d; // as Go's float32(x): rounded, ±Inf beyond the float32 range
     uint64_t u;
     memcpy(&u, &d, 8);
-    put_u64(b, u);
+    put_u64(enc->b, u);
     return 0;
   }
   case K_STRING: {
-    if (!JS_IsString(v)) return fail("want a string, got %s", type_name(v));
+    if (!JS_IsString(v)) return fail(enc, "want a string, got %s", type_name(v));
     size_t n;
     const char *s = JS_ToCStringLen(ctx, &n, v);
     if (!s) return -1;
-    put_str(b, s, n);
+    put_str(enc->b, s, n);
     JS_FreeCString(ctx, s);
     return 0;
   }
   case K_BYTES:
-    return encode_bytes(b, v);
+    return encode_bytes(enc, v);
   case K_TIME:
-    return encode_time(b, v);
+    return encode_time(enc, v);
   case K_ERROR: {
     if (JS_IsNull(v) || JS_IsUndefined(v)) {
-      put_u8(b, 0);
+      put_u8(enc->b, 0);
       return 0;
     }
     size_t n;
     const char *s = describe(v, &n);
     if (!s) return -1;
-    put_u8(b, 1);
-    put_str(b, s, n);
+    put_u8(enc->b, 1);
+    put_str(enc->b, s, n);
     JS_FreeCString(ctx, s);
     return 0;
   }
   case K_SLICE:
-    return encode_list(b, v, t, depth);
+    return encode_list(enc, v, t, depth);
   case K_MAP:
-    return encode_map(b, v, t, depth);
+    return encode_map(enc, v, t, depth);
   case K_POINTER:
     if (JS_IsNull(v) || JS_IsUndefined(v)) {
-      put_u8(b, 0);
+      put_u8(enc->b, 0);
       return 0;
     }
-    put_u8(b, 1);
-    return encode(b, v, t->elem, depth + 1);
+    put_u8(enc->b, 1);
+    return encode(enc, v, t->elem, depth + 1);
   case K_STRUCT:
-    return encode_struct(b, v, t, depth);
+    return encode_struct(enc, v, t, depth);
   }
-  return fail("invalid kind");
+  return fail(enc, "invalid kind");
 }
 
 // encode_values encodes count values of the given types: argv for a host call's parameters (label "parameter",
 // numbered from 1 after the context, as the Go codec numbers them), or a method's result (label "result", from
 // 0): one value, or an array of count values when there are several.
-static int encode_values(buf_t *b, const uint32_t *idx, uint32_t count, JSValueConst *argv, int argc,
+static int encode_values(enc_t *enc, const uint32_t *idx, uint32_t count, JSValueConst *argv, int argc,
                          const char *label, int first) {
   for (uint32_t k = 0; k < count; k++) {
     JSValueConst v = (int)k < argc ? argv[k] : JS_UNDEFINED;
-    trail.len = 0;
-    trail.failed = false;
-    why[0] = 0;
-    conv[0] = 0;
-    if (encode(b, v, idx[k], 0) < 0) {
-      if (why[0]) finish(label, k + (unsigned)first);
+    enc->trail.len = 0;
+    enc->trail.failed = false;
+    enc->why[0] = 0;
+    enc->conv[0] = 0;
+    if (encode(enc, v, idx[k], 0) < 0) {
+      if (enc->why[0]) finish(enc, label, k + (unsigned)first);
       return -1;
     }
   }
   return 0;
+}
+
+// start_encoding readies enc to encode into b. Only trail must start empty: encode_values sets why and conv before
+// anything reads them, so they are not cleared here (on every call).
+static void start_encoding(enc_t *enc, buf_t *b) {
+  enc->b = b;
+  enc->trail = (buf_t){0};
 }
 
 // ---- host ----
@@ -1029,6 +1047,24 @@ static JSValue error_value(const char *ctor, const char *s, size_t n) {
   return e;
 }
 
+// request returns the buffer a host call or HTTP request is encoded into, emptied: req, or own while req holds a
+// request still being made. Encoding a request runs plugin code (getters, toString), and a request that code makes
+// is encoded before the first one is complete: into own, which done frees, so neither overwrites the other. Only
+// such nested requests allocate.
+static buf_t *request(buf_t *own) {
+  buf_t *b = req_busy ? own : &req;
+  req_busy = true;
+  b->len = 0;
+  b->failed = false;
+  return b;
+}
+
+// done ends the request request returned (b) for own.
+static void done(const buf_t *b, buf_t *own) {
+  if (b == &req) req_busy = false;
+  free(own->p);
+}
+
 // exchange hands req to a host import's answer: it takes the pending result of length n into answer.
 static bool take(uint32_t n) {
   answer.len = 0;
@@ -1054,22 +1090,16 @@ static JSValue results(rd_t *r, const method_t *m) {
   return a;
 }
 
-// host_method calls the Host method magic: it returns a Promise of its results, rejected with an Error carrying
-// the host's message when it fails (or a TypeError when the arguments do not fit its parameters).
-static JSValue host_method(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
-  (void)c;
-  (void)this_val;
-  const method_t *m = &methods[nplugin + (uint32_t)magic];
-  req.len = 0;
-  req.failed = false;
-  if (encode_values(&req, m->params, m->nparams, argv, argc, "parameter", 1) < 0) {
-    if (!conv[0]) return JS_EXCEPTION;
+// host_request makes the host call magic (method m) with the arguments in argv, encoded with enc.
+static JSValue host_request(enc_t *enc, const method_t *m, uint32_t magic, int argc, JSValueConst *argv) {
+  if (encode_values(enc, m->params, m->nparams, argv, argc, "parameter", 1) < 0) {
+    if (!enc->conv[0]) return JS_EXCEPTION;
     char msg[1200];
-    int n = snprintf(msg, sizeof msg, "host.%s: %s", m->name, conv);
+    int n = snprintf(msg, sizeof msg, "host.%s: %s", m->name, enc->conv);
     return reject(error_value("TypeError", msg, (size_t)n));
   }
-  if (req.failed) return JS_ThrowOutOfMemory(ctx);
-  uint32_t n = plg_host_call((uint32_t)magic, (uint32_t)(uintptr_t)req.p, (uint32_t)req.len);
+  if (enc->b->failed) return JS_ThrowOutOfMemory(ctx);
+  uint32_t n = plg_host_call(magic, (uint32_t)(uintptr_t)enc->b->p, (uint32_t)enc->b->len);
   if (!take(n)) return JS_ThrowOutOfMemory(ctx);
   rd_t r = {answer.p, answer.len, 0};
   uint8_t status;
@@ -1086,6 +1116,20 @@ static JSValue host_method(JSContext *c, JSValueConst this_val, int argc, JSValu
   uint32_t sn;
   if (!rd_str(&r, &s, &sn)) return JS_ThrowInternalError(ctx, "plg: host.%s: malformed answer", m->name);
   return reject(error_value("Error", s, sn));
+}
+
+// host_method calls the Host method magic: it returns a Promise of its results, rejected with an Error carrying
+// the host's message when it fails (or a TypeError when the arguments do not fit its parameters).
+static JSValue host_method(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+  (void)c;
+  (void)this_val;
+  buf_t own = {0};
+  enc_t enc;
+  start_encoding(&enc, request(&own));
+  JSValue v = host_request(&enc, &methods[nplugin + (uint32_t)magic], (uint32_t)magic, argc, argv);
+  done(enc.b, &own);
+  free(enc.trail.p);
+  return v;
 }
 
 // ---- natives for the prelude ----
@@ -1167,8 +1211,8 @@ static JSValue http_answer(JSContext *c, rd_t *r) {
   return JS_NewArrayFrom(c, 3, parts);
 }
 
-// http_async starts the request in req with http_start and returns a Promise of its answer.
-static JSValue http_async(JSContext *c) {
+// http_async starts the request in b with http_start and returns a Promise of its answer.
+static JSValue http_async(JSContext *c, const buf_t *b) {
   if (nrequests == caprequests) {
     uint32_t cap = caprequests ? 2 * caprequests : 16;
     pending_request *grown = realloc(requests, cap * sizeof *grown);
@@ -1179,29 +1223,23 @@ static JSValue http_async(JSContext *c) {
   JSValue funcs[2];
   JSValue p = JS_NewPromiseCapability(c, funcs);
   if (JS_IsException(p)) return p;
-  uint32_t id = plg_http_start(current_call, (uint32_t)(uintptr_t)req.p, (uint32_t)req.len);
+  uint32_t id = plg_http_start(current_call, (uint32_t)(uintptr_t)b->p, (uint32_t)b->len);
   requests[nrequests++] = (pending_request){.resolve = funcs[0], .reject = funcs[1], .id = id, .call = current_call};
   return p;
 }
 
-// http(method, url, [[name, value]...], body Uint8Array | null) makes a request through the host and returns
-// [status, [[name, value]...], body Uint8Array], or a Promise of it in a multiplexed step; a refused or failed
-// request throws (rejects with) a TypeError, as fetch does.
-static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
-  (void)this_val;
-  if (argc < 4 || !JS_IsArray(argv[2])) return JS_ThrowTypeError(c, "plg: http: bad arguments");
-  req.len = 0;
-  req.failed = false;
+// http_request encodes the request of http's arguments into b and makes it.
+static JSValue http_request(JSContext *c, buf_t *b, JSValueConst *argv) {
   for (int i = 0; i < 2; i++) {
     size_t n;
     const char *s = JS_ToCStringLen(c, &n, argv[i]);
     if (!s) return JS_EXCEPTION;
-    put_str(&req, s, n);
+    put_str(b, s, n);
     JS_FreeCString(c, s);
   }
   int64_t pairs;
   if (JS_GetLength(c, argv[2], &pairs) < 0) return JS_EXCEPTION;
-  put_u64(&req, (uint64_t)pairs);
+  put_u64(b, (uint64_t)pairs);
   for (int64_t i = 0; i < pairs; i++) {
     JSValue pair = JS_GetPropertyInt64(c, argv[2], i);
     for (uint32_t k = 0; k < 2; k++) {
@@ -1213,7 +1251,7 @@ static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValu
         JS_FreeValue(c, pair);
         return JS_EXCEPTION;
       }
-      put_str(&req, s, n);
+      put_str(b, s, n);
       JS_FreeCString(c, s);
     }
     JS_FreeValue(c, pair);
@@ -1222,14 +1260,27 @@ static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValu
     size_t n;
     uint8_t *p = JS_GetUint8Array(c, &n, argv[3]);
     if (!p && n) return JS_EXCEPTION;
-    put(&req, p, n);
+    put(b, p, n);
   }
-  if (req.failed) return JS_ThrowOutOfMemory(c);
-  if (stepping) return http_async(c);
-  uint32_t n = plg_http_roundtrip((uint32_t)(uintptr_t)req.p, (uint32_t)req.len);
+  if (b->failed) return JS_ThrowOutOfMemory(c);
+  if (stepping) return http_async(c, b);
+  uint32_t n = plg_http_roundtrip((uint32_t)(uintptr_t)b->p, (uint32_t)b->len);
   if (!take(n)) return JS_ThrowOutOfMemory(c);
   rd_t r = {answer.p, answer.len, 0};
   return http_answer(c, &r);
+}
+
+// http(method, url, [[name, value]...], body Uint8Array | null) makes a request through the host and returns
+// [status, [[name, value]...], body Uint8Array], or a Promise of it in a multiplexed step; a refused or failed
+// request throws (rejects with) a TypeError, as fetch does.
+static JSValue native_http(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+  (void)this_val;
+  if (argc < 4 || !JS_IsArray(argv[2])) return JS_ThrowTypeError(c, "plg: http: bad arguments");
+  buf_t own = {0};
+  buf_t *b = request(&own);
+  JSValue v = http_request(c, b, argv);
+  done(b, &own);
+  return v;
 }
 
 // utf8Decode(bytes) returns the text of UTF-8 bytes.
@@ -1374,9 +1425,11 @@ EXPORT("plg_init") uint64_t plg_init(uint32_t len) {
 // encode_result encodes a method's settled result into out: OK + results, or Convert naming the result.
 static uint64_t encode_result(const method_t *m, JSValue v) {
   begin(ST_OK);
+  enc_t enc;
+  start_encoding(&enc, &out);
   int r = 0;
   if (m->nresults == 1) {
-    r = encode_values(&out, m->results, 1, (JSValueConst *)&v, 1, "result", 0);
+    r = encode_values(&enc, m->results, 1, (JSValueConst *)&v, 1, "result", 0);
   } else if (m->nresults > 1) {
     int64_t n = -1;
     if (!JS_IsArray(v) || JS_GetLength(ctx, v, &n) < 0 || n != m->nresults) {
@@ -1390,15 +1443,19 @@ static uint64_t encode_result(const method_t *m, JSValue v) {
     if (!vals) return message(ST_PANIC, "out of memory", 13);
     for (uint32_t k = 0; k < m->nresults; k++) vals[k] = JS_GetPropertyUint32(ctx, v, k);
     begin(ST_OK);
-    r = encode_values(&out, m->results, m->nresults, vals, (int)m->nresults, "result", 0);
+    r = encode_values(&enc, m->results, m->nresults, vals, (int)m->nresults, "result", 0);
     for (uint32_t k = 0; k < m->nresults; k++) JS_FreeValue(ctx, vals[k]);
     free(vals);
   }
-  if (r < 0) {
-    if (!conv[0]) return failure(ST_ERROR, NULL);
-    return message(ST_CONVERT, conv, strlen(conv));
-  }
-  return packed();
+  uint64_t res;
+  if (r == 0)
+    res = packed();
+  else if (enc.conv[0])
+    res = message(ST_CONVERT, enc.conv, strlen(enc.conv));
+  else
+    res = failure(ST_ERROR, NULL);
+  free(enc.trail.p);
+  return res;
 }
 
 // invoke decodes the arguments of the interface method with the given index from the input buffer and calls the
