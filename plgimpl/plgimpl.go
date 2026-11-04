@@ -45,6 +45,19 @@ type (
 	}
 )
 
+// The predeclared types generated code names, for a contract package that redeclares their names: its
+// generated code cannot refer to the predeclared types directly.
+type (
+	Bool    = bool
+	Byte    = byte
+	Error   = error
+	Float64 = float64
+	Int     = int
+	Int64   = int64
+	String  = string
+	Uint64  = uint64
+)
+
 // AppendBool appends a bool.
 //
 //nolint:revive // flag-parameter: v is the encoded value, not a control flag

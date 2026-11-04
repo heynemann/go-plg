@@ -148,25 +148,39 @@ type fastIface struct {
 }
 
 // renderFastPaths renders the fast paths of the interfaces ifaces, declared as names, into body and returns, per
-// interface, the Contract fields registering them (empty for an interface that has none).
-func renderFastPaths(body *bytes.Buffer, n *namer, names []string, ifaces []*types.Interface) []string {
+// interface, the Contract fields registering them (empty for an interface that has none). It fails when the
+// package redeclares a predeclared identifier the fast paths need.
+func renderFastPaths(body *bytes.Buffer, n *namer, names []string, ifaces []*types.Interface) ([]string, error) {
 	fast := newFastGen(n)
 	registrations := make([]string, len(names))
 
 	for i, name := range names {
 		if paths, ok := fast.iface(body, name, ifaces[i]); ok {
-			registrations[i] = fast.code("\t\tFast: func(inv {impl}.Invoker) any { return &{adapter}{{inv}: inv} },\n"+
-				"\t\tLayout: {layout},\n", "{adapter}", paths.adapter, "{layout}", strconv.Quote(paths.layout))
+			registrations[i] = fast.code(
+				"\t\tFast: func(inv {impl}.Invoker) {=any} { return &{adapter}{{inv}: inv} },\n"+
+					"\t\tLayout: {layout},\n",
+				"{adapter}",
+				paths.adapter,
+				"{layout}",
+				strconv.Quote(paths.layout),
+			)
 		}
+	}
+
+	if !slices.ContainsFunc(registrations, func(fields string) bool { return fields != "" }) {
+		delete(n.imports, plgimplImportPath) // no interface could have fast paths
+
+		return registrations, nil
+	}
+
+	err := n.checkUnshadowed(predeclaredBuiltins)
+	if err != nil {
+		return nil, err
 	}
 
 	body.Write(fast.funcs.Bytes())
 
-	if !slices.ContainsFunc(registrations, func(fields string) bool { return fields != "" }) {
-		delete(n.imports, plgimplImportPath) // no interface could have fast paths
-	}
-
-	return registrations
+	return registrations, nil
 }
 
 // localNames are the variables of the generated functions. Each gets a name distinct from every package-level
@@ -175,13 +189,35 @@ func renderFastPaths(body *bytes.Buffer, n *namer, names []string, ifaces []*typ
 //nolint:gochecknoglobals // immutable list
 var localNames = []string{"b", "v", "r", "depth", "err", "n", "m", "s", "p", "i", "k", "e", "present", "c", "inv"}
 
+// predeclaredTypes are the predeclared types the generated functions name, as {=name} in templates: the
+// predeclared name, or, when the contract package redeclares it, a name of the same type that the package
+// cannot shadow.
+//
+//nolint:gochecknoglobals // immutable list
+var predeclaredTypes = []string{"any", "bool", "byte", "error", "float64", "int", "int64", "string", "uint64"}
+
+// predeclaredBuiltins are the other predeclared identifiers the generated functions use. They have no
+// unshadowable equivalent, so plg gen refuses a contract package that redeclares one.
+//
+//nolint:gochecknoglobals // immutable list
+var predeclaredBuiltins = []string{"false", "len", "make", "new", predeclaredNil, "true"}
+
+// predeclaredNil is nil, which every adapter uses.
+const predeclaredNil = "nil"
+
 func newFastGen(n *namer) *fastGen {
-	g := &fastGen{n: n, pairs: []string{"{impl}", n.importAs(plgimplImportPath, "plgimpl")}}
+	impl := n.importAs(plgimplImportPath, "plgimpl")
+	fast := &fastGen{n: n, pairs: []string{"{impl}", impl}}
+
 	for _, name := range localNames {
-		g.pairs = append(g.pairs, "{"+name+"}", n.unique(name))
+		fast.pairs = append(fast.pairs, "{"+name+"}", n.unique(name))
 	}
 
-	return g
+	for _, name := range predeclaredTypes {
+		fast.pairs = append(fast.pairs, "{="+name+"}", n.predeclaredType(name, impl))
+	}
+
+	return fast
 }
 
 // code expands the template: {impl} is plgimpl's local name, {b}, {v}, ... the local variables' names, and vars
@@ -326,11 +362,11 @@ func (g *fastGen) callType(body *bytes.Buffer, iface, call string, meth layout.M
 
 	encErr, decErr := "", ""
 	if fallible {
-		encErr = g.code("\tvar {err} error\n\n")
+		encErr = g.code("\tvar {err} {=error}\n\n")
 	}
 
 	if len(meth.Results) > 0 {
-		decErr = g.code("\tvar {err} error\n\n")
+		decErr = g.code("\tvar {err} {=error}\n\n")
 	}
 
 	body.WriteString(g.code(`
@@ -339,12 +375,12 @@ type {call} struct {
 {fields}}
 
 // AppendArgs implements plgimpl.Call.
-func ({c} *{call}) AppendArgs({b} []byte) ([]byte, error) {
+func ({c} *{call}) AppendArgs({b} []{=byte}) ([]{=byte}, {=error}) {
 {encErr}{enc}	return {b}, nil
 }
 
 // DecodeResults implements plgimpl.Call.
-func ({c} *{call}) DecodeResults({r} *{impl}.Reader) error {
+func ({c} *{call}) DecodeResults({r} *{impl}.Reader) {=error} {
 {decErr}{dec}	return nil
 }
 `, "{call}", call, "{iface}", iface, "{method}", meth.Name, "{fields}", fields.String(), "{encErr}", encErr,
@@ -376,20 +412,24 @@ type scalarCode struct {
 //nolint:gochecknoglobals // immutable lookup table
 var scalarCodes = func() map[layout.Kind]scalarCode {
 	codes := map[layout.Kind]scalarCode{
-		layout.Bool:    {"{b} = {impl}.AppendBool({b}, bool({lv}))", "ReadBool[{T}]({r})", false},
-		layout.Float32: {"{b} = {impl}.AppendFloat({b}, float64({lv}))", "ReadFloat32[{T}]({r}, {name})", false},
-		layout.Float64: {"{b} = {impl}.AppendFloat({b}, float64({lv}))", "ReadFloat64[{T}]({r})", false},
-		layout.String:  {"{b}, {err} = {impl}.AppendString({b}, string({lv}))", "ReadString[{T}]({r})", true},
+		layout.Bool:    {"{b} = {impl}.AppendBool({b}, {=bool}({lv}))", "ReadBool[{T}]({r})", false},
+		layout.Float32: {"{b} = {impl}.AppendFloat({b}, {=float64}({lv}))", "ReadFloat32[{T}]({r}, {name})", false},
+		layout.Float64: {"{b} = {impl}.AppendFloat({b}, {=float64}({lv}))", "ReadFloat64[{T}]({r})", false},
+		layout.String:  {"{b}, {err} = {impl}.AppendString({b}, {=string}({lv}))", "ReadString[{T}]({r})", true},
 		layout.Time:    {"{b}, {err} = {impl}.AppendTime({b}, {lv})", "ReadTime({r})", true},
 	}
 
 	for _, kind := range []layout.Kind{layout.Int, layout.Int8, layout.Int16, layout.Int32, layout.Int64} {
-		codes[kind] = scalarCode{"{b}, {err} = {impl}.AppendInt({b}, int64({lv}))", "ReadInt[{T}]({r}, {name})", true}
+		codes[kind] = scalarCode{
+			"{b}, {err} = {impl}.AppendInt({b}, {=int64}({lv}))",
+			"ReadInt[{T}]({r}, {name})",
+			true,
+		}
 	}
 
 	for _, kind := range []layout.Kind{layout.Uint, layout.Uint8, layout.Uint16, layout.Uint32, layout.Uint64} {
 		codes[kind] = scalarCode{
-			"{b}, {err} = {impl}.AppendUint({b}, uint64({lv}))",
+			"{b}, {err} = {impl}.AppendUint({b}, {=uint64}({lv}))",
 			"ReadUint[{T}]({r}, {name})",
 			true,
 		}
@@ -406,7 +446,7 @@ func codeOf(node *layout.Node[types.Type]) scalarCode {
 	}
 
 	if slice, ok := node.Type.Underlying().(*types.Slice); ok && types.Identical(slice.Elem(), types.Typ[types.Uint8]) {
-		return scalarCode{"{b}, {err} = {impl}.AppendBytes({b}, []byte({lv}))", "ReadBytes[{T}]({r})", true}
+		return scalarCode{"{b}, {err} = {impl}.AppendBytes({b}, []{=byte}({lv}))", "ReadBytes[{T}]({r})", true}
 	}
 
 	return scalarCode{"{b}, {err} = {impl}.AppendByteSlice({b}, {lv})", "ReadByteSlice[{T}]({r})", true}
@@ -481,7 +521,7 @@ func (g *fastGen) encoder(codec *typeCodec) string {
 		body = g.structEncoder(node)
 	}
 
-	return g.code("\nfunc {enc}({b} []byte, {v} *{T}, {depth} int) ([]byte, error) {\n"+body+"}\n",
+	return g.code("\nfunc {enc}({b} []{=byte}, {v} *{T}, {depth} {=int}) ([]{=byte}, {=error}) {\n"+body+"}\n",
 		"{enc}", codec.enc, "{T}", g.typeString(codec.node))
 }
 
@@ -523,13 +563,13 @@ func (g *fastGen) mapEncoder(node *layout.Node[types.Type]) string {
 	}
 
 	for {k}, {e} := range *{v} {
-		{b}, {err} = {impl}.AppendString({b}, string({k}))
+		{b}, {err} = {impl}.AppendString({b}, {=string}({k}))
 		if {err} == nil {
 			` + stmt + `
 		}
 
 		if {err} != nil {
-			return {b}, {impl}.AtKey({err}, string({k}))
+			return {b}, {impl}.AtKey({err}, {=string}({k}))
 		}
 	}
 
@@ -598,7 +638,7 @@ func (g *fastGen) decoder(codec *typeCodec) string {
 		body = g.structDecoder(node)
 	}
 
-	return g.code("\nfunc {dec}({r} *{impl}.Reader, {v} *{T}, {depth} int) error {\n"+body+"}\n",
+	return g.code("\nfunc {dec}({r} *{impl}.Reader, {v} *{T}, {depth} {=int}) {=error} {\n"+body+"}\n",
 		"{dec}", codec.dec, "{T}", g.typeString(codec.node))
 }
 
@@ -640,7 +680,7 @@ func (g *fastGen) mapDecoder(node *layout.Node[types.Type]) string {
 
 		` + g.decode(node.Elem, g.code("{e}"), g.code("&{e}"), g.code("{depth}+1")) + `
 		if {err} != nil {
-			return {impl}.AtKey({err}, string({k}))
+			return {impl}.AtKey({err}, {=string}({k}))
 		}
 
 		{m}[{k}] = {e}

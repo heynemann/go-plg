@@ -45,6 +45,9 @@ var (
 	ErrInterface = errors.New("not an interface plg can adapt")
 	// ErrNotGenerated reports an output file that plg gen did not generate, which it never overwrites.
 	ErrNotGenerated = errors.New("refusing to overwrite a file plg gen did not generate")
+	// ErrPredeclared reports a contract package redeclaring a predeclared identifier the generated code needs
+	// and cannot name otherwise.
+	ErrPredeclared = errors.New("the contract package redeclares a predeclared identifier plg gen's code needs")
 )
 
 const (

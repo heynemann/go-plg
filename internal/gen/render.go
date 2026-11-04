@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/format"
 	"go/types"
+	"iter"
 	"maps"
 	"path"
 	"slices"
@@ -55,6 +56,119 @@ func (n *namer) importAs(importPath, name string) string {
 	return local
 }
 
+// predeclaredType returns how the generated file names the predeclared type name: by its name, unless the
+// package redeclares it, then as an empty interface literal (any) or through plgimpl's alias, whose local
+// name is impl.
+func (n *namer) predeclaredType(name, impl string) string {
+	switch {
+	case !n.taken[name]:
+		return name
+	case name == "any":
+		return "interface{}"
+	default:
+		return impl + "." + strings.ToUpper(name[:1]) + name[1:]
+	}
+}
+
+// checkUnshadowed fails when the package redeclares one of the predeclared identifiers names, which the
+// generated file uses and cannot name otherwise.
+func (n *namer) checkUnshadowed(names []string) error {
+	var shadowed []string
+
+	for _, name := range names {
+		if n.pkg.Scope().Lookup(name) != nil {
+			shadowed = append(shadowed, name)
+		}
+	}
+
+	if len(shadowed) > 0 {
+		return fmt.Errorf("%w: package %s declares %s", ErrPredeclared, n.pkg.Name(), strings.Join(shadowed, ", "))
+	}
+
+	return nil
+}
+
+// checkSignatures fails when a method of ifaces mentions a predeclared type the package redeclares, such as
+// the int of an embedded io.Reader's Read in a package declaring int: the generated file, in the package,
+// could not name it.
+func checkSignatures(pkg *types.Package, names []string, ifaces []*types.Interface) error {
+	for i, iface := range ifaces {
+		for method := range iface.Methods() {
+			if name, ok := shadowedIn(pkg, method.Type()); ok {
+				return fmt.Errorf("%w: %s.%s mentions the predeclared %s, which package %s redeclares",
+					ErrPredeclared, names[i], method.Name(), name, pkg.Name())
+			}
+		}
+	}
+
+	return nil
+}
+
+// shadowedIn returns the name of a predeclared type that the type string of typ mentions and pkg redeclares.
+func shadowedIn(pkg *types.Package, typ types.Type) (string, bool) {
+	var obj types.Object
+
+	switch concrete := typ.(type) {
+	case *types.Basic:
+		return concrete.Name(), pkg.Scope().Lookup(concrete.Name()) != nil
+	case *types.Alias:
+		obj = concrete.Obj()
+	case *types.Named:
+		obj = concrete.Obj()
+	default:
+	}
+
+	if obj != nil && obj.Pkg() == nil { // any or error
+		return obj.Name(), pkg.Scope().Lookup(obj.Name()) != nil
+	}
+
+	for _, part := range typeParts(typ) {
+		if name, ok := shadowedIn(pkg, part); ok {
+			return name, ok
+		}
+	}
+
+	return "", false
+}
+
+// typeParts returns the types the type string of t mentions, other than t itself.
+func typeParts(t types.Type) []types.Type {
+	var parts []types.Type
+
+	switch typ := t.(type) {
+	case *types.Named:
+		parts = slices.Collect(typ.TypeArgs().Types())
+	case *types.Map:
+		parts = []types.Type{typ.Key(), typ.Elem()}
+	case interface{ Elem() types.Type }: // pointers, slices, arrays and channels
+		parts = []types.Type{typ.Elem()}
+	case *types.Signature:
+		parts = append(varTypes(typ.Params().Variables()), varTypes(typ.Results().Variables())...)
+	case *types.Struct:
+		parts = varTypes(typ.Fields())
+	case *types.Interface:
+		for method := range typ.ExplicitMethods() {
+			parts = append(parts, method.Type())
+		}
+
+		parts = slices.AppendSeq(parts, typ.EmbeddedTypes())
+	default: // basic types, aliases, type parameters and unions: the contract's interfaces are not generic
+	}
+
+	return parts
+}
+
+// varTypes returns the types of vars.
+func varTypes(vars iter.Seq[*types.Var]) []types.Type {
+	var typs []types.Type
+
+	for v := range vars {
+		typs = append(typs, v.Type())
+	}
+
+	return typs
+}
+
 // qualify is the generated file's types.Qualifier: the package's own types are unqualified, every other
 // package is imported.
 func (n *namer) qualify(pkg *types.Package) string {
@@ -68,6 +182,15 @@ func (n *namer) qualify(pkg *types.Package) string {
 // render returns the generated file for the interfaces ifaces, declared as names in pkg, with their fast paths
 // unless opts.Generic.
 func render(pkg *types.Package, names []string, ifaces []*types.Interface, opts Options) ([]byte, error) {
+	err := checkSignatures(pkg, names, ifaces)
+	if err == nil {
+		err = newNamer(pkg).checkUnshadowed([]string{predeclaredNil}) // every adapter asserts (*adapter)(nil)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
 	n := newNamer(pkg)
 	embedPkg := n.importAs("embed", "embed")
 	reflectPkg := n.importAs("reflect", "reflect")
@@ -90,7 +213,10 @@ func render(pkg *types.Package, names []string, ifaces []*types.Interface, opts 
 
 	registrations := make([]string, len(names))
 	if !opts.Generic {
-		registrations = renderFastPaths(&body, n, names, ifaces)
+		registrations, err = renderFastPaths(&body, n, names, ifaces)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	body.WriteString("\nfunc init() {\n")

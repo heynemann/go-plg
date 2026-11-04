@@ -123,6 +123,17 @@ type (
 	Unsigned interface{ ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 }
 )
 
+type (
+	Bool    = bool
+	Byte    = byte
+	Error   = error
+	Float64 = float64
+	Int     = int
+	Int64   = int64
+	String  = string
+	Uint64  = uint64
+)
+
 func AppendBool(b []byte, v bool) []byte                               { return b }
 func AppendInt(b []byte, v int64) ([]byte, error)                      { return b, nil }
 func AppendUint(b []byte, v uint64) ([]byte, error)                    { return b, nil }
@@ -575,6 +586,68 @@ type Fooer interface {
 			ifaces:   []string{"Fooer"},
 			adapters: map[string]string{"Fooer": "plgFooer"},
 		},
+		{
+			name: "redeclared predeclared types",
+			files: map[string]string{"c.go": `package c
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
+
+type (
+	int     = uint16
+	any     = int
+	bool    = int
+	byte    = int
+	float64 = int
+	int64   = int
+	string  = int
+	uint64  = int
+)
+
+type Rec struct {
+	N int8
+	U uint32
+	F float32
+	B []uint8
+	M map[json.Number]*Rec
+	S []Rec
+	T time.Time
+	J json.Number
+	X any
+}
+
+type Svc interface {
+	Do(ctx context.Context, r Rec, n json.Number, x any) (*Rec, error)
+}
+`},
+			ifaces:   []string{"Svc"},
+			adapters: map[string]string{"Svc": "plgSvc"},
+			fast:     map[string]string{"Svc": "plgSvcFast"},
+			want: []string{
+				"Fast:      func(inv plgimpl.Invoker) interface{} { return &plgSvcFast{inv: inv} },",
+				"func (c *plgSvcDoCall) AppendArgs(b []plgimpl.Byte) ([]plgimpl.Byte, error) {",
+				"func plgEncode(b []plgimpl.Byte, v *map[json.Number]*Rec, depth plgimpl.Int) ([]plgimpl.Byte, error) {",
+			},
+		},
+		{
+			name: "redeclared error",
+			files: map[string]string{"c.go": `package c
+
+import "context"
+
+type error interface{ Error() int }
+
+type Fooer interface {
+	Foo(ctx context.Context) error
+}
+`},
+			ifaces:   []string{"Fooer"},
+			adapters: map[string]string{"Fooer": "plgFooer"},
+			unwanted: []string{"plgimpl", "Fast:"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -747,6 +820,25 @@ func TestGenerateErrors(t *testing.T) {
 		{
 			name: "second interface invalid", ifaces: []string{"Fooer", "Barer"}, err: gen.ErrInterface,
 			files: map[string]string{"c.go": fooer},
+		},
+		{
+			name: "nil redeclared", ifaces: []string{"Fooer"}, err: gen.ErrPredeclared,
+			msg:   []string{"package c declares nil"},
+			files: map[string]string{"c.go": fooer + "\nvar nil = 0\n"},
+		},
+		{
+			name: "builtins the fast paths use redeclared", ifaces: []string{"Fooer"}, err: gen.ErrPredeclared,
+			msg:   []string{"package c declares len, make"},
+			files: map[string]string{"c.go": fooer + "\nfunc len() {}\n\nvar make = 0\n"},
+		},
+		{
+			name:   "redeclared predeclared type in an embedded method",
+			ifaces: []string{"Reader"},
+			err:    gen.ErrPredeclared,
+			msg:    []string{"Reader.Read mentions the predeclared int, which package c redeclares"},
+			files: map[string]string{
+				"c.go": "package c\n\nimport \"io\"\n\ntype int = string\n\ntype Reader interface{ io.Reader }\n",
+			},
 		},
 	}
 
