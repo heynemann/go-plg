@@ -11,7 +11,9 @@
 // ignored. A manifest without a version gets one from the plugin's object listing (each object's path, size and
 // ETag), so a poll ([plg.WithPollInterval]) costs one listing of the prefix and detects changes without
 // downloading any plugin file; each manifest is downloaded again only when its ETag changes. Open downloads a
-// plugin's objects, at most [DefaultMaxPluginSize] bytes together unless [WithMaxPluginSize] says otherwise.
+// plugin's objects, at most [DefaultMaxPluginSize] bytes together unless [WithMaxPluginSize] says otherwise. List and
+// Open stop paging through a listing, failing with [plg.ErrPluginTooLarge], as soon as it brings a plugin directory
+// over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of object paths together.
 package s3storage
 
 import (
@@ -124,25 +126,19 @@ type object struct {
 }
 
 // List lists the prefix and returns its plugins, sorted by key. It fails with [plg.ErrInvalidManifest], naming
-// the plugin, if a plugin directory has no plugin.json or a malformed one.
+// the plugin, if a plugin directory has no plugin.json or a malformed one, and with [plg.ErrPluginTooLarge] as soon
+// as the listing brings a plugin directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of
+// object paths, which Register would refuse to copy (see [Storage.Open]).
 func (s *Storage) List(ctx context.Context) ([]plg.Descriptor, error) {
-	dirs := make(map[string][]object)
-
-	err := s.walk(ctx, s.prefix, func(key string, obj object) {
-		dir, path, ok := strings.Cut(key, "/")
-		if ok && dir != "" && !strings.HasPrefix(dir, ".") && path != "" && !strings.HasSuffix(path, "/") {
-			obj.path = path
-			dirs[dir] = append(dirs[dir], obj)
-		}
-	})
+	dirs, err := s.listDirs(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	descs := make([]plg.Descriptor, 0, len(dirs))
 
-	for dir, objects := range dirs {
-		desc, err := s.describe(ctx, dir, objects)
+	for dir, listed := range dirs {
+		desc, err := s.describe(ctx, dir, listed.objects)
 		if err != nil {
 			return nil, err
 		}
@@ -193,28 +189,82 @@ var (
 
 // Open downloads the objects of the plugin directory named by desc's key. It fails if the directory holds
 // nothing, if an object's key is not a valid path inside it (such as a/../b) or if they hold more than the
-// storage's maximum plugin size together.
+// storage's maximum plugin size together. Its listing stops, failing with [plg.ErrPluginTooLarge], as soon as it
+// brings the directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of object paths
+// together, before anything is downloaded: Register would refuse the plugin's files, and a listing of S3 has no end
+// of its own.
 func (s *Storage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
 	dir := desc.Key
 	if dir == "" || dir == "." || dir == ".." || strings.Contains(dir, "/") {
 		return nil, fmt.Errorf("%w %q: %w", plg.ErrInvalidDescriptor, dir, errPluginKey)
 	}
 
-	var objects []object
+	var listed listing
 
-	err := s.walk(ctx, s.prefix+dir+"/", func(path string, obj object) {
-		obj.path = path
-		objects = append(objects, obj)
+	err := s.walk(ctx, s.prefix+dir+"/", func(path string, obj object) error {
+		return listed.add(dir, path, obj)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return s.fetch(ctx, dir, objects)
+	return s.fetch(ctx, dir, listed.objects)
 }
 
-// walk calls fn with every object under prefix, its key relative to prefix.
-func (s *Storage) walk(ctx context.Context, prefix string, fn func(key string, obj object)) error {
+// listDirs lists the prefix and returns the objects of each plugin directory, by its name.
+func (s *Storage) listDirs(ctx context.Context) (map[string]*listing, error) {
+	dirs := make(map[string]*listing)
+
+	err := s.walk(ctx, s.prefix, func(key string, obj object) error {
+		dir, path, ok := strings.Cut(key, "/")
+		if !ok || dir == "" || strings.HasPrefix(dir, ".") || path == "" || strings.HasSuffix(path, "/") {
+			return nil
+		}
+
+		listed := dirs[dir]
+		if listed == nil {
+			listed = &listing{}
+			dirs[dir] = listed
+		}
+
+		return listed.add(dir, path, obj)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return dirs, nil
+}
+
+// listing is the objects of a plugin directory listed so far, and the bytes of their paths together.
+type listing struct {
+	objects []object
+	paths   int
+}
+
+// add adds obj, at path in the plugin directory dir, failing with [plg.ErrPluginTooLarge] when it brings the
+// directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of paths.
+func (l *listing) add(dir, path string, obj object) error {
+	l.paths += len(path)
+
+	switch {
+	case len(l.objects) == plg.MaxPluginEntries:
+		return fmt.Errorf("s3storage: plugin directory %s: %w: over %d objects",
+			dir, plg.ErrPluginTooLarge, plg.MaxPluginEntries)
+	case l.paths > plg.MaxPluginPathBytes:
+		return fmt.Errorf("s3storage: plugin directory %s: %w: object paths over %d bytes together",
+			dir, plg.ErrPluginTooLarge, plg.MaxPluginPathBytes)
+	}
+
+	obj.path = path
+	l.objects = append(l.objects, obj)
+
+	return nil
+}
+
+// walk calls fn with every object under prefix, its key relative to prefix, page by page, stopping at the first
+// error fn returns.
+func (s *Storage) walk(ctx context.Context, prefix string, fn func(key string, obj object) error) error {
 	pages := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(s.bucket),
 		Prefix:  aws.String(prefix),
@@ -229,7 +279,11 @@ func (s *Storage) walk(ctx context.Context, prefix string, fn func(key string, o
 
 		for _, obj := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(obj.Key), prefix)
-			fn(key, object{etag: aws.ToString(obj.ETag), size: aws.ToInt64(obj.Size)})
+
+			err = fn(key, object{etag: aws.ToString(obj.ETag), size: aws.ToInt64(obj.Size)})
+			if err != nil {
+				return err
+			}
 		}
 	}
 

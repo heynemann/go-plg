@@ -10,9 +10,11 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests with a plugin containing too many empty files, too many empty directories, and an over-long total of path bytes reproduces the bug (fails on the current code) and passes with the fix
+**Resolution:** `plg.MaxPluginEntries` (16,384 directory entries of any kind) and `plg.MaxPluginPathBytes` (2 MiB of entry paths together), next to `MaxPluginSize`, bound the listing: directories are read through `fs.ReadDirFile` in batches charged as they are read, so the read that brings a plugin over is its last (an fs.FS whose directories are not one is read a directory at a time through `fs.ReadDirFS`, documented); the S3 example's List and Open stop paging at the page that brings a plugin over. See PLAN.md, "Second adversarial review fixes", 04.
+
+- [x] Tests with a plugin containing too many empty files, too many empty directories, and an over-long total of path bytes reproduces the bug (fails on the current code) and passes with the fix
 Each fails with `ErrPluginTooLarge` naming the plugin before the listing is fully read (allocation measured)
 Limits exported/documented next to `MaxPluginSize`; S3 example honours them
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

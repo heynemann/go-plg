@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -446,6 +448,123 @@ func TestStorageReadsEveryPageOfAListing(t *testing.T) {
 	files, err := store.Open(t.Context(), plg.Descriptor{Key: "coupon"})
 	require.NoError(t, err)
 	require.NoError(t, fstest.TestFS(files, "plugin.json", "rule.ts", "coupons.ts"))
+}
+
+// generatingClient lists a real client's objects, then makes up pages of objects of the plugin directory dir,
+// named by name, that it never stores, up to most pages. It counts the pages it made up.
+type generatingClient struct {
+	*s3.Client
+
+	name  func(i int) string
+	dir   string
+	most  int
+	pages atomic.Int32
+}
+
+const generatedToken = "generated:"
+
+func (c *generatingClient) ListObjectsV2(
+	ctx context.Context, input *s3.ListObjectsV2Input, opts ...func(*s3.Options),
+) (*s3.ListObjectsV2Output, error) {
+	page, generated := strings.CutPrefix(aws.ToString(input.ContinuationToken), generatedToken)
+	if !generated {
+		out, err := c.Client.ListObjectsV2(ctx, input, opts...)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // passes the real client's answer through
+		}
+
+		if !aws.ToBool(out.IsTruncated) { // the real listing ends: the made-up one starts
+			out.IsTruncated = aws.Bool(true)
+			out.NextContinuationToken = aws.String(generatedToken + "0")
+		}
+
+		return out, nil
+	}
+
+	n, err := strconv.Atoi(page)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // a token this client made, never malformed
+	}
+
+	c.pages.Add(1)
+
+	size := int(aws.ToInt32(input.MaxKeys))
+	out := &s3.ListObjectsV2Output{Contents: make([]types.Object, size)}
+
+	for i := range out.Contents {
+		out.Contents[i] = types.Object{Key: aws.String(c.dir + "/" + c.name(n*size+i)), Size: aws.Int64(0)}
+	}
+
+	if n+1 < c.most {
+		out.IsTruncated = aws.Bool(true)
+		out.NextContinuationToken = aws.String(generatedToken + strconv.Itoa(n+1))
+	}
+
+	return out, nil
+}
+
+// A listing that brings a plugin directory over plg.MaxPluginEntries objects, or plg.MaxPluginPathBytes bytes of
+// object paths, stops at the page that does: List and Open fail with plg.ErrPluginTooLarge, naming the plugin,
+// without reading the rest of the listing (a hundred pages of made-up objects) or downloading anything.
+func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
+	t.Parallel()
+
+	bucket := newBucket(t)
+	put(t, bucket, "many/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+
+	const (
+		pages    = 100
+		pageSize = 1000
+		nameSize = 1000
+		// the objects that bring a plugin over each limit (made-up ones; plugin.json only adds to them)
+		entries = plg.MaxPluginEntries + 1
+		named   = plg.MaxPluginPathBytes/nameSize + 1
+	)
+
+	tests := []struct {
+		object    func(i int) string
+		name      string
+		mostPages int32
+	}{
+		{
+			name:      "too many objects",
+			object:    func(i int) string { return fmt.Sprintf("f%07d", i) },
+			mostPages: (entries + pageSize - 1) / pageSize,
+		},
+		{
+			name:      "paths too long",
+			object:    func(i int) string { return fmt.Sprintf("%07d", i) + strings.Repeat("x", nameSize-7) },
+			mostPages: (named + pageSize - 1) / pageSize,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			calls := map[string]func(*s3storage.Storage) error{
+				"List": func(store *s3storage.Storage) error {
+					_, err := store.List(t.Context())
+
+					return err //nolint:wrapcheck // the storage's own error, which the test checks
+				},
+				"Open": func(store *s3storage.Storage) error {
+					_, err := store.Open(t.Context(), plg.Descriptor{Key: "many"})
+
+					return err //nolint:wrapcheck // the storage's own error, which the test checks
+				},
+			}
+
+			for name, call := range calls {
+				generating := &generatingClient{Client: client, dir: "many", name: tc.object, most: pages}
+
+				err := call(s3storage.New(generating, bucket))
+				require.ErrorIs(t, err, plg.ErrPluginTooLarge, name)
+				require.ErrorContains(t, err, "plugin directory many", name)
+				assert.LessOrEqual(t, generating.pages.Load(), tc.mostPages, name)
+			}
+		})
+	}
 }
 
 func TestStorageDownloadFailures(t *testing.T) {

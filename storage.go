@@ -50,10 +50,11 @@ const LanguageTypeScript Language = "typescript"
 //
 // Register reads an opened plugin's files exactly once, into an in-memory snapshot it hashes (for an empty
 // Version), bundles and loads, so the files cannot change between those steps. The snapshot holds every regular
-// file, within [MaxPluginFileSize] and [MaxPluginSize], and the copy stops when Register's context ends. Symbolic
-// links (as fs.ReadDir reports them) are never followed: one that stays inside the plugin's files
-// is skipped, as if it were not there, and one whose target is absolute, leads out of the plugin's files or
-// cannot be read (the fs.FS is no fs.ReadLinkFS) fails the load, naming it. Other irregular files are skipped.
+// file, within the limits of [MaxPluginSize] (entry counts and path lengths included), and the copy stops when
+// Register's context ends. Symbolic links (as fs.ReadDir reports them) are never followed: one that stays inside
+// the plugin's files is skipped, as if it were not there, and one whose target is absolute, leads out of the
+// plugin's files or cannot be read (the fs.FS is no fs.ReadLinkFS) fails the load, naming it. Other irregular
+// files are skipped.
 //
 // Register copies an fs.FS through its own interface only: it walks the tree, judging links by the walk's
 // directory entries, then opens each regular file the walk listed by its name. It cannot tell a file the tree
@@ -76,10 +77,18 @@ type Storage interface {
 // The limits of a plugin's files, which Register copies into memory (see [Storage]): a regular file of more than
 // MaxPluginFileSize bytes, or regular files of more than MaxPluginSize bytes together, fail the load with
 // [ErrPluginTooLarge] before they are read, and a file that grows while it is read is read up to the limit only.
-// [FSStorage] and [MemoryStorage] copy plugins by the same rules.
+// The listing is bounded too, whatever the files hold: more than MaxPluginEntries directory entries (files,
+// directories, links and others, empty or not), or entries whose paths in the plugin's files add up to more than
+// MaxPluginPathBytes bytes, fail the load with [ErrPluginTooLarge] as soon as a directory read brings them over,
+// before the rest of the listing is read. Directories are read in bounded batches through [fs.ReadDirFile], which
+// the directories of os.DirFS, embed.FS, fstest.MapFS and [NewFSStorage] are; an fs.FS whose opened directories
+// are not is listed a directory at a time through its [fs.ReadDirFS], each checked once read. [FSStorage] and
+// [MemoryStorage] copy plugins by the same rules.
 const (
-	MaxPluginFileSize = 16 << 20
-	MaxPluginSize     = 64 << 20
+	MaxPluginFileSize  = 16 << 20
+	MaxPluginSize      = 64 << 20
+	MaxPluginEntries   = 1 << 14
+	MaxPluginPathBytes = 2 << 20
 )
 
 // Descriptor describes one plugin of a [Storage].
@@ -124,8 +133,8 @@ func (s *MemoryStorage) Name() string {
 }
 
 // Put adds the plugin desc, or replaces the plugin with the same key. It copies files as Register does (see
-// [Storage]), failing on a symbolic link out of them or files over the size limits, so later changes to files are
-// not seen.
+// [Storage]), failing on a symbolic link out of them or files over the limits (see [MaxPluginSize]), so later
+// changes to files are not seen.
 func (s *MemoryStorage) Put(desc Descriptor, files fs.FS) error {
 	if desc.Key == "" {
 		return fmt.Errorf("%w: memory storage %s: empty key", ErrInvalidDescriptor, s.name)
@@ -250,46 +259,175 @@ type sizedFile struct {
 
 // listFiles walks a plugin's files, checking their symbolic links, and returns their regular files and the sum of
 // their stated sizes. It fails before anything is read when a file states more than [MaxPluginFileSize] bytes or
-// the files more than [MaxPluginSize] together, and when ctx ends.
+// the files more than [MaxPluginSize] together, as soon as a directory read brings the entries over
+// [MaxPluginEntries] or their paths over [MaxPluginPathBytes], and when ctx ends. It walks as fs.WalkDir does
+// (lexical order, a directory's entries before the next directory's), but reads each directory in batches (see
+// listing.readDir), since fs.WalkDir reads a directory whole before anything can look at its entries.
 func listFiles(ctx context.Context, files fs.FS) ([]sizedFile, int, error) {
-	var (
-		regular []sizedFile
-		stated  int
-	)
+	walk := listing{files: files}
 
-	err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
+	err := walk.dir(ctx, ".")
+
+	return walk.regular, walk.stated, err
+}
+
+// listBatch is how many entries the walk of a plugin's files reads from a directory at once, at most.
+const listBatch = 256
+
+// listing is the walk of a plugin's files by listFiles: their regular files so far, the sum of their stated sizes,
+// and how many entries it has read and the bytes of their paths, which the limits bound.
+type listing struct {
+	files   fs.FS
+	regular []sizedFile
+	stated  int
+	entries int
+	paths   int
+}
+
+// dir walks the directory name and the directories below it, failing when ctx has ended by the time it reads a
+// directory.
+func (l *listing) dir(ctx context.Context, name string) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("listing %s: %w", name, err)
+	}
+
+	entries, err := l.readDir(name)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		child := path.Join(name, entry.Name())
+
 		switch {
-		case err != nil:
-			return err
-		case ctx.Err() != nil:
-			return fmt.Errorf("listing %s: %w", name, ctx.Err())
+		case entry.IsDir():
+			err = l.dir(ctx, child)
 		case entry.Type().IsRegular():
-			info, err := entry.Info()
-			if err != nil {
-				return err //nolint:wrapcheck // the walk's error, naming the file like the walk's others
-			}
-
-			size := max(info.Size(), 0)
-			if size > MaxPluginFileSize {
-				return fileTooLarge(name)
-			}
-
-			stated += int(size)
-			if stated > MaxPluginSize {
-				return pluginTooLarge(name)
-			}
-
-			regular = append(regular, sizedFile{name: name, size: int(size)})
-
-			return nil
+			err = l.file(child, entry)
 		case entry.Type()&fs.ModeSymlink != 0:
-			return checkLink(files, name)
-		default:
-			return nil
+			err = checkLink(l.files, child)
+		default: // other irregular files are left out
 		}
-	})
 
-	return regular, stated, err //nolint:wrapcheck // snapshotFiles wraps it
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// file adds the regular file name, whose directory entry is entry, failing when the size it states brings the
+// plugin over a limit.
+func (l *listing) file(name string, entry fs.DirEntry) error {
+	info, err := entry.Info()
+	if err != nil {
+		return err //nolint:wrapcheck // the file tree's error, naming the file like its others
+	}
+
+	size := max(info.Size(), 0)
+	if size > MaxPluginFileSize {
+		return fileTooLarge(name)
+	}
+
+	l.stated += int(size)
+	if l.stated > MaxPluginSize {
+		return pluginTooLarge(name)
+	}
+
+	l.regular = append(l.regular, sizedFile{name: name, size: int(size)})
+
+	return nil
+}
+
+// readDir returns the entries of the directory name, sorted by name, charged to the limits as they are read: an
+// [fs.ReadDirFile] in batches of at most listBatch, and one more than the entries left, so that reading stops at
+// the batch that brings the plugin over a limit. A directory that is no [fs.ReadDirFile] is read whole through
+// fs.ReadDir, then charged. A directory the walk listed that is not one when opened was replaced.
+func (l *listing) readDir(name string) ([]fs.DirEntry, error) {
+	dir, err := l.files.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the file tree's error, naming the directory like its others
+	}
+
+	entries, err := l.read(name, dir)
+
+	err = errors.Join(err, dir.Close())
+	if err != nil {
+		return nil, err
+	}
+
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+
+	return entries, nil
+}
+
+// read reads the entries of dir, the directory name, for readDir.
+func (l *listing) read(name string, dir fs.File) ([]fs.DirEntry, error) {
+	info, err := dir.Stat()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the file tree's error, naming the directory like its others
+	}
+
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s: %w", name, errReplaced)
+	}
+
+	batches, ok := dir.(fs.ReadDirFile)
+	if !ok {
+		entries, err := fs.ReadDir(l.files, name)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // the file tree's error, naming the directory like its others
+		}
+
+		return entries, l.charge(name, entries)
+	}
+
+	var entries []fs.DirEntry
+
+	for {
+		batch, err := batches.ReadDir(min(listBatch, MaxPluginEntries-l.entries+1))
+
+		chargeErr := l.charge(name, batch)
+		if chargeErr != nil {
+			return nil, chargeErr
+		}
+
+		entries = append(entries, batch...)
+
+		switch {
+		case errors.Is(err, io.EOF), err == nil && len(batch) == 0:
+			return entries, nil
+		case err != nil:
+			return nil, err //nolint:wrapcheck // the file tree's error, naming the directory like its others
+		}
+	}
+}
+
+// charge counts entries, read from the directory dir, against [MaxPluginEntries] and their paths against
+// [MaxPluginPathBytes], failing with the first entry over either, which it names.
+func (l *listing) charge(dir string, entries []fs.DirEntry) error {
+	prefix := len(dir) + len("/")
+	if dir == "." {
+		prefix = 0
+	}
+
+	for _, entry := range entries {
+		l.entries++
+		l.paths += prefix + len(entry.Name())
+
+		switch {
+		case l.entries > MaxPluginEntries:
+			return fmt.Errorf("%w: %s brings the plugin's files over %d entries",
+				ErrPluginTooLarge, path.Join(dir, entry.Name()), MaxPluginEntries)
+		case l.paths > MaxPluginPathBytes:
+			return fmt.Errorf("%w: %s brings the paths of the plugin's files over %d bytes",
+				ErrPluginTooLarge, path.Join(dir, entry.Name()), MaxPluginPathBytes)
+		}
+	}
+
+	return nil
 }
 
 // fileTooLarge reports the file name of a plugin, over [MaxPluginFileSize].

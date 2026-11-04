@@ -344,6 +344,10 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 		"unreadable contents": failingReadFS{files: files, broken: "p/sub/x.go"},
 		"unclosable file":     failingReadFS{files: files, broken: "p/sub/x.go", close: true},
 		"unstatable entry":    unstatableFS{files: files, broken: "p/sub/x.go"},
+		"unstatable dir":      brokenDirFS{files: files, broken: "p/sub", fail: "stat"},
+		"unreadable dir":      brokenDirFS{files: files, broken: "p/sub", fail: "read"},
+		"unclosable dir":      brokenDirFS{files: files, broken: "p/sub", fail: "close"},
+		"unreadable whole":    brokenDirFS{files: files, broken: "p/sub", fail: "whole"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -410,22 +414,31 @@ func (f unstatableFS) Open(name string) (fs.File, error) {
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
+	if dir, ok := file.(fs.ReadDirFile); ok {
+		return unstatableDir{ReadDirFile: dir, name: name, broken: f.broken}, nil
+	}
+
 	return file, nil
 }
 
-func (f unstatableFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	entries, err := f.files.ReadDir(name)
-	if err != nil {
-		return nil, fmt.Errorf("reading the directory: %w", err)
-	}
+// unstatableDir is the directory name of an unstatableFS.
+type unstatableDir struct {
+	fs.ReadDirFile
+
+	name   string
+	broken string
+}
+
+func (d unstatableDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	entries, err := d.ReadDirFile.ReadDir(n)
 
 	for i, entry := range entries {
-		if path.Join(name, entry.Name()) == f.broken {
+		if path.Join(d.name, entry.Name()) == d.broken {
 			entries[i] = unstatableEntry{entry}
 		}
 	}
 
-	return entries, nil
+	return entries, err //nolint:wrapcheck // the directory's own error, io.EOF at its end
 }
 
 type unstatableEntry struct {
@@ -433,6 +446,74 @@ type unstatableEntry struct {
 }
 
 func (unstatableEntry) Info() (fs.FileInfo, error) { return nil, errStorage }
+
+// brokenDirFS is files, except that the directory named broken fails: its Stat (stat), a read of its entries
+// (read) or its Close (close), or, with whole, a read of it as an fs.ReadDirFS, every directory it opens being no
+// fs.ReadDirFile.
+type brokenDirFS struct {
+	files  fstest.MapFS
+	broken string
+	fail   string
+}
+
+func (f brokenDirFS) Open(name string) (fs.File, error) {
+	file, err := f.files.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("opening: %w", err)
+	}
+
+	dir, ok := file.(fs.ReadDirFile)
+
+	switch {
+	case !ok:
+		return file, nil
+	case f.fail == "whole":
+		return struct{ fs.File }{file}, nil
+	case name == f.broken:
+		return brokenDir{ReadDirFile: dir, fail: f.fail}, nil
+	default:
+		return dir, nil
+	}
+}
+
+func (f brokenDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == f.broken {
+		return nil, errStorage
+	}
+
+	return f.files.ReadDir(name) //nolint:wrapcheck // the tree's own error, as an fs.FS returns it
+}
+
+// brokenDir is the broken directory of a brokenDirFS.
+type brokenDir struct {
+	fs.ReadDirFile
+
+	fail string
+}
+
+func (d brokenDir) Stat() (fs.FileInfo, error) {
+	if d.fail == "stat" {
+		return nil, errStorage
+	}
+
+	return d.ReadDirFile.Stat() //nolint:wrapcheck // the directory's own error, as an fs.File returns it
+}
+
+func (d brokenDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if d.fail == "read" {
+		return nil, errStorage
+	}
+
+	return d.ReadDirFile.ReadDir(n) //nolint:wrapcheck // the directory's own error, io.EOF at its end
+}
+
+func (d brokenDir) Close() error {
+	if d.fail == "close" {
+		return errStorage
+	}
+
+	return d.ReadDirFile.Close() //nolint:wrapcheck // the directory's own error, as an fs.File returns it
+}
 
 func TestFSStorageOpen(t *testing.T) {
 	t.Parallel()

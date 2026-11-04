@@ -65,9 +65,10 @@ const contentVersionPrefix = "sha256:"
 // Open copies the plugin directory into memory, as Register copies every storage's files (see [Storage]):
 // symbolic links are never followed; a link that stays inside the plugin directory is skipped, and one whose
 // target is absolute or leads out of the plugin directory fails the load, naming it. A file over
-// [MaxPluginFileSize] bytes, or files over [MaxPluginSize] bytes together, fail it with [ErrPluginTooLarge]
-// before they are read, and the copy stops when Open's context ends. The plugin then runs from that copy, so a
-// file changed during the load cannot be half seen.
+// [MaxPluginFileSize] bytes, files over [MaxPluginSize] bytes together, more than [MaxPluginEntries] entries or
+// entry paths over [MaxPluginPathBytes] bytes together fail it with [ErrPluginTooLarge] before they are read (the
+// directories in bounded batches), and the copy stops when Open's context ends. The plugin then runs from that
+// copy, so a file changed during the load cannot be half seen.
 //
 // Over a directory ([NewFSStorage]) these rules hold even while others write to it: the plugin directory, then
 // each directory and file below it, is opened relative to its open parent and must then be the very entry that

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/memfs"
@@ -73,16 +72,16 @@ func openRootDir(root *os.Root, name string) (*os.Root, error) {
 
 // nonblockingFS is an [os.Root] as an fs.FS, like its FS method's, whose opens never wait (see nonblockingRead):
 // List reads the plugin.json files it stated, and the walk of a plugin directory reads the directories it listed,
-// either of which may have become a FIFO since. Its ReadDir fails when what it opens is no directory: the walk
-// listed one there, which was replaced. beforeOpen, when not nil, is called with each name right before it is
-// opened.
+// either of which may have become a FIFO since. It is no [fs.ReadDirFS]: a directory is read from the file Open
+// returns, in the batches the walk asks for (see listFiles), and the walk fails when what it opened is no
+// directory (one was listed there, which was replaced). beforeOpen, when not nil, is called with each name right
+// before it is opened.
 type nonblockingFS struct {
 	root       *os.Root
 	beforeOpen func(name string)
 }
 
 var (
-	_ fs.ReadDirFS  = nonblockingFS{}
 	_ fs.StatFS     = nonblockingFS{}
 	_ fs.ReadLinkFS = nonblockingFS{}
 )
@@ -95,35 +94,6 @@ func (f nonblockingFS) Open(name string) (fs.File, error) {
 	}
 
 	return file, nil
-}
-
-// ReadDir reads the directory name without waiting, sorted by name, failing when name is no directory.
-func (f nonblockingFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	file, err := f.openFile(name)
-	if err != nil {
-		return nil, err
-	}
-
-	var entries []fs.DirEntry
-
-	info, err := file.Stat()
-
-	switch {
-	case err != nil:
-	case !info.IsDir():
-		err = fmt.Errorf("%s: %w", name, errReplaced)
-	default:
-		entries, err = file.ReadDir(-1)
-	}
-
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return nil, err
-	}
-
-	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
-
-	return entries, nil
 }
 
 // Stat returns the file information of name, following links inside the root.

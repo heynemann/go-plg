@@ -415,8 +415,15 @@ read) fails the plugin's load with an error naming it.
 The copy is bounded, in every storage: a regular file over `plg.MaxPluginFileSize` (16 MiB), or regular files
 over `plg.MaxPluginSize` (64 MiB) together, fail the load with `plg.ErrPluginTooLarge`, naming the plugin and
 the file, before they are read (every file counts, used by the plugin's language or not); a file growing while
-it is read is read up to what is left of the limits only. Ending Register's context stops the copy at the next
-file or read. `MemoryStorage.Put` and the FS storage's `Open` copy by the same rules.
+it is read is read up to what is left of the limits only. The listing is bounded too, so empty files,
+directories or long names cannot fill memory: more than `plg.MaxPluginEntries` (16,384) directory entries of any
+kind, or entry paths over `plg.MaxPluginPathBytes` (2 MiB) together, fail the load with `plg.ErrPluginTooLarge`
+as soon as a directory read brings the plugin over, before the rest is listed. Directories are read in batches
+through `fs.ReadDirFile`, which every directory of an `os.DirFS`, `embed.FS`, `fstest.MapFS` and `NewFSStorage`
+is; an `fs.FS` whose opened directories are not can only be listed a directory at a time, whole, through its
+`fs.ReadDirFS`. Ending Register's context stops the copy at the next directory, file or read. `MemoryStorage.Put`
+and the FS storage's `Open` copy by the same rules, and the S3 example stops paging through a listing that brings
+a plugin over the entry or path limit.
 
 Built in:
 
