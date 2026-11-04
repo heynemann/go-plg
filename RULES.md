@@ -125,3 +125,13 @@ This library runs third-party code inside other people's servers, so tests are t
   A single local command runs exactly the gates CI runs (set up in ticket 01). Use it rather than a subset.
 - **A failing gate means the work isn't done.** Fix the cause; never weaken a gate, skip a test, add an unjustified `//nolint` or use `--no-verify` to get a commit through.
 - **Never rewrite history** of commits that have already been pushed.
+
+## 7. Docker containers: never leave them running
+
+Orphaned containers keep eating memory on the developer's machine (Docker Desktop shares the WSL VM's memory with everything else), so cleanup is mandatory, not best effort.
+
+- **Any container started to test something MUST be terminated as soon as it isn't needed anymore.** This applies to containers started by tests (testcontainers), by scripts, by `make` targets and by hand while investigating. Leaving a container running after you're done with it is never acceptable.
+- **Tests own their containers:** terminate them in the same test, `TestMain` or helper that started them, with `defer`/`t.Cleanup`, so they go away whether the run passes, fails or panics. Keep testcontainers' reaper (Ryuk) enabled as a second line of defence for killed test processes; never disable it.
+- **Compose stacks:** a test run may need a compose stack to be running, and that's fine. But once the run completes **or fails**, the stack MUST be brought down (`docker compose down -v --remove-orphans`), e.g. from a `trap` in the script or a Make target that always runs the teardown.
+- **Interrupted runs:** if a run is killed (timeout, out-of-memory, Ctrl-C) before its cleanup ran, remove what it left behind before starting anything else.
+- **Verify after every run that starts containers:** `docker ps -a` must show nothing left over from it. A leftover container is a failing gate, like a leaked goroutine.
