@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/testcontract"
+	"github.com/heynemann/go-plg/internal/wire"
 )
 
 // registerHosted registers lang's hosted test plugin as "hosted/ref", with Register's context carrying
@@ -72,6 +74,43 @@ func TestHostMethodsReturnTypedResults(t *testing.T) {
 			got, err := hosted.Total(t.Context(), tc.base, tc.more...)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got, "variadic host method with %d, %v", tc.base, tc.more)
+		}
+	})
+}
+
+// TestMapsOfValuesThatEncodeAsNothingCross holds every language to decoding a map whose values encode as nothing
+// (struct{}), so an entry with an empty key is a bare 4-byte length prefix: as a plugin's argument and result and
+// as a host method's argument and result. A map claiming more entries than its input holds key prefixes for is
+// still rejected as truncated, however little each value needs.
+func TestMapsOfValuesThatEncodeAsNothingCross(t *testing.T) {
+	t.Parallel()
+
+	keys, ok := reflect.TypeFor[testcontract.Hosted]().MethodByName("Keys")
+	require.True(t, ok)
+
+	method := uint32(keys.Index) //nolint:gosec // G115: a method index is far below 2^32
+
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		ctr := newContainer(t)
+		hosted := hostedPlugin(t, lang, ctr)
+
+		for _, keys := range []map[string]struct{}{{"": {}}, {"": {}, "a": {}, "bc": {}}, {}} {
+			got, err := hosted.Keys(t.Context(), keys)
+			require.NoError(t, err)
+			assert.Equal(t, keys, got)
+		}
+
+		for _, args := range [][]byte{
+			{1, 0, 0, 0},                  // one entry, no key
+			{2, 0, 0, 0, 0, 0, 0, 0},      // two entries, one key
+			{1, 0, 0, 0, 2, 0, 0, 0, 'a'}, // a key cut short
+		} {
+			res, err := plg.CallRaw(t.Context(), ctr, "hosted/ref", method, args)
+			require.NoError(t, err)
+			assert.Equal(t, wire.StatusABI, res.Status, "%v", args)
+			assert.NotEmpty(t, res.Message, "%v", args)
 		}
 	})
 }

@@ -5,6 +5,7 @@ declare const host: {
   Value(): Promise<string>;
   Fail(msg: string): Promise<void>;
   Sum(base: number, more: number[] | null): Promise<number>;
+  Keys(keys: Record<string, object> | null): Promise<Record<string, object> | null>;
 };
 
 class Hosted {
@@ -35,6 +36,10 @@ class Hosted {
 
   Total(base: number, more: number[] | null) {
     return host.Sum(base, more);
+  }
+
+  Keys(keys: Record<string, object> | null) {
+    return host.Keys(keys);
   }
 }
 

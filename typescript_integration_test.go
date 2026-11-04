@@ -488,7 +488,8 @@ func TestTypeScriptHostArgumentsThatDoNotFitReject(t *testing.T) {
 		},
 		Value: () => host.Value(),
 		Origin: () => typeof host.Lookup + " " + Object.keys(host).sort().join(","),
-		Total: (base: number, more: number[]) => host.Sum(base, more)`)
+		Total: (base: number, more: number[]) => host.Sum(base, more),
+		Keys: (keys: object) => host.Keys(keys)`)
 	ctr := newContainer(t)
 	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
 		plg.WithStorage(tsSource(t, src)), plg.WithHost[testcontract.Host](newTestHost())))
@@ -509,7 +510,7 @@ func TestTypeScriptHostArgumentsThatDoNotFitReject(t *testing.T) {
 
 	got, err = hosted.Origin(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, "function Fail,Lookup,Sum,Value", got, "host has exactly the Host's methods")
+	assert.Equal(t, "function Fail,Keys,Lookup,Sum,Value", got, "host has exactly the Host's methods")
 
 	total, err := hosted.Total(t.Context(), 1, 2, 3)
 	require.NoError(t, err)

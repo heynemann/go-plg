@@ -28,6 +28,10 @@ function Hosted:Total(base, more)
   return host.Sum(base, more)
 end
 
+function Hosted:Keys(keys)
+  return host.Keys(keys)
+end
+
 -- Create calls the host once, so host calls work while Create runs.
 function Create()
   return setmetatable({ origin = host.Value() }, Hosted)

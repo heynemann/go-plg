@@ -53,3 +53,7 @@ func (h *hosted) Origin(context.Context) (string, error) {
 func (h *hosted) Total(ctx context.Context, base int, more ...int) (int, error) {
 	return h.host.Sum(ctx, base, more...)
 }
+
+func (h *hosted) Keys(ctx context.Context, keys map[string]struct{}) (map[string]struct{}, error) {
+	return h.host.Keys(ctx, keys)
+}

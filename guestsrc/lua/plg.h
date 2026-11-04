@@ -55,6 +55,8 @@ typedef struct plg_type {
   uint8_t kind;
   uint8_t bits;      /* numeric kinds */
   uint32_t elem;     /* slices, maps, pointers */
+  uint32_t min;      /* bytes of the smallest encoding, against which decoders check length prefixes */
+  uint8_t sizing;    /* min's state while the schema is parsed: 0 unknown, 1 being computed, 2 known */
   uint32_t nfields;  /* structs */
   plg_field *fields; /* structs */
 } plg_type;

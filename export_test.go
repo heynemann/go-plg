@@ -67,6 +67,29 @@ func HoldInstance(ctx context.Context, c *Container, key string) (Held, error) {
 	}, nil
 }
 
+// CallRaw calls the method with the given index of an instance of the plugin with the given key, the arguments
+// already encoded as args, then discards the instance: a test sends what no adapter would.
+func CallRaw(ctx context.Context, c *Container, key string, method uint32, args []byte) (engine.Result, error) {
+	gen, err := c.serving(key)
+	if err != nil {
+		return engine.Result{}, err
+	}
+
+	held, err := gen.pool.acquire(ctx)
+	if err != nil {
+		gen.leave()
+
+		return engine.Result{}, err
+	}
+
+	defer func() {
+		gen.pool.discard(context.WithoutCancel(ctx), held)
+		gen.leave()
+	}()
+
+	return held.inst.Call(ctx, method, args) //nolint:wrapcheck // the test reads the engine's own error
+}
+
 // PoolStats describes a plugin's pool.
 type PoolStats struct {
 	Size    int    // instances alive or starting

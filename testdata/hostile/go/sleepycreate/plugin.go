@@ -53,3 +53,7 @@ func (sleepy) Total(_ context.Context, base int, more ...int) (int, error) {
 
 	return base, nil
 }
+
+func (sleepy) Keys(_ context.Context, keys map[string]struct{}) (map[string]struct{}, error) {
+	return keys, nil
+}

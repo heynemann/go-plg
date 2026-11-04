@@ -8,9 +8,11 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A shared contract-suite case passing and returning `map[string]struct{}` with empty keys, as an argument and as a Host result reproduces the bug (fails on the current code) and passes with the fix
+- [x] A shared contract-suite case passing and returning `map[string]struct{}` with empty keys, as an argument and as a Host result reproduces the bug (fails on the current code) and passes with the fix
 Go, Lua and TS agree; truncated maps are still rejected
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+
+**Resolution:** Lua bounds a map's count by 4 bytes plus the value type's minimum size, computed once per schema; see PLAN.md, "Adversarial review fixes", 10. Test: `TestMapsOfValuesThatEncodeAsNothingCross`.

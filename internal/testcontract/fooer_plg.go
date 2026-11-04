@@ -108,6 +108,7 @@ func (a *plgShaper) Sum(p0 context.Context, p1 int, p2 ...int) (int, error) {
 // plgHosted implements Hosted for plg, which fills each W field with a call into a plugin.
 type plgHosted struct {
 	WDescribe func(context.Context, string) (User, error)
+	WKeys     func(context.Context, map[string]struct{}) (map[string]struct{}, error)
 	WOrigin   func(context.Context) (string, error)
 	WRelay    func(context.Context, string) (string, error)
 	WTotal    func(context.Context, int, ...int) (int, error)
@@ -118,6 +119,10 @@ var _ Hosted = (*plgHosted)(nil)
 
 func (a *plgHosted) Describe(p0 context.Context, p1 string) (User, error) {
 	return a.WDescribe(p0, p1)
+}
+
+func (a *plgHosted) Keys(p0 context.Context, p1 map[string]struct{}) (map[string]struct{}, error) {
+	return a.WKeys(p0, p1)
 }
 
 func (a *plgHosted) Origin(p0 context.Context) (string, error) {
@@ -963,10 +968,51 @@ func (c *plgHostedDescribeCall) DecodeResults(r *plgimpl.Reader) error {
 	return nil
 }
 
+func (a *plgHostedFast) Keys(p0 context.Context, p1 map[string]struct{}) (map[string]struct{}, error) {
+	c := plgHostedKeysCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgHostedKeysCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgHostedKeysCall is one call of Hosted.Keys: its arguments, then its results.
+type plgHostedKeysCall struct {
+	p1 map[string]struct{}
+	r0 map[string]struct{}
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgHostedKeysCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode15(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgHostedKeysCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode15(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
 func (a *plgHostedFast) Origin(p0 context.Context) (string, error) {
 	c := plgHostedOriginCall{}
 
-	err := a.inv.Invoke(p0, 1, &c)
+	err := a.inv.Invoke(p0, 2, &c)
 	if err != nil {
 		c = plgHostedOriginCall{}
 	}
@@ -999,7 +1045,7 @@ func (c *plgHostedOriginCall) DecodeResults(r *plgimpl.Reader) error {
 func (a *plgHostedFast) Relay(p0 context.Context, p1 string) (string, error) {
 	c := plgHostedRelayCall{p1: p1}
 
-	err := a.inv.Invoke(p0, 2, &c)
+	err := a.inv.Invoke(p0, 3, &c)
 	if err != nil {
 		c = plgHostedRelayCall{}
 	}
@@ -1040,7 +1086,7 @@ func (c *plgHostedRelayCall) DecodeResults(r *plgimpl.Reader) error {
 func (a *plgHostedFast) Total(p0 context.Context, p1 int, p2 ...int) (int, error) {
 	c := plgHostedTotalCall{p1: p1, p2: p2}
 
-	err := a.inv.Invoke(p0, 3, &c)
+	err := a.inv.Invoke(p0, 4, &c)
 	if err != nil {
 		c = plgHostedTotalCall{}
 	}
@@ -1087,7 +1133,7 @@ func (c *plgHostedTotalCall) DecodeResults(r *plgimpl.Reader) error {
 func (a *plgHostedFast) Value(p0 context.Context) (string, error) {
 	c := plgHostedValueCall{}
 
-	err := a.inv.Invoke(p0, 4, &c)
+	err := a.inv.Invoke(p0, 5, &c)
 	if err != nil {
 		c = plgHostedValueCall{}
 	}
@@ -2153,6 +2199,81 @@ func plgDecodeUser(r *plgimpl.Reader, v *User, depth int) error {
 	return nil
 }
 
+func plgEncode16(b []byte, v *struct{}, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	return b, nil
+}
+
+func plgDecode16(r *plgimpl.Reader, v *struct{}, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func plgEncode15(b []byte, v *map[string]struct{}, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for k, e := range *v {
+		b, err = plgimpl.AppendString(b, string(k))
+		if err == nil {
+			b, err = plgEncode16(b, &e, depth+1)
+		}
+
+		if err != nil {
+			return b, plgimpl.AtKey(err, string(k))
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode15(r *plgimpl.Reader, v *map[string]struct{}, depth int) error {
+	n, err := plgimpl.ReadMapLen(r, v, depth, 0)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	m := make(map[string]struct{}, n)
+
+	for range n {
+		k, err := plgimpl.ReadKey(r, m)
+		if err != nil {
+			return err
+		}
+
+		var e struct{}
+
+		err = plgDecode16(r, &e, depth+1)
+		if err != nil {
+			return plgimpl.AtKey(err, string(k))
+		}
+
+		m[k] = e
+	}
+
+	if len(m) != n {
+		return plgimpl.DuplicateKeys()
+	}
+
+	*v = m
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
@@ -2173,6 +2294,6 @@ func init() {
 		Adapter:   reflect.TypeFor[plgHosted](),
 		Source:    plgFooerSource,
 		Fast:      func(inv plgimpl.Invoker) any { return &plgHostedFast{inv: inv} },
-		Layout:    "254d1f3e69cec0be41216606dfdbd53288cc6e4c66ba6904e60a2cb731efbf0e",
+		Layout:    "fa285dd9b86974542e460f75fc9268495a86fb6f94f8e67546ed9bbce3afc1b5",
 	})
 }

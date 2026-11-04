@@ -24,6 +24,8 @@ type Host interface {
 	Fail(ctx context.Context, msg string) error
 	// Sum returns base plus every value of more.
 	Sum(ctx context.Context, base int, more ...int) (int, error)
+	// Keys returns keys unchanged: a map whose values encode as nothing.
+	Keys(ctx context.Context, keys map[string]struct{}) (map[string]struct{}, error)
 }
 
 // Hosted is implemented by plugins whose Create takes the Host.
@@ -38,4 +40,6 @@ type Hosted interface {
 	Origin(ctx context.Context) (string, error)
 	// Total returns Host.Sum(base, more...).
 	Total(ctx context.Context, base int, more ...int) (int, error)
+	// Keys returns Host.Keys(keys).
+	Keys(ctx context.Context, keys map[string]struct{}) (map[string]struct{}, error)
 }

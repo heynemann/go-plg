@@ -191,6 +191,42 @@ static const char *check_refs(const plg_schema *s) {
   return NULL;
 }
 
+/* min_size returns the bytes of the smallest encoding of type t, remembering it. Only struct fields nest without
+ * a length or presence prefix, so only they recurse; a struct that contains itself (no Go type does) counts as
+ * nothing within itself, which keeps the result a lower bound. */
+static uint32_t min_size(plg_schema *s, uint32_t t) {
+  plg_type *ty = &s->types[t];
+  if (ty->sizing == 2) return ty->min;
+  if (ty->sizing == 1) return 0;
+  switch (ty->kind) {
+    case KIND_BOOL:
+    case KIND_ERROR:
+    case KIND_POINTER:
+      ty->min = 1;
+      break;
+    case KIND_STRING:
+    case KIND_BYTES:
+    case KIND_SLICE:
+    case KIND_MAP:
+      ty->min = 4;
+      break;
+    case KIND_TIME:
+      ty->min = 16;
+      break;
+    case KIND_STRUCT: {
+      ty->sizing = 1;
+      uint64_t n = 0;
+      for (uint32_t k = 0; k < ty->nfields && n < UINT32_MAX; k++) n += min_size(s, ty->fields[k].type);
+      ty->min = n < UINT32_MAX ? (uint32_t)n : UINT32_MAX;
+      break;
+    }
+    default: /* numbers */
+      ty->min = 8;
+  }
+  ty->sizing = 2;
+  return ty->min;
+}
+
 const char *plg_schema_parse(plg_reader *r, plg_schema *s) {
   if (!readcount(r, &s->ntypes, 1)) return errTruncatedSchema;
   s->types = calloc(s->ntypes ? s->ntypes : 1, sizeof *s->types);
@@ -201,6 +237,7 @@ const char *plg_schema_parse(plg_reader *r, plg_schema *s) {
   }
   const char *err = check_refs(s);
   if (err != NULL) return err;
+  for (uint32_t i = 0; i < s->ntypes; i++) min_size(s, i);
   if (!readcount(r, &s->nmethods, 12)) return errTruncatedSchema;
   s->methods = calloc(s->nmethods ? s->nmethods : 1, sizeof *s->methods);
   if (s->methods == NULL) return errSchemaMemory;
@@ -328,7 +365,8 @@ static const char *push_map(lua_State *L, const plg_schema *s, const plg_type *t
     lua_pushnil(L);
     return NULL;
   }
-  if (n > (size_t)(r->end - r->p) / 5) return errTruncated;
+  /* An entry is a key's length prefix and its value, which may encode as nothing (struct{}). */
+  if (n > (size_t)(r->end - r->p) / (4 + (size_t)s->types[ty->elem].min)) return errTruncated;
   lua_createtable(L, 0, (int)n);
   for (uint32_t i = 0; i < n; i++) {
     const char *key;
