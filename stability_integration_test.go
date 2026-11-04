@@ -101,6 +101,7 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 	tests := []struct {
 		msg      string
 		guest    []string // in the guest traceback
+		oneOf    []string // the guest traceback holds at least one of these
 		deadline bool
 	}{
 		{msg: "panic", guest: []string{
@@ -109,7 +110,14 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 				"/gopath/src/plg.local/plugin/plugin.go:37:9: panic: plg.local/plugin.Fail(...)\n",
 		}},
 		{msg: "oom", guest: []string{"fatal error: out of memory", "runtime.throw", "runtime.mallocgc"}},
-		{msg: "recurse", guest: []string{"fatal error: out of memory", "runtime.newstack", "runtime.morestack"}},
+		// The goroutine stack cannot grow. Its allocation runs out of memory or, when its size is the address of
+		// one of the runtime's heap growth hints, Go's sysAlloc mistakes the failed reservation for one at address
+		// 0, where the arenas are in use (PLAN.md, "Unbounded recursion's two fatal errors").
+		{
+			msg:   "recurse",
+			guest: []string{"runtime.stackalloc", "runtime.newstack", "runtime.morestack"},
+			oneOf: []string{"fatal error: out of memory", "fatal error: arena already initialized"},
+		},
 		{msg: "abort", guest: []string{"fatal error: all goroutines are asleep - deadlock!", "reflect.Select"}},
 		{msg: "loop", deadline: true},
 		{msg: "sleep", deadline: true},
@@ -139,6 +147,12 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 
 		for _, want := range tc.guest {
 			assert.Contains(t, failure.Guest, want, tc.msg)
+		}
+
+		if tc.oneOf != nil {
+			assert.True(t, slices.ContainsFunc(tc.oneOf, func(want string) bool {
+				return strings.Contains(failure.Guest, want)
+			}), "%s: the guest traceback holds none of %q:\n%s", tc.msg, tc.oneOf, failure.Guest)
 		}
 
 		if tc.deadline {
