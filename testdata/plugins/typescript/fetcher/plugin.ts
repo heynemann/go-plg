@@ -5,6 +5,7 @@
 //   POST <url> <n>        one POST with an n-byte body
 //   REPEAT <n> <url>      n GETs in a row
 //   HOST <url> <host>     one GET with the Host header overridden
+//   CREDS <url>           one GET with the six headers carrying credentials set (Authorization, Cookie, ...)
 //   FLOOD <n> <size> <url> n POSTs of one size-byte body, all started before awaiting any
 //   LOOP -                loops forever
 //   POLL <url>            GETs forever, ignoring the failures
@@ -14,7 +15,8 @@
 //   PRINT <text>          prints text on stdout, then returns "printed"
 //
 // and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
-// distinct sorted reasons of the failed requests, joined by ;>".
+// distinct sorted reasons of the failed requests, joined by ;>"; CREDS adds "|<how many of the six headers its
+// Headers object still holds once answered>".
 async function get(url: string, host?: string): Promise<string> {
   const headers: Record<string, string> = { "X-Test": "fetcher" };
   if (host !== undefined) {
@@ -25,6 +27,19 @@ async function get(url: string, host?: string): Promise<string> {
 
 async function describe(resp: Response): Promise<string> {
   return `${resp.status}|${resp.headers.get("X-Reply") ?? ""}|${await resp.text()}`;
+}
+
+const credentials = [
+  "Authorization", "cookie", "COOKIE2", "Proxy-Authenticate", "Proxy-Authorization", "WWW-Authenticate",
+];
+
+async function creds(url: string): Promise<string> {
+  const headers = new Headers({ "X-Test": "fetcher" });
+  for (const name of credentials) {
+    headers.set(name, "secret");
+  }
+  const got = await describe(await fetch(url, { headers }));
+  return `${got}|${credentials.filter((name) => headers.get(name) === "secret").length}`;
 }
 
 export function Create() {
@@ -39,6 +54,8 @@ export function Create() {
           return get(args[1]);
         case "HOST":
           return get(args[1], args[2]);
+        case "CREDS":
+          return creds(args[1]);
         case "POST":
           return describe(await fetch(args[1], {
             method: "POST",

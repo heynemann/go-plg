@@ -107,7 +107,7 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
-	client, err := httpClient(cfg.http, c.logger)
+	client, err := httpClient(cfg.http, cfg.httpRoots, c.logger)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@
 --   POST <url> <n>        one POST with an n-byte body
 --   REPEAT <n> <url>      n GETs in a row
 --   HOST <url> <host>     one GET with the Host header overridden
+--   CREDS <url>           one GET with the six headers carrying credentials set (Authorization, Cookie, ...)
 --   SORTGET <url>         one GET from inside table.sort's comparator, where the call cannot yield
 --   FLOOD <n> <size> <url> n POSTs of one size-byte body, one after the other
 --   LOOP -                loops forever
@@ -14,7 +15,8 @@
 --   NOTE <url> <text>     one GET, then prints text on stdout, whatever the GET's outcome
 --
 -- and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
--- distinct sorted reasons of the failed requests, joined by ;>".
+-- distinct sorted reasons of the failed requests, joined by ;>"; CREDS adds "|<how many of the six headers its
+-- headers table still holds once answered>".
 local function get(url, hostname)
   local headers = { ["X-Test"] = "fetcher" }
   if hostname then
@@ -28,6 +30,30 @@ local function describe(resp, err)
     return nil, err
   end
   return resp.status .. "|" .. (resp.headers["X-Reply"] or "") .. "|" .. resp.body
+end
+
+local function creds(url)
+  -- Any case, and a list of values, as a plugin may write them.
+  local headers = {
+    ["X-Test"] = "fetcher",
+    authorization = "secret",
+    Cookie = { "secret" },
+    COOKIE2 = "secret",
+    ["Proxy-Authenticate"] = "secret",
+    ["Proxy-Authorization"] = "secret",
+    ["WWW-Authenticate"] = "secret",
+  }
+  local got, err = describe(http.request { url = url, headers = headers })
+  if not got then
+    return nil, err
+  end
+  local held = 0
+  for name, value in pairs(headers) do
+    if name ~= "X-Test" and (value == "secret" or (type(value) == "table" and value[1] == "secret")) then
+      held = held + 1
+    end
+  end
+  return got .. "|" .. held
 end
 
 local Fetcher = {}
@@ -45,6 +71,8 @@ function Fetcher:Foo(cmd)
     return describe(get(args[2]))
   elseif verb == "HOST" then
     return describe(get(args[2], args[3]))
+  elseif verb == "CREDS" then
+    return creds(args[2])
   elseif verb == "POST" then
     return describe(http.request {
       method = "POST",

@@ -163,9 +163,29 @@
 
   const redirects = new Set([301, 302, 303, 307, 308]);
 
+  // The request headers carrying credentials (net/http's list), which a redirect never takes to another origin.
+  const credentials = [
+    "authorization", "cookie", "cookie2", "proxy-authenticate", "proxy-authorization", "www-authenticate",
+  ];
+
+  const lower = (text) => text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
+
+  // origin returns url's scheme, host and port (its scheme's default port if it has none), ASCII letters in lower
+  // case, or null for a URL without an authority.
+  function origin(url) {
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)/.exec(url);
+    if (!m) return null;
+    const scheme = lower(m[1]);
+    const [, host, port] = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(m[2].slice(m[2].lastIndexOf("@") + 1));
+    const fallback = scheme === "https" ? "443" : scheme === "http" ? "80" : "";
+    return `${scheme}://${lower(host)}:${port || fallback}`;
+  }
+
   // fetch makes the request through the host, which applies the Register's HTTP policy to every hop: a refused or
   // failed request rejects with a TypeError carrying the host's reason. Redirects are followed (up to 20) unless
-  // init.redirect is "manual" or "error".
+  // init.redirect is "manual" or "error". Once a redirect leaves the first request's origin (scheme, host and
+  // port), this hop and every later one go without the credential headers (Authorization, Cookie, ...); init's
+  // headers are left as they are.
   async function fetch(input, init = {}) {
     let url = typeof input === "string" ? input : input && typeof input.url === "string" ? input.url : String(input);
     let method = String(init.method ?? "GET").toUpperCase();
@@ -175,6 +195,7 @@
       headers.set("content-type", "text/plain;charset=UTF-8");
     }
     const mode = init.redirect ?? "follow";
+    let first; // the first request's origin, once a redirect needs it
 
     for (let hops = 0; ; hops++) {
       // A Promise in a multiplexed step (the instance serves other calls meanwhile), the answer itself otherwise.
@@ -184,7 +205,11 @@
       if (mode === "manual" || !redirects.has(status) || location === null) return response;
       if (mode === "error") throw new TypeError(`fetch: redirected to ${location}`);
       if (hops >= 20) throw new TypeError("fetch: too many redirects");
+      if (hops === 0) first = origin(url);
       url = resolve(url, location);
+      // headers is fetch's own copy: deleting from it leaves init's alone, and keeps them deleted on later hops.
+      const next = origin(url);
+      if (next === null || next !== first) for (const name of credentials) headers.delete(name);
       if (status === 303 || ((status === 301 || status === 302) && method === "POST")) {
         method = "GET";
         body = null;

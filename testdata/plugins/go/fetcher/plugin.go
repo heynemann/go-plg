@@ -4,8 +4,10 @@
 //	POST <url> <n>        one POST with an n-byte body
 //	REPEAT <n> <url>      n GETs in a row
 //	HOST <url> <host>     one GET with the Host header overridden
+//	CREDS <url>           one GET with the six headers carrying credentials set (Authorization, Cookie, ...)
 //
-// and returns "<status code>|<X-Reply header>|<body>" of the last response.
+// and returns "<status code>|<X-Reply header>|<body>" of the last response; CREDS adds "|<how many of the six
+// headers the request still holds once answered>".
 package fetcher
 
 import (
@@ -37,6 +39,8 @@ func (fetcher) Foo(_ context.Context, cmd string) (string, error) {
 		return get(args[1], "")
 	case "HOST":
 		return get(args[1], args[2])
+	case "CREDS":
+		return creds(args[1])
 	case "POST":
 		n, _ := strconv.Atoi(args[2])
 
@@ -83,6 +87,43 @@ func get(url, host string) (string, error) {
 	}
 
 	return describe(resp)
+}
+
+func creds(url string) (string, error) {
+	names := []string{
+		"Authorization", "Cookie", "Cookie2", "Proxy-Authenticate", "Proxy-Authorization", "Www-Authenticate",
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("X-Test", "fetcher")
+
+	for _, name := range names {
+		req.Header.Set(name, "secret")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	got, err := describe(resp)
+	if err != nil {
+		return "", err
+	}
+
+	held := 0
+
+	for _, name := range names {
+		if req.Header.Get(name) == "secret" {
+			held++
+		}
+	}
+
+	return got + "|" + strconv.Itoa(held), nil
 }
 
 func describe(resp *http.Response) (string, error) {

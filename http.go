@@ -2,6 +2,7 @@ package plg
 
 import (
 	"context"
+	"crypto/x509"
 	"log/slog"
 	"time"
 
@@ -15,7 +16,11 @@ import (
 // Go plugins use the standard net/http client (http.Get, http.Client, http.NewRequest, ...): inside the guest
 // http.DefaultTransport hands each request to the host. TypeScript plugins use fetch and Lua plugins
 // http.request{method, url, headers, body}, both reaching the same host transport. Redirects are followed by the
-// plugin's side (the Go client, fetch or http.request), each hop being a new request checked like the first.
+// plugin's side (the Go client, fetch or http.request), each hop being a new request checked like the first. Once
+// a redirect leaves the first request's origin (scheme, host and port), that hop and every later one go without
+// the headers carrying credentials (Authorization, Cookie, Cookie2, Proxy-Authorization, Proxy-Authenticate,
+// WWW-Authenticate), in every language: stricter than Go's http.Client, which keeps them for the same host on any
+// port or scheme and for its subdomains.
 // Every request, made or refused, is logged with the plugin's key through the container's logger.
 type HTTPPolicy struct {
 	// BlockPrivateNetworks refuses connections to loopback, private, unique-local, link-local (including the
@@ -51,13 +56,15 @@ func WithHTTP(policy HTTPPolicy) RegisterOption {
 	}
 }
 
-// httpClient returns the client enforcing the Register call's policy: a refusing one without WithHTTP.
-func httpClient(policy *HTTPPolicy, logger *slog.Logger) (*httpcap.Client, error) {
+// httpClient returns the client enforcing the Register call's policy, trusting roots for https (nil: the
+// system's): a refusing one without WithHTTP.
+func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (*httpcap.Client, error) {
 	if policy == nil {
 		return httpcap.Disabled(logger), nil
 	}
 
 	client, err := httpcap.New(httpcap.Policy{
+		RootCAs:              roots,
 		AllowedHosts:         policy.AllowedHosts,
 		BlockPrivateNetworks: policy.BlockPrivateNetworks == nil || *policy.BlockPrivateNetworks,
 		Timeout:              policy.Timeout,

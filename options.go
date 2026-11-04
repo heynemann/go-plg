@@ -3,6 +3,7 @@ package plg
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -95,6 +96,7 @@ const (
 
 type registerConfig struct {
 	http          *HTTPPolicy     // nil: HTTP refused
+	httpRoots     *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
 	goGuest       *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
 	storages      []Storage
 	languages     []Language    // enabled languages; empty enables every language

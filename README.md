@@ -490,6 +490,15 @@ plugin's key. Redirects are followed by the plugin's side, each hop checked like
 and responses, not tunnels or upgraded protocols: `CONNECT` is refused, and a `101 Switching Protocols` answer
 (WebSocket, h2c) fails the request with `plg http: protocol upgrade refused`, its connection closed at once.
 
+Credentials stay with the origin they were set for, in every language: once a redirect leaves the first request's
+origin — its scheme, host and port (a URL without a port has its scheme's default; names compare in any case) —
+that hop and every later one go without the headers carrying credentials (`Authorization`, `Cookie`, `Cookie2`,
+`Proxy-Authorization`, `Proxy-Authenticate`, `WWW-Authenticate`), even if a later redirect comes back. So an
+`https` request's token never follows a redirect to `http`, another port, another host or a subdomain, wildcard
+entries of `AllowedHosts` included. This is stricter than Go's `http.Client`, which keeps them for the same host
+on any port or scheme and for its subdomains; Go plugins get the stricter rule too. The plugin's own headers (the
+Go request's `Header`, `fetch`'s `headers`, `http.request`'s `headers` table) are left as they were.
+
 ### Many I/O-bound calls on one instance: `WithConcurrentCalls`
 
 By default an instance serves one call at a time, so a call waiting 100 ms for a response holds a whole instance.

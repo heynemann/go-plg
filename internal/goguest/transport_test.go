@@ -118,6 +118,109 @@ func TestTransportServesTheStandardClient(t *testing.T) {
 	assert.Empty(t, fake.seen[1].Body)
 }
 
+// credentials are the headers carrying credentials, as a request sets them.
+func credentials() http.Header {
+	return http.Header{
+		"Authorization": {"Bearer t"}, "Cookie": {"c=1"}, "Cookie2": {"c2"}, "Proxy-Authenticate": {"pa"},
+		"Proxy-Authorization": {"Basic p"}, "Www-Authenticate": {"wa"},
+	}
+}
+
+func TestTransportKeepsCredentialsWithinTheFirstOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		hops []string // the first request's URL, then each redirect's Location
+		kept []bool   // whether each request carried the credentials
+	}{
+		{"same origin", []string{"http://api.example/a", "/b"}, []bool{true, true}},
+		{
+			"same origin spelled otherwise",
+			[]string{"http://api.example/a", "HTTP://API.Example:80/b"},
+			[]bool{true, true},
+		},
+		{"https default port", []string{"https://api.example/a", "https://api.example:443/b"}, []bool{true, true}},
+		{"IPv6 default port", []string{"http://[::1]:80/a", "http://[::1]/b"}, []bool{true, true}},
+		{"other port", []string{"http://api.example/a", "http://api.example:8080/b"}, []bool{true, false}},
+		{"https to http", []string{"https://api.example/a", "http://api.example/b"}, []bool{true, false}},
+		{"http to https", []string{"http://api.example/a", "https://api.example/b"}, []bool{true, false}},
+		{"other scheme", []string{"http://api.example/a", "ftp://api.example/b"}, []bool{true, false}},
+		{"subdomain", []string{"http://api.example/a", "http://sub.api.example/b"}, []bool{true, false}},
+		{"other host", []string{"http://api.example/a", "http://other.example/b"}, []bool{true, false}},
+		{
+			"same origin, then another",
+			[]string{"http://api.example/a", "/b", "http://api.example:8080/c"},
+			[]bool{true, true, false},
+		},
+		{
+			"left and back",
+			[]string{"http://api.example/a", "http://api.example:8080/b", "http://api.example/c"},
+			[]bool{true, false, false},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := &host{}
+			fake.answer = func(httpabi.Request) []byte {
+				if len(fake.seen) < len(tc.hops) {
+					return httpabi.AppendResponseHead(nil, http.StatusFound,
+						http.Header{"Location": {tc.hops[len(fake.seen)]}})
+				}
+
+				return httpabi.AppendResponseHead(nil, http.StatusOK, nil)
+			}
+			client := &http.Client{Transport: goguest.Transport{Exchange: fake.exchange}}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tc.hops[0], http.NoBody)
+			require.NoError(t, err)
+
+			req.Header = credentials()
+			req.Header.Set("X-Test", "kept")
+
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+
+			require.Len(t, fake.seen, len(tc.kept))
+
+			for i, kept := range tc.kept {
+				want := http.Header{"X-Test": {"kept"}}
+				if kept {
+					want = credentials()
+					want.Set("X-Test", "kept")
+				}
+
+				got := fake.seen[i].Header.Clone()
+				got.Del("Referer") // the client's own, on some hops
+				assert.Equal(t, want, got, "request %d (%s)", i, fake.seen[i].URL)
+			}
+
+			want := credentials()
+			want.Set("X-Test", "kept")
+			assert.Equal(t, want, req.Header, "the caller's header is left as it was")
+		})
+	}
+}
+
+func TestTransportDropsCredentialsAfterAHopWithoutURL(t *testing.T) {
+	t.Parallel()
+
+	target, err := url.Parse("http://api.example/")
+	require.NoError(t, err)
+
+	fake := &host{answer: ok(http.StatusOK, nil, "")}
+	req := &http.Request{URL: target, Header: credentials(), Response: &http.Response{Request: &http.Request{}}}
+
+	resp, err := goguest.Transport{Exchange: fake.exchange}.RoundTrip(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	assert.Empty(t, fake.seen[0].Header, "a hop after one without an origin is another origin's")
+}
+
 func TestTransportDefaultsToGET(t *testing.T) {
 	t.Parallel()
 

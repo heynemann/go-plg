@@ -3,8 +3,11 @@
 package plg_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"log/slog"
 	"net"
@@ -235,6 +238,165 @@ func TestPluginHTTPRedirectsAreCheckedHopByHop(t *testing.T) {
 
 		_, err = plug.Foo(t.Context(), "GET "+api.URL+"/redirect?to=http://169.254.169.254/latest/meta-data")
 		require.ErrorContains(t, err, httpcap.ErrHostNotAllowed.Error(), "a redirect to the metadata service")
+	})
+}
+
+// tlsHandshake is the first byte of a TLS connection: a handshake record.
+const tlsHandshake = 0x16
+
+// sniffedConn is a server connection speaking TLS if its client's first byte opens a TLS handshake, plain HTTP
+// otherwise. It decides on its first Read, which the server makes before writing anything.
+type sniffedConn struct {
+	net.Conn // the raw connection: addresses, deadlines, Close
+
+	config *tls.Config
+	rw     io.ReadWriter // nil until the first Read
+}
+
+func (c *sniffedConn) Read(buf []byte) (int, error) {
+	if c.rw == nil {
+		peeked := peekedConn{Conn: c.Conn, reader: bufio.NewReader(c.Conn)}
+
+		c.rw = peeked
+
+		first, err := peeked.reader.Peek(1)
+		if err == nil && first[0] == tlsHandshake {
+			c.rw = tls.Server(peeked, c.config)
+		}
+	}
+
+	return c.rw.Read(buf) //nolint:wrapcheck // a connection's own error
+}
+
+func (c *sniffedConn) Write(buf []byte) (int, error) {
+	return c.rw.Write(buf) //nolint:wrapcheck // a connection's own error
+}
+
+// peekedConn reads its connection through reader, which may hold bytes already read from it.
+type peekedConn struct {
+	net.Conn
+
+	reader *bufio.Reader
+}
+
+func (c peekedConn) Read(buf []byte) (int, error) {
+	return c.reader.Read(buf) //nolint:wrapcheck // a connection's own error
+}
+
+// sniffing is a listener whose connections speak https or http, as each client chooses.
+type sniffing struct {
+	net.Listener
+
+	config *tls.Config
+}
+
+func (l sniffing) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the listener's own error
+	}
+
+	return &sniffedConn{Conn: conn, config: l.config}, nil
+}
+
+// credentialHeaders are the request headers carrying credentials (net/http's list).
+func credentialHeaders() []string {
+	return []string{
+		"Authorization", "Cookie", "Cookie2", "Proxy-Authenticate", "Proxy-Authorization", "Www-Authenticate",
+	}
+}
+
+// credentialServer serves one loopback port over both http and https, so two of its URLs can differ by scheme
+// alone; roots trusts its certificate. It redirects /redirect?to=<url> and answers any other path with "<how
+// many of the credentialHeaders it got> <X-Test header>".
+type credentialServer struct {
+	*httptest.Server
+
+	roots *x509.CertPool
+}
+
+func newCredentialServer(t *testing.T) *credentialServer {
+	t.Helper()
+
+	lender := httptest.NewTLSServer(http.NotFoundHandler()) // lends httptest's certificate for 127.0.0.1
+	config := lender.TLS.Clone()
+	roots := x509.NewCertPool()
+	roots.AddCert(lender.Certificate())
+	lender.Close()
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		if to := req.URL.Query().Get("to"); to != "" {
+			http.Redirect(writer, req, to, http.StatusFound) //nolint:gosec // G710: the test chooses the target
+
+			return
+		}
+
+		got := 0
+
+		for _, name := range credentialHeaders() {
+			if req.Header.Get(name) != "" {
+				got++
+			}
+		}
+
+		reply := strconv.Itoa(got) + " " + req.Header.Get("X-Test")
+		_, err := io.WriteString(writer, reply) //nolint:gosec // G705: a test server echoing its own test's request
+		assert.NoError(t, err)
+	}))
+	srv.Listener = sniffing{Listener: srv.Listener, config: config}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	return &credentialServer{Server: srv, roots: roots}
+}
+
+// TestPluginHTTPRedirectsKeepCredentialsWithinTheFirstOrigin holds the three languages' redirects to one rule: once
+// a redirect leaves the first request's origin (scheme, host and port), that hop and every later one go without
+// the headers carrying credentials, and the plugin's own headers are left as they were.
+func TestPluginHTTPRedirectsKeepCredentialsWithinTheFirstOrigin(t *testing.T) {
+	t.Parallel()
+
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		srv, other := newCredentialServer(t), newCredentialServer(t)
+		_, port, err := net.SplitHostPort(hostOf(t, srv.URL))
+		require.NoError(t, err)
+
+		plug := fetcher(t, lang, io.Discard, plg.WithHTTP(openPolicy("127.0.0.1", "localhost")),
+			plg.WithHTTPRoots(srv.roots))
+
+		plain, secure, named := "http://127.0.0.1:"+port, "https://127.0.0.1:"+port, "http://localhost:"+port
+		via := func(from, to string) string { return from + "/redirect?to=" + url.QueryEscape(to) }
+
+		tests := []struct {
+			name string
+			url  string
+			kept bool
+		}{
+			{"same origin", via(plain, "/seen"), true},
+			{"same origin spelled otherwise", via(named, "HTTP://LOCALHOST:"+port+"/seen"), true},
+			{"https, same origin", via(secure, "/seen"), true},
+			{"other port", via(plain, other.URL+"/seen"), false},
+			{"other host", via(plain, named+"/seen"), false},
+			{"https to http", via(secure, plain+"/seen"), false},
+			{"left and back", via(plain, via(named, plain+"/seen")), false},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				want := "200||0 fetcher|6"
+				if tc.kept {
+					want = "200||6 fetcher|6"
+				}
+
+				got, err := plug.Foo(t.Context(), "CREDS "+tc.url)
+				require.NoError(t, err)
+				assert.Equal(t, want, got, "the last hop's credentials and other header, then the plugin's credentials")
+			})
+		}
 	})
 }
 

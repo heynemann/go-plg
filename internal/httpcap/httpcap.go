@@ -13,6 +13,8 @@ package httpcap
 
 import (
 	"cmp"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,6 +78,9 @@ var (
 
 // Policy is a Register call's HTTP policy. Zero numeric fields take their defaults.
 type Policy struct {
+	// RootCAs are the certificate authorities trusted for https; nil trusts the system's. plg's tests set it to
+	// reach their own https servers; plg.HTTPPolicy has no such field.
+	RootCAs *x509.CertPool
 	// AllowedHosts lists the hosts plugins may reach (required): host names, *.wildcards and IP addresses,
 	// each with an optional port.
 	AllowedHosts         []string
@@ -150,6 +155,7 @@ func New(policy Policy, logger *slog.Logger) (*Client, error) {
 		ForceAttemptHTTP2:      true,
 		MaxIdleConns:           maxIdleConns,
 		IdleConnTimeout:        idleConnTimeout,
+		TLSClientConfig:        &tls.Config{RootCAs: policy.RootCAs, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:    policy.Timeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: maxResponseHeader,

@@ -238,7 +238,10 @@ static int roundtrip_answered(lua_State *L, int status, lua_KContext k) {
 /*
 ** http.request, in Lua: it checks the request and follows redirects (up to 10; set redirect = false to get the
 ** 3xx response instead) as Go's http.Client and fetch do, each hop being a new request the host checks against
-** the policy. A 303, and a 301 or 302 to anything but GET or HEAD, continues as a GET without a body.
+** the policy. A 303, and a 301 or 302 to anything but GET or HEAD, continues as a GET without a body. Once a
+** redirect leaves the first request's origin (scheme, host and port), this hop and every later one go without
+** the credential headers (Authorization, Cookie, ...): a copy of req.headers without them, req.headers itself
+** left as it is.
 */
 static const char prelude[] =
     "local roundtrip = ...\n"
@@ -255,6 +258,30 @@ static const char prelude[] =
     "  if loc:sub(1, 1) == '?' then return scheme .. '//' .. authority .. path .. loc end\n"
     "  return scheme .. '//' .. authority .. (path:match('^(.*/)') or '/') .. loc\n"
     "end\n"
+    /* origin returns url's scheme, host and port (its scheme's default port if it has none), ASCII letters in
+       lower case, or nil for a URL without an authority. */
+    "local ports = { http = '80', https = '443' }\n"
+    "local function origin(url)\n"
+    "  local scheme, authority = url:match('^(%a[%w+.-]*)://([^/?#]*)')\n"
+    "  if not scheme then return nil end\n"
+    "  scheme = scheme:lower()\n"
+    "  local hostport = authority:match('^.*@(.*)$') or authority\n"
+    "  local host, port = hostport:match('^(%b[]):?(.*)$')\n"
+    "  if not host then host, port = hostport:match('^([^:]*):?(.*)$') end\n"
+    "  if port == '' then port = ports[scheme] or '' end\n"
+    "  return scheme .. '://' .. host:lower() .. ':' .. port\n"
+    "end\n"
+    /* The request headers carrying credentials (net/http's list), which a redirect never takes to another
+       origin. */
+    "local credentials = { authorization = true, cookie = true, cookie2 = true, ['proxy-authenticate'] = true,\n"
+    "  ['proxy-authorization'] = true, ['www-authenticate'] = true }\n"
+    "local function uncredentialed(headers)\n"
+    "  local copy = {}\n"
+    "  for name, value in next, headers do\n"
+    "    if type(name) ~= 'string' or not credentials[name:lower()] then copy[name] = value end\n"
+    "  end\n"
+    "  return copy\n"
+    "end\n"
     "local redirects = { [301] = true, [302] = true, [303] = true, [307] = true, [308] = true }\n"
     "return function(req)\n"
     "  check(req, 'request', 'table')\n"
@@ -263,6 +290,7 @@ static const char prelude[] =
     "  check(url, 'url', 'string')\n"
     "  check(headers, 'headers', 'table', true)\n"
     "  check(body, 'body', 'string', true)\n"
+    "  local start, first, left = url, nil, false\n"
     "  for _ = 0, 10 do\n"
     "    local resp, err = roundtrip(method, url, headers, body)\n"
     "    if not resp then return nil, err end\n"
@@ -270,6 +298,13 @@ static const char prelude[] =
     "    local nexturl = req.redirect ~= false and redirects[status] and loc and resolve(url, loc)\n"
     "    if not nexturl then return resp end\n"
     "    url = nexturl\n"
+    "    if not left then\n"
+    "      first = first or origin(start)\n"
+    "      if first == nil or origin(url) ~= first then\n"
+    "        left = true\n"
+    "        if headers then headers = uncredentialed(headers) end\n"
+    "      end\n"
+    "    end\n"
     "    if status == 303 or (status <= 302 and method ~= 'GET' and method ~= 'HEAD') then\n"
     "      method, body = 'GET', nil\n"
     "    end\n"

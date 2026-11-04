@@ -8,10 +8,12 @@ Source: adversarial review of `4503972` (model gpt-6.1-sol), inferred from readi
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A cross-language test (TS and Lua; Go too via net/http for parity) redirecting to another allowed origin and to an HTTP origin reproduces the bug (fails on the current code) and passes with the fix
+- [x] A cross-language test (TS and Lua; Go too via net/http for parity) redirecting to another allowed origin and to an HTTP origin reproduces the bug (fails on the current code) and passes with the fix
 Sensitive headers are absent on cross-origin/downgrade hops and kept on same-origin hops; caller's headers object unchanged
 Behaviour documented in README HTTP section
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+
+**Resolution:** one origin rule (scheme, host, port) for TS, Lua and Go — stricter than Go's `http.Client`, which keeps credentials on the same host across ports and schemes and on its subdomains; see PLAN.md, "Adversarial review fixes", 09. Shared test table: `TestPluginHTTPRedirectsKeepCredentialsWithinTheFirstOrigin`.

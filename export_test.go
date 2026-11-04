@@ -2,6 +2,7 @@ package plg
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,14 @@ import (
 
 // MuxGrace is how long, in all, a multiplexed call that already ended may run on.
 const MuxGrace = muxGrace
+
+// WithHTTPRoots makes the plugins' https requests trust roots instead of the system's certificate authorities, so
+// tests can reach their own https servers.
+func WithHTTPRoots(roots *x509.CertPool) RegisterOption {
+	return func(c *registerConfig) {
+		c.httpRoots = roots
+	}
+}
 
 // Hold takes an instance of the plugin with the given key, as a call in flight would, until the returned
 // release function is called. It lets tests make a plugin busy without a slow plugin method.
