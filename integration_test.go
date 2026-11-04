@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -634,6 +635,49 @@ func TestCloseClosesIdleInstances(t *testing.T) {
 
 	_, err := ref.Count(t.Context())
 	require.ErrorIs(t, err, plg.ErrClosed)
+}
+
+// TestClosedContainersKeepNoGuestMemory closes containers that stay referenced, each with a plugin taken from it,
+// as a service keeping the containers it replaced (or a test keeping its cleanups) would: a closed container
+// holds none of its compiled guest, so each keeps well under 256 KiB of live heap. It used to keep the decoded
+// guest module: about 30 MiB for Go, 1.5 MiB for TypeScript, 0.5 MiB for Lua.
+//
+//nolint:paralleltest // it measures the process heap, which no other test may move meanwhile
+func TestClosedContainersKeepNoGuestMemory(t *testing.T) {
+	const containers, bound = 4, 256 << 10
+
+	for _, lang := range contractLanguages() {
+		t.Run(string(lang.lang), func(t *testing.T) {
+			closeContainers := func(n int) []any {
+				kept := make([]any, 0, 2*n)
+
+				for range n {
+					ctr := plg.New()
+					registerFooersIn(t, lang, ctr, "fooer", map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
+
+					ref := getFooer(t, ctr, "fooer/ref")
+					got, err := ref.Foo(t.Context(), "x")
+					require.NoError(t, err)
+					require.Equal(t, "hello, x", got)
+					require.NoError(t, ctr.Close(t.Context()))
+
+					kept = append(kept, ctr, ref)
+				}
+
+				return kept
+			}
+
+			warm := closeContainers(1) // the process's one-time costs, like inflating the Go guest
+			before := heapInUse()
+			kept := closeContainers(containers)
+			each := (heapInUse() - before) / containers
+
+			runtime.KeepAlive(warm)
+			runtime.KeepAlive(kept)
+			t.Logf("each closed %s container keeps %d bytes", lang.lang, each)
+			assert.Less(t, each, int64(bound), "a closed container keeps no compiled guest")
+		})
+	}
 }
 
 // TestGetAndAllDoNotAllocate is the allocation budget of Get and All (`make allocs`, part of `make check`).

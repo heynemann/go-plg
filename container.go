@@ -99,9 +99,10 @@ func containerOptions(opts []Option) containerConfig {
 
 // Close stops the pollers and serves no more calls: it waits on ctx for the calls in flight to finish, closes
 // every instance (each running the plugin's optional Close), stops the refill goroutines and releases the
-// runtimes. Calls still running when ctx ends are stopped. It returns the failures, those of closing the
-// plugins included. Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed].
-// Closing a closed container does nothing.
+// runtimes and the compiled guests, so a closed container that stays referenced keeps almost no memory. Calls
+// still running when ctx ends are stopped. It returns the failures, those of closing the plugins included.
+// Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed]. Closing a closed
+// container does nothing.
 func (c *Container) Close(ctx context.Context) error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
@@ -129,6 +130,10 @@ func (c *Container) Close(ctx context.Context) error {
 	for _, rt := range c.runtimes.All() {
 		errs = append(errs, rt.Close(ctx))
 	}
+
+	// Forgetting the compiled guests frees them, decoded modules included (about 30 MiB for the Go guest), even
+	// while the closed container stays referenced; closing the compilation cache frees their machine code.
+	c.modules.Clear()
 
 	errs = append(errs, c.engine.Close(ctx), c.unobserve(ctx))
 
