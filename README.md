@@ -661,7 +661,9 @@ var customGuest []byte
 plg.Register[T](ctx, c, "name", plg.WithStorage(s), plg.WithGoGuest(customGuest))
 ```
 
-Extra packages must build for wasip1 without cgo. A custom guest runs under the same limits and checks, but is not
+Extra packages must build for wasip1 without cgo. yaegi names each package's symbol file after its import path with
+`/` and `-` both mapped to `-`, `.`, `~` and `_` to `_`, so one guest cannot have two packages whose paths differ only
+there (`example.com/a-b` and `example.com/a/b`): `plg build-guest` refuses them. A custom guest runs under the same limits and checks, but is not
 covered by `plg warm`: its first compile happens at startup.
 
 ## Performance

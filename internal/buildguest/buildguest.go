@@ -50,6 +50,8 @@ const (
 	// guestModule is the temporary module's path; extraPackage is the name of its package of extra symbols.
 	guestModule  = "plg.local/customguest"
 	extraPackage = "extra"
+	// extraFile is the extra package's file declaring its symbol table.
+	extraFile = extraPackage + ".go"
 	// yaegiCmd is yaegi's command, whose extract subcommand `make symbols` runs too.
 	yaegiCmd = "github.com/traefik/yaegi/cmd/yaegi"
 	// The permissions of the temporary module's directories and files.
@@ -141,13 +143,20 @@ func resolve(dir, name string) string {
 	return filepath.Join(dir, name)
 }
 
-// checkPackages rejects an empty list, repeated packages and packages the default guest already has.
+// checkPackages rejects an empty list, repeated packages, packages the default guest already has and packages
+// whose extracted symbols would overwrite another's file: yaegi extract names the file after the import path,
+// mapping both / and - to -, and both . and _ to _.
 func checkPackages(pkgs []string) error {
 	if len(pkgs) == 0 {
 		return fmt.Errorf("%w: name at least one package", ErrPackages)
 	}
 
+	files := make(map[string]string, len(pkgs)) // extracted file → package
+
 	for i, pkg := range pkgs {
+		file := extractedFile(pkg)
+		other, collides := files[file]
+
 		switch {
 		case pkg == "" || strings.HasPrefix(pkg, ".") || filepath.IsAbs(pkg):
 			return fmt.Errorf("%w: %q is not an import path", ErrPackages, pkg)
@@ -155,10 +164,23 @@ func checkPackages(pkgs []string) error {
 			return fmt.Errorf("%w: %s is listed twice", ErrPackages, pkg)
 		case goallow.Allowed(pkg):
 			return fmt.Errorf("%w: %s is in the default allowlist already", ErrPackages, pkg)
+		case collides:
+			return fmt.Errorf("%w: yaegi extract writes the symbols of %s and %s to the same file, %s; "+
+				"a guest can have only one of them", ErrPackages, other, pkg, file)
+		case file == extraFile:
+			return fmt.Errorf("%w: yaegi extract writes the symbols of %s to %s, the guest's own file",
+				ErrPackages, pkg, file)
 		}
+
+		files[file] = pkg
 	}
 
 	return nil
+}
+
+// extractedFile is the name of the file yaegi extract writes the symbols of the package pkg to.
+func extractedFile(pkg string) string {
+	return strings.NewReplacer("/", "-", ".", "_", "~", "_").Replace(pkg) + ".go"
 }
 
 // builder builds one guest in the temporary module work, from the service module rooted at service.
@@ -319,7 +341,7 @@ func isStandard(pkg string) bool {
 func (b *builder) extract(ctx context.Context, pkgs []string) error {
 	err := b.work.Mkdir(extraPackage, dirMode)
 	if err == nil {
-		err = b.work.WriteFile(path.Join(extraPackage, extraPackage+".go"), []byte(extraSource), fileMode)
+		err = b.work.WriteFile(path.Join(extraPackage, extraFile), []byte(extraSource), fileMode)
 	}
 
 	if err == nil {
@@ -356,10 +378,8 @@ func (b *builder) extract(ctx context.Context, pkgs []string) error {
 
 // firstUnextracted returns the first of pkgs yaegi extract wrote no file for, or "" when it wrote them all.
 func (b *builder) firstUnextracted(pkgs []string) string {
-	files := strings.NewReplacer("/", "-", ".", "_", "~", "_") // yaegi's file naming
-
 	for _, pkg := range pkgs {
-		_, err := b.work.Stat(path.Join(extraPackage, files.Replace(pkg)+".go"))
+		_, err := b.work.Stat(path.Join(extraPackage, extractedFile(pkg)))
 		if err != nil {
 			return pkg
 		}

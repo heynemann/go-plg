@@ -54,6 +54,16 @@ func TestBuildRejectsItsArguments(t *testing.T) {
 			msg: "strings is in the default allowlist already",
 		},
 		{
+			name: "same extracted file", pkgs: []string{"example.com/x.y", "encoding/xml", "example.com/x_y"},
+			want: buildguest.ErrPackages,
+			msg: "yaegi extract writes the symbols of example.com/x.y and example.com/x_y to the same file, " +
+				"example_com-x_y.go",
+		},
+		{
+			name: "the guest's own file", pkgs: []string{"extra"}, want: buildguest.ErrPackages,
+			msg: "yaegi extract writes the symbols of extra to extra.go, the guest's own file",
+		},
+		{
 			name: "outside a module", pkgs: []string{"encoding/xml"}, dir: "none",
 			want: buildguest.ErrModule, msg: "is not inside a Go module",
 		},

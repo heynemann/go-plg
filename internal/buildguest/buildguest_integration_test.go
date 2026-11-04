@@ -39,10 +39,12 @@ func service(t *testing.T) string {
 		"replace github.com/heynemann/go-plg => " + root + "\n\nreplace example.com/greet v0.0.0 => ./third/greet\n"
 
 	return module(t, map[string]string{
-		"go.mod":               modfile,
-		"go.sum":               string(gosum),
-		"third/greet/go.mod":   "module example.com/greet\n\ngo 1.27\n",
-		"third/greet/greet.go": string(greet),
+		"go.mod":                modfile,
+		"go.sum":                string(gosum),
+		"third/greet/go.mod":    "module example.com/greet\n\ngo 1.27\n",
+		"third/greet/greet.go":  string(greet),
+		"third/greet/a-b/ab.go": "package ab\n\n// Dashed is in example.com/greet/a-b.\nfunc Dashed() string { return \"a-b\" }\n",
+		"third/greet/a/b/b.go":  "package b\n\n// Nested is in example.com/greet/a/b.\nfunc Nested() string { return \"a/b\" }\n",
 	})
 }
 
@@ -65,6 +67,13 @@ func TestBuildFailures(t *testing.T) {
 			// and only the missing package fails.
 			name: "package yaegi cannot extract", pkgs: []string{"example.com/greet", "nosuch/pkg"},
 			want: buildguest.ErrExtract, msg: "nosuch/pkg",
+		},
+		{
+			// Both would extract to example_com-greet-a-b.go: the second would overwrite the first.
+			name: "packages extracted to the same file",
+			pkgs: []string{"example.com/greet/a-b", "example.com/greet/a/b"},
+			want: buildguest.ErrPackages,
+			msg:  "example.com/greet/a-b and example.com/greet/a/b to the same file, example_com-greet-a-b.go",
 		},
 		{
 			name: "output the go command cannot write", pkgs: []string{"example.com/greet"},
