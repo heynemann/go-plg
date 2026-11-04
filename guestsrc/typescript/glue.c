@@ -1452,7 +1452,7 @@ EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
   return res;
 }
 
-// ---- multiplexed steps: plg_start and plg_resume ----
+// ---- multiplexed steps: plg_start, plg_resume and plg_drop ----
 
 // A step runs the call it starts (or the code a request's answer resumes) and every pending job, then lists the
 // calls whose Promise settled meanwhile, possibly several (calls may await one another's work).
@@ -1607,6 +1607,22 @@ EXPORT("plg_resume") uint64_t plg_resume(uint32_t request, uint32_t len) {
   JS_FreeValue(ctx, pr.reject);
   advance();
   return end_step();
+}
+
+// plg_drop forgets call number call, which the host abandoned with none of its requests in flight: its Promise is
+// released and the call is never listed as finished. Nothing runs meanwhile; code still awaiting what another call
+// settles later runs then, as any pending job, its result reaching nobody.
+EXPORT("plg_drop") uint64_t plg_drop(uint32_t call) {
+  if (!rt || JS_IsUndefined(inst) || closed) return message(ST_ABI, "plugin not loaded", 17);
+  for (uint32_t i = 0; i < ncalls; i++) {
+    if (calls[i].call != call) continue;
+    JSValue promise = calls[i].promise;
+    calls[i] = calls[--ncalls];
+    JS_FreeValue(ctx, promise);
+    begin(ST_OK);
+    return packed();
+  }
+  return message(ST_ABI, "no such call waits", 18);
 }
 
 // plg_close calls the plugin's optional Close method, awaiting it when it returns a Promise.

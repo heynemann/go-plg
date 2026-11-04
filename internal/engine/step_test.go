@@ -182,6 +182,63 @@ func TestGuestsWithoutStepsDoNotMultiplex(t *testing.T) {
 	assert.False(t, inst.Multiplexes())
 }
 
+func TestDropForgetsACall(t *testing.T) {
+	t.Parallel()
+
+	g := stepGuest(stepResult(), nil)
+	g.bodies["plg_drop"] = packed(emptyAt, 1) // OK, with no body
+	inst := mustInstantiate(t, g)
+
+	require.NoError(t, inst.Drop(t.Context(), 9))
+	assert.False(t, inst.Broken())
+	require.NoError(t, inst.Close(t.Context()))
+}
+
+func TestDropFailures(t *testing.T) {
+	t.Parallel()
+
+	refusal := statusMessage(wire.StatusABI, "no such call waits")
+	tests := []struct {
+		drop   []byte // plg_drop's body; nil: no plg_drop export
+		name   string
+		want   string
+		result []byte
+		abi    bool // an ABI violation, not the guest's own failure
+	}{
+		{name: "no export", want: "cannot drop call 9", abi: true},
+		{
+			name: "refused", want: "no such call waits", abi: true,
+			result: refusal, drop: packed(0, uint32(len(refusal))), //nolint:gosec // G115: tiny
+		},
+		{name: "answer with a body", want: "plg_drop of call 9", drop: packed(emptyAt, 5), abi: true},
+		{name: "trap", want: "plg_drop", drop: unreachable()},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			g := stepGuest(tc.result, nil)
+			if tc.drop != nil {
+				g.bodies["plg_drop"] = tc.drop
+			}
+
+			inst := mustInstantiate(t, g)
+
+			err := inst.Drop(t.Context(), 9)
+			require.ErrorContains(t, err, tc.want)
+
+			if tc.abi {
+				require.ErrorIs(t, err, engine.ErrABI)
+			} else {
+				require.NotErrorIs(t, err, engine.ErrABI)
+			}
+
+			assert.True(t, inst.Broken(), "an instance whose drop failed is never reused")
+		})
+	}
+}
+
 func TestStepFailures(t *testing.T) {
 	t.Parallel()
 

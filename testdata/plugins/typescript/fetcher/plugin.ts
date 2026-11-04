@@ -10,6 +10,7 @@
 //   POLL <url>            GETs forever, ignoring the failures
 //   HOG -                 allocates until it runs out of memory
 //   HANG -                awaits a promise nothing settles
+//   STALL <text>          prints text on stdout, then awaits a promise nothing settles, making no request
 //   PRINT <text>          prints text on stdout, then returns "printed"
 //
 // and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
@@ -87,6 +88,9 @@ export function Create() {
           }
         }
         case "HANG":
+          return new Promise<string>(() => {});
+        case "STALL":
+          console.log(args[1]);
           return new Promise<string>(() => {});
         case "PRINT":
           console.log(args[1]);

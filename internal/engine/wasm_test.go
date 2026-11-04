@@ -25,7 +25,7 @@ func signatureOf(export string) [2][]byte {
 	switch export {
 	case "plg_alloc":
 		return [2][]byte{{i32}, {i32}}
-	case "plg_init":
+	case "plg_init", "plg_drop":
 		return [2][]byte{{i32}, {i64}}
 	case "plg_call", "plg_resume":
 		return [2][]byte{{i32, i32}, {i64}}

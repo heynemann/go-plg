@@ -386,6 +386,170 @@ func TestAnAbandonedCallRetryingForeverIsDiscardedAfterItsGrace(t *testing.T) {
 	})
 }
 
+// lineWatcher signals each line a plugin prints that equals text.
+type lineWatcher struct {
+	seen chan struct{}
+	text string
+}
+
+func (*lineWatcher) Enabled(context.Context, slog.Level) bool { return true }
+
+//nolint:gocritic // hugeParam: slog.Handler fixes the signature
+func (w *lineWatcher) Handle(_ context.Context, rec slog.Record) error {
+	rec.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "line" && attr.Value.String() == w.text {
+			w.seen <- struct{}{}
+		}
+
+		return true
+	})
+
+	return nil
+}
+
+func (w *lineWatcher) WithAttrs([]slog.Attr) slog.Handler { return w }
+
+func (w *lineWatcher) WithGroup(string) slog.Handler { return w }
+
+// leftFirst is a context the test ends, whose end never reaches the contexts derived from it (it hands them an
+// AfterFunc it never runs): its caller sees it end while the call's own context, derived from it, has not.
+type leftFirst chan struct{}
+
+func (leftFirst) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c leftFirst) Done() <-chan struct{} { return c }
+
+func (c leftFirst) Err() error {
+	select {
+	case <-c:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (leftFirst) Value(any) any { return nil }
+
+func (leftFirst) AfterFunc(func()) func() bool { return func() bool { return true } }
+
+// awaitSignal waits for a value on ch, failing the test if safety is closed first.
+func awaitSignal(t *testing.T, safety, ch <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-safety:
+		require.FailNow(t, "timed out waiting: "+what)
+	}
+}
+
+// TestAbandonedCallsAreReclaimedWithoutARequestToResumeThem: while a busy call keeps a request in flight, many
+// calls one after the other wait on the same instance with nothing of their own to resume them once their caller
+// leaves at its deadline. Each is gone from the instance (host and guest) by the time the next call starts: the
+// calls in flight never exceed the busy call and the one waiting, and the numbers of the calls that left are used
+// again without the guest knowing them. In TypeScript the call awaits a promise nothing settles, making no request
+// (the guest keeps it while the busy call's request could still settle it). A Lua call waits only for a request of
+// its own, which ends with the call's context; here the caller's context's end never reaches the call's, so only
+// the caller's leaving can end that request.
+func TestAbandonedCallsAreReclaimedWithoutARequestToResumeThem(t *testing.T) {
+	t.Parallel()
+
+	eachScript(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		const (
+			stalls = 32
+			key    = "stall/fetch"
+		)
+
+		lua := lang.name() == luaLanguage().name()
+
+		// A Lua call whose caller left without its request ending waits until a safety deadline ends, failing the
+		// test instead of hanging it.
+		safety, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+
+		logs, srv := &lineWatcher{seen: make(chan struct{}, stalls), text: "stalled"}, newGateServer(t)
+
+		release := sync.OnceFunc(func() { close(srv.release) })
+		defer release()
+
+		ctr := newContainer(t, plg.WithLogger(slog.New(logs)))
+		policy := openPolicy(hostOf(t, srv.URL))
+		policy.Timeout = time.Hour // only their calls' contexts end the requests
+		plug := fetcherIn(t, lang, ctr, "stall", plg.WithPool(1, 1),
+			plg.WithConcurrentCalls(3), // the busy call, a stall and a look at the instance's owner
+			plg.WithHTTP(policy))
+
+		busy := callLater(t.Context(), plug, "GET "+srv.URL)
+		<-srv.started
+
+		for i := range stalls {
+			var (
+				ctx   context.Context // the stall's own, which leave ends
+				leave func()
+			)
+
+			cmd := "STALL stalled"
+
+			if lua {
+				end := make(leftFirst)
+				ctx, leave, cmd = end, func() { close(end) }, "NOTE "+srv.URL+" stalled"
+			} else {
+				end := make(expiring)
+				ctx, leave = end, func() { close(end) }
+			}
+
+			stalled := callLater(ctx, plug, cmd)
+
+			if lua {
+				<-srv.started
+			} else {
+				<-logs.seen
+			}
+
+			inFlight, err := plg.CallsInFlight(t.Context(), ctr, key) // after the stall's step: it waits
+			require.NoError(t, err)
+			require.Equal(t, 2, inFlight, "stall %d: the busy call and this one, the stalls before it gone", i)
+
+			leave() // its deadline passes while it waits
+
+			got := <-stalled
+			require.ErrorIs(t, got.err, context.DeadlineExceeded)
+			require.NotErrorAs(t, got.err, new(*plg.PanicError), "the instance did not fail")
+
+			if lua {
+				awaitSignal(t, safety.Done(), srv.abandoned, "the request of the call that left ends")
+				awaitSignal(t, safety.Done(), logs.seen, "the rest of the call that left runs")
+			}
+		}
+
+		got := <-callLater(t.Context(), plug, "PRINT next")
+		require.NoError(t, got.err)
+
+		inFlight, err := plg.CallsInFlight(t.Context(), ctr, key)
+		require.NoError(t, err)
+		assert.Equal(t, 1, inFlight, "the busy call alone")
+
+		// The guest forgot every stall too: calls taking their numbers again start as new ones.
+		require.NoError(t, plg.RestartCallNumbers(t.Context(), ctr, key))
+
+		for range stalls + 1 {
+			out, err := plug.Foo(t.Context(), "PRINT again")
+			require.NoError(t, err)
+			assert.Equal(t, "printed", out)
+		}
+
+		release()
+
+		got = <-busy
+		require.NoError(t, got.err, "the busy call goes on")
+		assert.Equal(t, "200||ok", got.out)
+		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 3}, plg.Stats(ctr, key), "the same instance")
+		assert.Empty(t, ctr.RecentPanics())
+	})
+}
+
 func TestAFailingCallDiscardsItsInstanceWithItsCalls(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,7 @@ package plg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"reflect"
@@ -156,6 +157,61 @@ func AwaitRetired(ctx context.Context, c *Container) error {
 // SetCloseTimeout replaces the time a retired version's instances get to run their Close.
 func SetCloseTimeout(c *Container, d time.Duration) {
 	c.closeTimeout = d
+}
+
+// CallsInFlight returns how many calls the multiplexed instance of the plugin with the given key has in flight,
+// as its owner goroutine counts them once it has run every operation handed to it before. It takes one of the
+// instance's lanes meanwhile.
+func CallsInFlight(ctx context.Context, c *Container, key string) (int, error) {
+	var n int
+
+	err := onMux(ctx, c, key, func(m *muxInstance) { n = len(m.flight) })
+
+	return n, err
+}
+
+// RestartCallNumbers makes the multiplexed instance of the plugin with the given key number its next calls from 1
+// again (skipping those in flight), so that they take the numbers of calls it ended. It takes one of the
+// instance's lanes meanwhile.
+func RestartCallNumbers(ctx context.Context, c *Container, key string) error {
+	return onMux(ctx, c, key, func(m *muxInstance) { m.last = 0 })
+}
+
+// errNotMultiplexed reports a plugin whose instances serve one call at a time.
+var errNotMultiplexed = errors.New("its instances serve one call at a time")
+
+// onMux runs operation on the owner goroutine of the multiplexed instance of the plugin with the given key,
+// through one of its lanes.
+func onMux(ctx context.Context, c *Container, key string, operation func(m *muxInstance)) error {
+	gen, err := c.serving(key)
+	if err != nil {
+		return err
+	}
+
+	defer gen.leave()
+
+	held, err := gen.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer gen.pool.release(context.WithoutCancel(ctx), held)
+
+	lane, ok := held.inst.(*muxLane)
+	if !ok {
+		return fmt.Errorf("plugin %s: %w", key, errNotMultiplexed)
+	}
+
+	done := make(chan struct{})
+
+	lane.m.ops <- func() {
+		operation(lane.m)
+		close(done)
+	}
+
+	<-done
+
+	return nil
 }
 
 func (p *pool) stats() PoolStats {

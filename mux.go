@@ -17,7 +17,9 @@ import (
 // may go on running: the plugin code after its HTTP requests fail, such as cleanup in a catch or finally block.
 // It is one deadline per call, from its end, however many steps the rest takes: a call still running then (a step
 // running past it is stopped; a call that starts another step afterwards, say retrying a failed request forever,
-// is failed instead) discards the instance, as any call stopped at its deadline.
+// is failed instead) discards the instance, as any call stopped at its deadline. An abandoned call with none of
+// its requests in flight, which nothing of its own can resume (a TypeScript promise awaiting what nothing or
+// another call settles), does not wait for its grace to run out: the guest forgets it at once (see reclaim).
 const muxGrace = 250 * time.Millisecond
 
 var (
@@ -37,6 +39,8 @@ type stepper interface {
 	Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error)
 	// EndCall ends a call no longer in flight: its number may be started again.
 	EndCall(call uint32)
+	// Drop makes the guest forget a call in flight with none of its requests in flight, which the host gave up on.
+	Drop(ctx context.Context, call uint32) error
 }
 
 // muxError fails a call on a multiplexed instance without a guest failure of its own: another call broke the
@@ -61,10 +65,12 @@ func (e *muxError) Unwrap() error { return e.err }
 // which it runs one at a time, so the instance and every callState are only ever touched by it. Callers take a
 // lane each from the pool; a lane is an [instance] whose Call hands the call to the owner and waits for its
 // answer in a mailbox, so every call has its own argument and result buffers. A caller whose context ends while
-// its call waits leaves at once, even while the owner runs another call's step: the owner then answers that
-// mailbox to nobody (see callWaiting). A step that traps, is stopped, panics or breaks the ABI fails its own call
-// with a [PanicError] and every other call on the instance with [ErrInstanceLost]; the instance is then broken,
-// and its lanes are discarded.
+// its call waits leaves at once, even while the owner runs another call's step, and wakes the owner, which then
+// abandons the call, answering its mailbox to nobody (see callWaiting and sweep), before it starts another: besides
+// the calls the lanes hold, the only calls in flight are answered ones whose requests, ended with them, have not
+// come back yet, and whose rest then runs within muxGrace. A step that traps, is stopped, panics or breaks the ABI
+// fails its own call with a [PanicError] and every other call on the instance with [ErrInstanceLost]; the instance
+// is then broken, and its lanes are discarded.
 type muxInstance struct {
 	inst       stepper // owned by run, then by the Close of the last lane
 	pool       *pool
@@ -73,6 +79,7 @@ type muxInstance struct {
 	stop       chan struct{} // closed by the Close of the last lane
 	exited     chan struct{} // closed when run returns
 	ready      chan struct{} // closed: what run selects on while refusals wait
+	wake       chan struct{} // one pending wake-up of run once callers left (see left)
 	flight     map[uint32]*callState
 	refused    []refusal      // owner-only: the refusals to deliver, oldest first
 	fetches    sync.WaitGroup // request goroutines
@@ -81,7 +88,8 @@ type muxInstance struct {
 	busy       atomic.Int32   // lanes handed out to callers (the pool's count)
 	broken     atomic.Bool
 	discarding atomic.Bool
-	last       uint32 // the number of the last call started
+	leaving    atomic.Bool // a caller left while its call waited, since the owner's last sweep
+	last       uint32      // the number of the last call started
 }
 
 // refusal is a request http_start refused at once, waiting for the owner to deliver its answer.
@@ -155,6 +163,7 @@ func newMux(p *pool, inst stepper, lanes int) []*muxLane {
 		exited:    make(chan struct{}),
 		flight:    make(map[uint32]*callState),
 		ready:     make(chan struct{}),
+		wake:      make(chan struct{}, 1),
 	}
 	close(mux.ready)
 	mux.memory.Store(inst.Memory())
@@ -189,6 +198,8 @@ func (m *muxInstance) run() {
 			m.do(operation)
 		case <-refusals:
 			m.do(m.deliver)
+		case <-m.wake:
+			m.do(m.sweep)
 		case <-discarded:
 			discarded = nil
 
@@ -229,8 +240,11 @@ func (m *muxInstance) do(operation func()) {
 }
 
 // start starts a call, answering it at once when the call's context has ended (its caller may have left
-// already) or the instance is broken.
+// already) or the instance is broken. First it abandons the calls whose callers left, so that a lane's call never
+// adds to the one its last caller left.
 func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32, args []byte) {
+	m.sweep() //nolint:contextcheck // each call left behind is dropped under its own context, within its grace
+
 	if ctx.Err() != nil || !mailbox.begin(callQueued) {
 		mailbox.answer(engine.Result{}, unstarted(context.Cause(ctx)), "")
 
@@ -258,11 +272,13 @@ func (m *muxInstance) start(ctx context.Context, mailbox *muxCall, method uint32
 	step, err := m.inst.Start(callCtx, state.id, method, args)
 	m.after(state, &step, err) //nolint:contextcheck // requests run under their own call's context
 	m.settle(state)
+	m.reclaim(state) //nolint:contextcheck // dropped under its own context, within its grace
 }
 
 // abandon answers a call whose caller's context ended with cause while the call waited (or ran a step of its
 // own), and ends its requests; a caller that left already gets nothing. The guest then runs the rest of the call
-// (with the failed requests) within muxGrace in all.
+// (with the failed requests) within muxGrace in all, or forgets it when none of its requests is in flight
+// (reclaim).
 func (*muxInstance) abandon(state *callState, cause error) {
 	state.cancel()
 	state.mailbox.answer(engine.Result{}, abandoned(cause), "")
@@ -305,21 +321,92 @@ func (m *muxInstance) resume(state *callState, request uint32, answer []byte) {
 
 	ctx := state.ctx
 	if state.mailbox == nil { // the call is answered: the rest of it runs on borrowed time, muxGrace in all
-		if !time.Now().Before(state.grace) {
-			m.fail(state, engine.Result{}, errMuxGraceSpent)
+		var (
+			cancel context.CancelFunc
+			ok     bool
+		)
 
+		ctx, cancel, ok = m.borrowed(state)
+		if !ok {
 			return
 		}
 
-		var cancel context.CancelFunc
-
-		ctx, cancel = context.WithDeadline(context.WithoutCancel(state.ctx), state.grace)
 		defer cancel()
 	}
 
 	step, err := m.inst.Resume(ctx, request, answer)
 	m.after(state, &step, err)
 	m.settle(state)
+	m.reclaim(state)
+}
+
+// borrowed returns the context the rest of an answered call runs under, ending with its grace. Once the grace has
+// passed, it fails the instance instead, the call to blame (errMuxGraceSpent), and reports false.
+func (m *muxInstance) borrowed(state *callState) (context.Context, context.CancelFunc, bool) {
+	if !time.Now().Before(state.grace) {
+		m.fail(state, engine.Result{}, errMuxGraceSpent)
+
+		return nil, nil, false
+	}
+
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(state.ctx), state.grace)
+
+	return ctx, cancel, true
+}
+
+// left is a caller's report that it left while its call waited: it wakes the owner to abandon the call (sweep),
+// which the owner would otherwise learn only when one of the call's requests comes back, never for a call with
+// none in flight.
+func (m *muxInstance) left() {
+	m.leaving.Store(true)
+
+	select {
+	case m.wake <- struct{}{}:
+	default: // a wake-up is pending already
+	}
+}
+
+// sweep abandons the calls whose callers left while they waited, as their callers reported (left): those with
+// none of their requests in flight are reclaimed at once, the others once their requests, ended with them, come
+// back. The owner sweeps when woken and before it starts a call.
+func (m *muxInstance) sweep() {
+	if !m.leaving.Load() || !m.leaving.Swap(false) {
+		return
+	}
+
+	for _, state := range m.flight {
+		if mailbox := state.mailbox; mailbox != nil && mailbox.stage.Load() == callLeft {
+			m.abandon(state, mailbox.cause)
+			m.reclaim(state)
+		}
+	}
+}
+
+// reclaim makes the guest forget a call answered on its caller's behalf whose requests have all come back:
+// nothing of its own can resume it any more (a TypeScript promise awaiting what nothing, or another call,
+// settles). Rather than keep it for good in the flight table and the guest, it drops it now, within its grace;
+// the drop runs none of the call's code. A drop that fails breaks the instance, the call to blame.
+func (m *muxInstance) reclaim(state *callState) {
+	if state.mailbox != nil || state.finished || state.pending > 0 || m.broken.Load() {
+		return
+	}
+
+	ctx, cancel, ok := m.borrowed(state)
+	if !ok {
+		return
+	}
+
+	defer cancel()
+
+	err := m.inst.Drop(ctx, state.id)
+	if err != nil {
+		m.fail(state, engine.Result{}, err)
+
+		return
+	}
+
+	state.finished = true
+	m.forget(state)
 }
 
 // settle hands a call back to waiting after a step of its own, under its context, that did not answer it; when
@@ -571,6 +658,8 @@ func (l *muxLane) Call(ctx context.Context, method uint32, args []byte) (engine.
 		err := mailbox.leave(context.Cause(ctx))
 		if err != nil {
 			l.mailbox = newMuxCall() // the owner keeps this one, to answer it to nobody
+
+			owner.left()
 
 			return engine.Result{}, err
 		}

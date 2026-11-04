@@ -23,6 +23,12 @@ const (
 	// exportResume is plg_resume(request, len u32) u64: deliver the [httpabi] answer in the input buffer to the
 	// request with that number.
 	exportResume = "plg_resume"
+	// exportDrop is plg_drop(call u32) u64: forget call number call, in flight with none of its requests in
+	// flight, which the host gave up on: the guest releases what it keeps for the call, runs none of the plugin's
+	// code, and never lists the call as finished. It answers a status-prefixed buffer: OK with an empty body, or
+	// ABI with a message for a call it does not hold. Optional: a guest whose calls in flight always wait for a
+	// request of their own (Lua, whose coroutines yield only in http.request) has none to drop.
+	exportDrop = "plg_drop"
 	// importHTTPStart is http_start(call, ptr, len u32) u32: during a step, the guest hands over an [httpabi]
 	// request made by the given call (in flight: started and not ended, see [Instance.EndCall]); the host copies
 	// it, or refuses it at once, numbers it and returns its number. Outside a step it is an ABI violation.
@@ -91,6 +97,29 @@ func (in *Instance) Start(ctx context.Context, call, method uint32, args []byte)
 // for it, and Start may use its number again.
 func (in *Instance) EndCall(call uint32) {
 	delete(in.host.calls, call)
+}
+
+// Drop makes the guest forget call number call, in flight with none of its requests in flight (see exportDrop);
+// the caller still ends it with [Instance.EndCall]. A guest without plg_drop, or answering with anything but OK,
+// breaks the instance. The instance must multiplex.
+func (in *Instance) Drop(ctx context.Context, call uint32) error {
+	if in.drop == nil {
+		return in.fail(fmt.Errorf("%w: cannot drop call %d: no %s export", ErrABI, call, exportDrop))
+	}
+
+	in.stack[0] = uint64(call)
+
+	res, err := in.invoke(ctx, &in.drop, in.stack[:1])
+	if err != nil {
+		return err
+	}
+
+	if res.Status != wire.StatusOK || len(res.Body) != 0 {
+		return in.fail(fmt.Errorf("%w: %s of call %d: guest status %s: %s", ErrABI, exportDrop, call, res.Status,
+			res.Message))
+	}
+
+	return nil
 }
 
 // Resume delivers the [httpabi] answer of request number id and runs the guest until it can make no more

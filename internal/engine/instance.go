@@ -51,7 +51,7 @@ type Instance struct {
 	mod                      api.Module
 	mem                      api.Memory
 	alloc, init, call, close api.Function
-	start, resume            api.Function // nil unless the guest multiplexes (step.go)
+	start, resume, drop      api.Function // nil unless the guest multiplexes (step.go); drop is optional
 	host                     *hostState
 	hosts                    *xsync.Map[string, *hostState] // the runtime's registry host lives in
 	done                     []Completion                   // reused by every step
@@ -80,6 +80,7 @@ func newInstance(ctx context.Context, mod api.Module, host *hostState, hosts *xs
 		close:  mod.ExportedFunction(exportClose),
 		start:  mod.ExportedFunction(exportStart),
 		resume: mod.ExportedFunction(exportResume),
+		drop:   mod.ExportedFunction(exportDrop),
 		host:   host,
 		hosts:  hosts,
 	}

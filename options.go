@@ -254,9 +254,10 @@ func WithPool(minimum, maximum int) RegisterOption {
 // while http.request yields), and they share the instance's memory limit. Each call keeps its own context: when it
 // ends while the call waits for its requests, the call fails with the context's error and the instance serves on
 // (the plugin sees the requests fail, and the code it runs afterwards gets 250 ms in all, else the instance is
-// discarded). A call that traps, runs out of memory, panics, breaks the guest ABI or is stopped at its deadline
-// while running discards the instance: it fails with a [PanicError] as usual, and every other call on the instance
-// with [ErrInstanceLost].
+// discarded); a TypeScript call with no fetch in flight, awaiting what only another call (or nothing) settles, is
+// dropped from the instance at once instead. A call that traps, runs out of memory, panics, breaks the guest ABI or
+// is stopped at its deadline while running discards the instance: it fails with a [PanicError] as usual, and every
+// other call on the instance with [ErrInstanceLost].
 // A Lua plugin's request made where its call cannot yield (inside a coroutine of the plugin's own, or a callback
 // of a C function such as table.sort's comparator) blocks the instance, as without the option.
 //

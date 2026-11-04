@@ -2668,10 +2668,18 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 // scriptedGuest is a multiplexing fake guest whose steps the test plays: each Start and Resume hands the test a
 // guestStep and waits for its reply.
 type scriptedGuest struct {
-	steps  chan *guestStep
-	ended  chan uint32 // the calls the owner ended, while there is room
-	output string      // what Guest returns
-	closed atomic.Int32
+	steps   chan *guestStep
+	ended   chan uint32      // the calls the owner ended, while there is room
+	dropped chan droppedCall // the calls the owner dropped, while there is room
+	dropErr error            // what Drop returns
+	output  string           // what Guest returns
+	closed  atomic.Int32
+}
+
+// droppedCall is a call the owner made a scriptedGuest drop, and its context's deadline then.
+type droppedCall struct {
+	deadline time.Time
+	call     uint32
 }
 
 // guestStep is one step of a scriptedGuest: Start's call, method and arguments, or Resume's request and answer.
@@ -2695,7 +2703,9 @@ type stepReply struct {
 const scriptedMemory = 3 * engine.PageSize
 
 func newScriptedGuest() *scriptedGuest {
-	return &scriptedGuest{steps: make(chan *guestStep), ended: make(chan uint32, 16)}
+	return &scriptedGuest{
+		steps: make(chan *guestStep), ended: make(chan uint32, 16), dropped: make(chan droppedCall, 16),
+	}
 }
 
 func (g *scriptedGuest) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
@@ -2729,6 +2739,17 @@ func (g *scriptedGuest) EndCall(call uint32) {
 	case g.ended <- call:
 	default:
 	}
+}
+
+func (g *scriptedGuest) Drop(ctx context.Context, call uint32) error {
+	deadline, _ := ctx.Deadline()
+
+	select {
+	case g.dropped <- droppedCall{call: call, deadline: deadline}:
+	default:
+	}
+
+	return g.dropErr
 }
 
 func (g *scriptedGuest) play(ctx context.Context, s *guestStep) (engine.Step, error) {
@@ -3110,8 +3131,9 @@ func (leftFirst) Value(any) any { return nil }
 func (leftFirst) AfterFunc(func()) func() bool { return func() bool { return true } }
 
 // TestMuxAbandonsACallWhoseCallerLeftFirst: a caller can see its context end, and leave, before that end reaches
-// its call's context; the call's next step still runs on borrowed time, not under a context about to end, which
-// would stop the whole instance.
+// its call's context (here it never does); told of the departure, the owner abandons the call all the same, ending
+// its request, and the call's next step runs on borrowed time, not under a context about to end, which would stop
+// the whole instance.
 func TestMuxAbandonsACallWhoseCallerLeftFirst(t *testing.T) {
 	t.Parallel()
 
@@ -3133,10 +3155,10 @@ func TestMuxAbandonsACallWhoseCallerLeftFirst(t *testing.T) {
 		close(ctx)
 		require.ErrorIs(t, (<-late).err, context.DeadlineExceeded)
 
-		request.answer <- "ok" // the call's own context lives on, and its request with it
+		<-request.done // the owner ends the request, though the end of the caller's context never reached it
 
 		step = guest.next()
-		assert.Equal(t, "ok", string(step.args))
+		assert.Equal(t, "ended", string(step.args))
 		assert.WithinDuration(t, time.Now().Add(muxGrace), step.deadline, 0, "on borrowed time")
 		step.finish(abandoned, "nobody reads this")
 		assert.Equal(t, abandoned, <-guest.ended)
@@ -3478,6 +3500,294 @@ func TestMuxEndedCallHasOneTotalGrace(t *testing.T) {
 				require.Len(t, panics, 1, "the call nobody waits for is reported")
 				require.ErrorIs(t, panics[0], context.DeadlineExceeded)
 				require.ErrorContains(t, panics[0], "grace")
+			})
+		})
+	}
+}
+
+// waitForNothing ends a step without a request or a finished call: the call it ran waits for what only another
+// call could settle, or nothing (a TypeScript promise).
+func (s *guestStep) waitForNothing() {
+	s.reply <- stepReply{}
+}
+
+// requireAbandoned checks a call failed with errLate, its caller's context's cause, and left its instance serving.
+func requireAbandoned(t *testing.T, got laneResult) {
+	t.Helper()
+	require.ErrorIs(t, got.err, errLate)
+
+	lost, ok := errors.AsType[*muxError](got.err)
+	require.True(t, ok)
+	assert.False(t, lost.discard, "the instance serves on")
+}
+
+// abandonWaiting starts a call on held that waits for nothing, whose caller leaves at its deadline meanwhile; it
+// returns the call.
+func abandonWaiting(t *testing.T, guest *scriptedGuest, _ *fakeWeb, held *slot) uint32 {
+	t.Helper()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	late := callLane(ctx, held, "late")
+	step := guest.next()
+	step.waitForNothing()
+	synctest.Wait() // the call waits
+
+	cancel(errLate)
+	requireAbandoned(t, <-late)
+
+	return step.call
+}
+
+// abandonInItsStep starts a call on held whose context ends during its first step, which leaves it waiting for
+// nothing; it returns the call.
+func abandonInItsStep(t *testing.T, guest *scriptedGuest, _ *fakeWeb, held *slot) uint32 {
+	t.Helper()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	late := callLane(ctx, held, "late")
+	step := guest.next()
+
+	cancel(errLate)
+	synctest.Wait() // the caller waits for the step
+	step.waitForNothing()
+	requireAbandoned(t, <-late)
+
+	return step.call
+}
+
+// abandonAfterItsRequest starts a call on held waiting for request 1, abandoned at its deadline; once the request
+// comes back, ended with it, the rest of the call waits for nothing. It returns the call.
+func abandonAfterItsRequest(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) uint32 {
+	t.Helper()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	late := callLane(ctx, held, "late")
+	step := guest.next()
+	step.wait(1)
+
+	request := <-web.requests
+
+	cancel(errLate)
+	requireAbandoned(t, <-late)
+	<-request.done
+
+	rest := guest.next()
+	require.Equal(t, uint32(1), rest.request)
+	rest.waitForNothing()
+
+	return step.call
+}
+
+// TestMuxReclaimsAbandonedCallsNothingResumes: a call abandoned at its deadline with none of its requests in
+// flight, which nothing of its own can resume, is dropped from the guest and forgotten at once, within its grace,
+// however the owner learns it was abandoned: from its caller leaving while it waited (with no other operation for
+// the owner), during a step of its own, or once its last request came back. The other call and the lanes serve on.
+func TestMuxReclaimsAbandonedCallsNothingResumes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		abandon func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) uint32
+		name    string
+	}{
+		{name: "its caller left while it waited", abandon: abandonWaiting},
+		{name: "its context ended in its own step", abandon: abandonInItsStep},
+		{name: "its last request came back", abandon: abandonAfterItsRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				guest, web := newScriptedGuest(), newFakeWeb()
+				instances := muxPool(t, guest, 2, web.serve, nil)
+				held := acquireN(t, instances, 2)
+
+				other := callLane(t.Context(), held[1], "other")
+				step := guest.next()
+				otherCall := step.call
+				step.wait(100)
+
+				otherRequest := <-web.requests
+
+				abandoned := tc.abandon(t, guest, web, held[0])
+
+				synctest.Wait() // the owner is idle
+
+				select {
+				case dropped := <-guest.dropped:
+					assert.Equal(t, abandoned, dropped.call)
+					assert.True(t, dropped.deadline.Equal(time.Now().Add(muxGrace)), "within its grace")
+				default:
+					require.Fail(t, "the abandoned call is still in flight")
+				}
+
+				select {
+				case ended := <-guest.ended:
+					assert.Equal(t, abandoned, ended, "its number may be used again")
+				default:
+					require.Fail(t, "the abandoned call is not ended")
+				}
+
+				otherRequest.answer <- "answer"
+
+				guest.next().finish(otherCall, "other")
+
+				got := <-other
+				require.NoError(t, got.err, "the other call goes on")
+				assert.Equal(t, "other", string(got.res.Body))
+
+				for _, lane := range held {
+					next := callLane(t.Context(), lane, "next")
+
+					step = guest.next()
+					step.finish(step.call, "next")
+					require.NoError(t, (<-next).err)
+					instances.release(t.Context(), lane)
+				}
+
+				assert.Empty(t, guest.dropped, "dropped once")
+				assert.Empty(t, instances.panics.history.recent())
+			})
+		})
+	}
+}
+
+// TestMuxStartsNoCallBeforeReclaimingThoseLeft: a caller that left while the owner ran another call's step takes
+// its lane's next call at once; the owner reclaims the call left behind before it starts that one, so the calls in
+// flight never outnumber the lanes.
+func TestMuxStartsNoCallBeforeReclaimingThoseLeft(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		guest, web := newScriptedGuest(), newFakeWeb()
+		instances := muxPool(t, guest, 2, web.serve, nil)
+		held := acquireN(t, instances, 2)
+
+		ctx, cancel := context.WithCancelCause(t.Context())
+		late := callLane(ctx, held[0], "late")
+		step := guest.next()
+		left := step.call
+		step.waitForNothing()
+
+		busy := callLane(t.Context(), held[1], "busy")
+		running := guest.next() // the owner runs this step until the test ends it
+
+		cancel(errLate)
+		requireAbandoned(t, <-late) // while the owner is busy
+
+		next := callLane(t.Context(), held[0], "next")
+
+		synctest.Wait() // the next call waits for the owner
+		running.finish(running.call, "busy")
+		require.NoError(t, (<-busy).err)
+
+		step = guest.next()
+		assert.NotEqual(t, left, step.call)
+
+		select {
+		case dropped := <-guest.dropped:
+			assert.Equal(t, left, dropped.call)
+		default:
+			assert.Fail(t, "the next call started before the call its lane's caller left was reclaimed")
+		}
+
+		step.finish(step.call, "next")
+		require.NoError(t, (<-next).err)
+
+		for _, lane := range held {
+			instances.release(t.Context(), lane)
+		}
+
+		assert.Empty(t, instances.panics.history.recent())
+	})
+}
+
+// TestMuxFailsTheInstanceWhenItCannotReclaimACall: an abandoned call nothing resumes is failed instead of dropped
+// when the guest fails to drop it, or when its grace was spent before the owner could (here by the step of its own
+// that left it waiting): the instance is discarded, the call reported, as nobody waits for it, and the other call
+// fails with ErrInstanceLost.
+func TestMuxFailsTheInstanceWhenItCannotReclaimACall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		abandon func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot)
+		check   func(t *testing.T, failure *PanicError, guest *scriptedGuest)
+		name    string
+	}{
+		{
+			name: "the drop fails",
+			abandon: func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) {
+				t.Helper()
+
+				guest.dropErr = errFake
+				abandonWaiting(t, guest, web, held)
+			},
+			check: func(t *testing.T, failure *PanicError, guest *scriptedGuest) {
+				t.Helper()
+				assert.Equal(t, errFake, failure.Value)
+				assert.Len(t, guest.dropped, 1)
+			},
+		},
+		{
+			name: "its grace is spent",
+			abandon: func(t *testing.T, guest *scriptedGuest, web *fakeWeb, held *slot) {
+				t.Helper()
+
+				ctx, cancel := context.WithCancelCause(t.Context())
+				late := callLane(ctx, held, "late")
+
+				guest.next().wait(1)
+
+				request := <-web.requests
+
+				cancel(errLate)
+				requireAbandoned(t, <-late)
+				<-request.done
+
+				rest := guest.next()
+				time.Sleep(time.Until(rest.deadline)) // the rest takes the whole grace, then waits for nothing
+				rest.waitForNothing()
+			},
+			check: func(t *testing.T, failure *PanicError, guest *scriptedGuest) {
+				t.Helper()
+				require.ErrorIs(t, failure, context.DeadlineExceeded)
+				require.ErrorContains(t, failure, "grace")
+				assert.Empty(t, guest.dropped, "no drop once the grace is spent")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				guest, web := newScriptedGuest(), newFakeWeb()
+				instances := muxPool(t, guest, 2, web.serve, nil)
+				held := acquireN(t, instances, 2)
+
+				other := callLane(t.Context(), held[1], "other")
+
+				guest.next().wait(100)
+
+				otherRequest := <-web.requests
+
+				tc.abandon(t, guest, web, held[0])
+
+				got := <-other
+				require.ErrorIs(t, got.err, ErrInstanceLost)
+				<-otherRequest.done // the other call's request ends with it
+
+				panics := instances.panics.history.recent()
+				require.Len(t, panics, 1, "the call nobody waits for is reported")
+				assert.Equal(t, PhaseCall, panics[0].Phase)
+				tc.check(t, panics[0], guest)
+
+				for _, lane := range held {
+					assert.True(t, lane.inst.Broken())
+					instances.discard(t.Context(), lane)
+				}
 			})
 		})
 	}

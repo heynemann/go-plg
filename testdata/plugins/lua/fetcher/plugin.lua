@@ -11,6 +11,7 @@
 --   HOG -                 allocates until it runs out of memory
 --   YIELD -               yields from the method itself
 --   PRINT <text>          prints text on stdout, then returns "printed"
+--   NOTE <url> <text>     one GET, then prints text on stdout, whatever the GET's outcome
 --
 -- and returns "<status code>|<X-Reply header>|<body>" of the last response; FLOOD returns "<responses>|<the
 -- distinct sorted reasons of the failed requests, joined by ;>".
@@ -102,6 +103,10 @@ function Fetcher:Foo(cmd)
   elseif verb == "PRINT" then
     print(args[2])
     return "printed"
+  elseif verb == "NOTE" then
+    local resp, err = get(args[2])
+    print(args[3])
+    return describe(resp, err)
   end
   return nil, "unknown command " .. verb
 end
