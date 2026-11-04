@@ -9,11 +9,11 @@ import (
 	"github.com/heynemann/go-plg/internal/guestreg"
 )
 
-// Warm compiles every guest linked into the program (guest/golang, ...) into the on-disk compilation cache, so
-// that containers using that cache start without compiling them: a cold compile of the Go guest takes seconds,
-// loading it from the cache a fraction of a second. Run it once where the cache will be used, e.g. in the
-// Docker build of the service's image, through the service's own binary or `plg warm` (the plg command links
-// every guest it ships):
+// Warm compiles every guest linked into the program (guest/golang, ...), the TypeScript guest's bundler included,
+// into the on-disk compilation cache, so that containers using that cache start without compiling them: a cold
+// compile of the Go guest or of the bundler takes seconds, loading it from the cache a fraction of a second. Run
+// it once where the cache will be used, e.g. in the Docker build of the service's image, through the service's
+// own binary or `plg warm` (the plg command links every guest it ships):
 //
 //	RUN go run github.com/heynemann/go-plg/cmd/plg warm -cache-dir /var/cache/plg
 //
@@ -42,10 +42,16 @@ func Warm(ctx context.Context, opts ...Option) error {
 	// The memory limit is not part of the cache key: every container runtime reads what this one compiles.
 	rt := eng.NewRuntime(ctx, engine.RuntimeOptions{})
 
-	errs := make([]error, 0, len(guests)+2)
+	errs := make([]error, 0, 2*len(guests)+2)
 	for _, guest := range guests {
 		_, err = compileGuest(ctx, rt, Language(guest.Language), guest)
 		errs = append(errs, err)
+
+		if guest.Bundler != nil {
+			bundler := guestreg.Guest{Language: guest.Language, ID: bundlerID, Wasm: guest.Bundler}
+			_, err = compileGuest(ctx, rt, Language(guest.Language), bundler)
+			errs = append(errs, err)
+		}
 	}
 
 	errs = append(errs, rt.Close(ctx), eng.Close(ctx))

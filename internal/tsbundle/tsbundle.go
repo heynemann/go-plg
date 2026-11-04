@@ -1,6 +1,11 @@
 // Package tsbundle bundles a TypeScript (or JavaScript) plugin into the one script the TypeScript guest runs.
-// esbuild runs on the host and reads only the plugin's fs.FS: imports resolve to files of the plugin, relative to
-// the importing file, never to node_modules, the host's file system or the network.
+// esbuild reads only the plugin's fs.FS: imports resolve to files of the plugin, relative to the importing file,
+// never to node_modules, the host's file system or the network.
+//
+// plg never runs it on the host: esbuild can take exponential time on a few hundred bytes (shared `export *`
+// subgraphs, TypeScript's arrow function backtracking) and nothing stops a Go function from outside, so the
+// bundler guest (guestsrc/tsbundle, through [Guest]) runs it inside a WebAssembly sandbox the host stops at its
+// time and memory limits.
 package tsbundle
 
 import (
@@ -35,6 +40,21 @@ var (
 // Bundle bundles the plugin whose entrypoint file is entrypoint inside files into one script, an immediately
 // invoked function assigning the entrypoint's exports to [GlobalName]. Types are stripped, not checked.
 func Bundle(files fs.FS, entrypoint string) (string, error) {
+	bundle, err := run(files, entrypoint)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrBundle, err)
+	}
+
+	return string(bundle), nil
+}
+
+// esbuildError is esbuild's errors, as [describe] lists them.
+type esbuildError string
+
+func (e esbuildError) Error() string { return string(e) }
+
+// run runs esbuild over the plugin and returns the bundle, or esbuild's errors.
+func run(files fs.FS, entrypoint string) ([]byte, error) {
 	result := api.Build(api.BuildOptions{
 		EntryPoints: []string{entrypoint},
 		Bundle:      true,
@@ -50,10 +70,10 @@ func Bundle(files fs.FS, entrypoint string) (string, error) {
 	})
 
 	if len(result.Errors) > 0 {
-		return "", fmt.Errorf("%w: %s", ErrBundle, describe(result.Errors))
+		return nil, esbuildError(describe(result.Errors))
 	}
 
-	return string(result.OutputFiles[0].Contents), nil // one entrypoint, written to memory: one output file
+	return result.OutputFiles[0].Contents, nil // one entrypoint, written to memory: one output file
 }
 
 // describe lists esbuild's errors as file:line:column: text.

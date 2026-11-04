@@ -13,6 +13,7 @@ import (
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/memfs"
 )
 
 // Register loads, under name, every plugin its storages list for the interface T, and publishes them in one
@@ -445,7 +446,7 @@ func (c *Container) loadStep(ctx context.Context, key string, src *source, step 
 // open opens a listed plugin's files, copies them into the snapshot it returns (see [Storage]) and resolves its
 // version: a content hash of the snapshot when the storage gives none. Hashing, bundling and loading all read
 // that one snapshot.
-func (c *Container) open(ctx context.Context, key string, src *source) (fs.FS, error) {
+func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.FS, error) {
 	var opened fs.FS
 
 	err := c.storageCall(ctx, key, "Open", func() error {
@@ -477,7 +478,7 @@ func (c *Container) open(ctx context.Context, key string, src *source) (fs.FS, e
 // launch starts the minimum instances of an opened plugin's pool (running Create in each) and returns the
 // generation they serve. Its adapter and its memory reservation are the caller's to set. A panic once the
 // instances started (the user's logger) closes them before going on: nothing else owns them yet.
-func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files fs.FS) (
+func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files *memfs.FS) (
 	*plugin, error,
 ) {
 	start := time.Now()
@@ -487,7 +488,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 			slog.String("key", key), slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
 	}
 
-	spec, err := src.loader.prepare(reg, files, src.desc.Entrypoint)
+	spec, err := src.loader.prepare(ctx, c, reg, src, files)
 	if err != nil {
 		return nil, err
 	}

@@ -10,11 +10,15 @@ import (
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/plgimpl"
 )
 
 // MuxGrace is how long, in all, a multiplexed call that already ended may run on.
 const MuxGrace = muxGrace
+
+// BundleMemoryLimit is the bundler's memory limit.
+const BundleMemoryLimit = bundleMemoryLimit
 
 // WithHTTPRoots makes the plugins' https requests trust roots instead of the system's certificate authorities, so
 // tests can reach their own https servers.
@@ -189,6 +193,28 @@ func AwaitRetired(ctx context.Context, c *Container) error {
 // SetCloseTimeout replaces the time a retired version's instances get to run their Close.
 func SetCloseTimeout(c *Container, d time.Duration) {
 	c.closeTimeout = d
+}
+
+// SetBundleLimits replaces the base of a bundling's time limit and the bundler's memory limit. Call it before the
+// container loads any TypeScript plugin.
+func SetBundleLimits(c *Container, timeBase time.Duration, memory uint64) {
+	c.bundleTimeBase, c.bundleMemory = timeBase, memory
+}
+
+// Bundle bundles the TypeScript plugin whose entrypoint is entrypoint inside files as a load does, in the
+// container's bundler.
+func Bundle(ctx context.Context, ctr *Container, files fs.FS, entrypoint string) (string, error) {
+	guest, ok := guestreg.Lookup(string(LanguageTypeScript))
+	if !ok {
+		return "", ErrGuestNotLinked
+	}
+
+	snapshot, err := snapshotFiles(ctx, files)
+	if err != nil {
+		return "", err
+	}
+
+	return ctr.bundle(ctx, guest, snapshot, entrypoint)
 }
 
 // CallsInFlight returns how many calls the multiplexed instance of the plugin with the given key has in flight,

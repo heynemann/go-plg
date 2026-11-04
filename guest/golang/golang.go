@@ -7,11 +7,7 @@
 package golang
 
 import (
-	"bytes"
-	"compress/gzip"
 	_ "embed" // golang.wasm.gz
-	"fmt"
-	"io"
 	"sync"
 
 	"github.com/heynemann/go-plg/internal/guestreg"
@@ -27,23 +23,8 @@ var artifact []byte
 // not modify it.
 //
 //nolint:gochecknoglobals // the once-per-process inflation the guest registry hands out
-var wasm = sync.OnceValues(func() ([]byte, error) { return inflate(artifact) })
+var wasm = sync.OnceValues(func() ([]byte, error) { return guestreg.Inflate(artifact) })
 
 func init() {
 	guestreg.Register(guestreg.Guest{Language: Language, Wasm: wasm})
-}
-
-// inflate decompresses a gzip stream.
-func inflate(compressed []byte) ([]byte, error) {
-	zr, err := gzip.NewReader(bytes.NewReader(compressed))
-	if err != nil {
-		return nil, fmt.Errorf("guest/golang: inflating the artifact: %w", err)
-	}
-
-	raw, err := io.ReadAll(zr)
-	if err != nil {
-		return nil, fmt.Errorf("guest/golang: inflating the artifact: %w", err)
-	}
-
-	return raw, nil
 }

@@ -11,7 +11,7 @@ interpreter compiled to WebAssembly and embedded in plg:
 |---|---|
 | Go | [yaegi](https://github.com/traefik/yaegi), compiled to wasip1 |
 | Lua | Lua 5.4, compiled with wasi-sdk |
-| TypeScript (and JavaScript) | [QuickJS-ng](https://github.com/quickjs-ng/quickjs), compiled with wasi-sdk; [esbuild](https://github.com/evanw/esbuild) bundles the plugin on the host |
+| TypeScript (and JavaScript) | [QuickJS-ng](https://github.com/quickjs-ng/quickjs), compiled with wasi-sdk; [esbuild](https://github.com/evanw/esbuild), compiled to wasip1, bundles the plugin in a sandbox of its own |
 
 **Stability comes first: a plugin cannot take down the host process.** Panics, running out of memory, stack
 overflows, infinite loops and runtime aborts inside a plugin become errors on that plugin's call; the faulty
@@ -364,6 +364,12 @@ export function Create() {
 - esbuild bundles the entrypoint and what it imports by relative path (`.ts`, `.js`, JSON and text files) from
   the plugin's own files; package, URL and absolute imports fail Register naming `file:line:col`. TypeScript is
   transpiled, not type-checked.
+- Bundling runs in a WebAssembly sandbox of its own (esbuild compiled to wasm, shipped in the TypeScript guest),
+  never on the host: a plugin can make esbuild work exponentially long with a few hundred bytes (nested
+  `export *` layers, deeply nested arrow functions), so a bundling stops when the load's context ends and fails
+  the load at its limits: 512 MiB of memory and 10 s plus 5 s per MiB of the plugin's files ("bundling took
+  longer than its time limit"). It costs about 40 ms for a small plugin; esbuild in wasm is 50 to 90 times
+  slower than natively, about 1 s for 600 KB of source.
 - Several results come back as an array; a `throw` or a rejected promise is the call's error.
 - Globals: the ECMAScript built-ins, `console` (to the service's log), `host` (Host methods return Promises) and
   `fetch`. No `require`, `process`, `std` or `os`.
@@ -378,7 +384,7 @@ language available:
 import (
 	_ "github.com/heynemann/go-plg/guest/golang"     // Go plugins (≈ 5 MB, compressed)
 	_ "github.com/heynemann/go-plg/guest/lua"        // Lua plugins (≈ 0.3 MB)
-	_ "github.com/heynemann/go-plg/guest/typescript" // TypeScript plugins (≈ 1.2 MB)
+	_ "github.com/heynemann/go-plg/guest/typescript" // TypeScript plugins (≈ 4.9 MB: QuickJS 1.2, esbuild 3.7 compressed)
 )
 ```
 
@@ -612,10 +618,11 @@ type PanicError struct {
   its deadline, a broken result: the call fails with a `PanicError`, that instance is discarded, the pool replaces
   it. `errors.Is(err, plg.ErrCall)` holds for every failed call, and `errors.Is(err, context.DeadlineExceeded)`
   for a deadline stop.
-- **On the host:** every boundary where plg runs code it does not control is behind `recover`: storages, esbuild,
-  the codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler (the
+- **On the host:** every boundary where plg runs code it does not control is behind `recover`: storages, the
+  codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler (the
   plugins' own output included) and your meter provider (a panic there is a `PanicError` in phase `callback`;
-  `New`, `Register`, the reload, the call, the pool and its instances carry on).
+  `New`, `Register`, the reload, the call, the pool and its instances carry on). esbuild does not run on the
+  host: it bundles TypeScript plugins in a WebAssembly sandbox with its own time and memory limits.
 - **Reporting:** each `PanicError` is logged at Error level, counted (`plg.plugin.panics`), passed to
   `plg.WithOnPanic(fn)` and kept in `c.RecentPanics()` (the last 64, `plg.WithPanicHistory(n)`).
 
@@ -717,7 +724,8 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
   fraction and an empty table as `{}` (use `json.array()`).
 - **TypeScript:** bundles are not source-mapped (stack traces point into the bundle); recursion stops at about
   3000 frames with a `RangeError`; a variadic parameter arrives as one array; a response header's values are
-  joined into one, as in `fetch`.
+  joined into one, as in `fetch`. Bundling in WebAssembly is slow for large plugins (about 3 s per MB of
+  source), and a plugin whose bundling outlasts 10 s plus 5 s per MiB of its files fails to load.
 - **`WithConcurrentCalls`:** interleaved calls share the plugin's global state and memory limit; a call abandoned
   at its deadline (or finished with requests still in flight) still runs its remaining code, within 250 ms in all
   from its end however many steps that takes: a call still running then, say retrying a failing request in a loop,
@@ -727,7 +735,7 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
   than per call; in TypeScript a request belongs to the call whose step made it, so a promise shared between calls
   through global state is attributed to the call that started it.
 - **Rebuilds:** the guest artifacts must be rebuilt and re-verified (`make verify-guests`) whenever wazero,
-  wasi-sdk, Lua, QuickJS-ng, yaegi or Go are upgraded.
+  wasi-sdk, Lua, QuickJS-ng, esbuild, yaegi or Go are upgraded.
 
 ## Examples
 

@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestout"
 	"github.com/heynemann/go-plg/internal/guestreg"
+	"github.com/heynemann/go-plg/internal/memfs"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -23,10 +23,11 @@ type loader interface {
 	memoryLimit() uint64
 	// multiplexes reports whether the language's guest can serve several calls at once ([WithConcurrentCalls]).
 	multiplexes() bool
-	// prepare turns an opened plugin's files into what each of its instances starts from: the init payload and
-	// the file trees mounted read-only into the guest. It fails when the plugin cannot load (a missing
-	// entrypoint, source the host rejects).
-	prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error)
+	// prepare turns an opened plugin's files (the snapshot of src) into what each of its instances starts from:
+	// the init payload and the file trees mounted read-only into the guest. It fails when the plugin cannot load
+	// (a missing entrypoint, source the host rejects) and when ctx ends; c runs what it runs on the host
+	// (TypeScript's bundler).
+	prepare(ctx context.Context, c *Container, reg *registration, src *source, files *memfs.FS) (launchSpec, error)
 }
 
 // launchSpec is how every instance of one plugin version starts.

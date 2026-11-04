@@ -1,6 +1,7 @@
 package plg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -28,8 +29,10 @@ func (goLoader) memoryLimit() uint64 { return goMemoryLimit }
 
 func (goLoader) multiplexes() bool { return false }
 
-func (goLoader) prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error) {
-	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, entrypoint)
+func (goLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
+	launchSpec, error,
+) {
+	tree, err := goSourceTree(reg.contr, reg.dispatcher, files, src.desc.Entrypoint)
 	if err != nil {
 		return launchSpec{}, err
 	}

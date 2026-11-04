@@ -3,7 +3,10 @@
 package guestreg
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
@@ -14,11 +17,29 @@ import (
 type Guest struct {
 	// Wasm returns the guest module. It is called at most once per container runtime that needs the guest.
 	Wasm func() ([]byte, error)
+	// Bundler returns the module the host runs to turn a plugin's files into what the guest runs, called like
+	// Wasm; nil when the language needs none. The TypeScript guest has one: esbuild (guestsrc/tsbundle).
+	Bundler func() ([]byte, error)
 	// Language is the plugin language the guest runs ("go", "lua", "typescript").
 	Language string
 	// ID tells a custom guest apart from the linked guest of its language (empty) and from other custom
 	// guests: its content digest, so that one module is compiled once per container.
 	ID string
+}
+
+// Inflate decompresses an artifact committed gzip-compressed (by scripts/gzipwasm.go).
+func Inflate(compressed []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, fmt.Errorf("guestreg: inflating an artifact: %w", err)
+	}
+
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("guestreg: inflating an artifact: %w", err)
+	}
+
+	return raw, nil
 }
 
 // guests holds every linked guest, keyed by language.

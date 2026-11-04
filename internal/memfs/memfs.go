@@ -93,18 +93,22 @@ func (b *Builder) Build() (*FS, error) {
 
 	slices.Sort(names)
 
+	var size int64
+
 	for _, name := range names {
 		err := addNode(nodes, name, b.files[name])
 		if err != nil {
 			return nil, err
 		}
+
+		size += int64(len(b.files[name]))
 	}
 
 	for _, n := range nodes {
 		slices.SortFunc(n.entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	}
 
-	return &FS{nodes: nodes}, nil
+	return &FS{nodes: nodes, size: size}, nil
 }
 
 // addNode adds a file and the directories it implies. Build adds names in sorted order, so a file is always
@@ -138,6 +142,7 @@ func addNode(nodes map[string]*node, name string, data []byte) error {
 // fs.StatFS.
 type FS struct {
 	nodes map[string]*node
+	size  int64
 }
 
 var (
@@ -145,6 +150,11 @@ var (
 	_ fs.ReadDirFS  = (*FS)(nil)
 	_ fs.StatFS     = (*FS)(nil)
 )
+
+// Size returns the size of the tree's files together, in bytes.
+func (f *FS) Size() int64 {
+	return f.size
+}
 
 // Open opens the named file or directory.
 func (f *FS) Open(name string) (fs.File, error) {

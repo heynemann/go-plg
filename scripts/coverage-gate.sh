@@ -11,7 +11,8 @@
 # Excluded from the gate:
 #   - guestsrc/golang and guestsrc/golang/reactor: the wasip1-only `package main` and the //go:wasmexport shims it
 #     links. They are not built for the host, so they never appear in the profile; their logic lives in
-#     internal/goguest, which is gated.
+#     internal/goguest, which is gated. Likewise guestsrc/tsbundle, the TypeScript bundler's //go:wasmexport
+#     shims, whose logic lives in internal/tsbundle.
 #   - cmd/plg/main.go: the one-statement main of the plg command, `os.Exit(cli.Main(...))`. It cannot run
 #     inside a test process (os.Exit) and the go:generate integration test runs it as a subprocess, whose
 #     coverage go test does not collect; everything it calls lives in internal/cli, which is gated.

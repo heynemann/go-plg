@@ -10,9 +10,11 @@ Options (decide and document): bound the import graph before calling esbuild (mo
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test with the layered `export *` plugin (sized so the fixed version fails fast and the old one exceeds a generous bound) reproduces the bug (fails on the current code) and passes with the fix
-Register/reload of such a plugin fails promptly with a clear error, and cancelling the ctx stops bundling (no goroutine left running: goleak)
-Existing TS plugins (multi-file, JSON/text imports) bundle unchanged; limits documented in README and PLAN.md
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+**Resolution:** esbuild no longer runs on the host. It is compiled to a wasip1 guest (`guestsrc/tsbundle`, embedded by `guest/typescript`) and each load bundles in an instance of it, stopped when the load's context ends and failed at its limits (512 MiB; 10 s plus 5 s per MiB of the plugin's files). A pre-scan bound was rejected: besides the `export *` walk, esbuild has an exponential ambiguous re-export resolution and an exponential TypeScript parse (nested arrow-looking conditionals) that no import-graph bound sees. See PLAN.md, "Second adversarial review fixes", 01.
+
+- [x] A test with the layered `export *` plugin (sized so the fixed version fails fast and the old one exceeds a generous bound) reproduces the bug (fails on the current code) and passes with the fix
+- [x] Register/reload of such a plugin fails promptly with a clear error, and cancelling the ctx stops bundling (no goroutine left running: goleak)
+- [x] Existing TS plugins (multi-file, JSON/text imports) bundle unchanged; limits documented in README and PLAN.md
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -31,6 +31,9 @@ func TestWarm(t *testing.T) {
 			"every linked guest is compiled")
 	}
 
+	assert.Contains(t, logs.String(), `"msg":"plg: guest compiled","guest":"typescript bundler"`,
+		"and the TypeScript guest's bundler")
+
 	file := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(file, nil, 0o600))
 

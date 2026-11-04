@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/heynemann/go-plg/internal/memfs"
 )
 
 // Reload makes every registered interface mirror its storages again, as [ReloadInterface] does for one, and
@@ -329,7 +330,7 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 		return old, nil
 	}
 
-	var files fs.FS
+	var files *memfs.FS
 
 	err := c.loadStep(ctx, key, src, func() error {
 		var openErr error

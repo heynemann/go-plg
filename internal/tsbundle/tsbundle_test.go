@@ -12,6 +12,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/tsbundle"
+	"github.com/heynemann/go-plg/internal/wire"
 )
 
 func TestMain(m *testing.M) {
@@ -166,4 +167,76 @@ func TestBundleListsEveryError(t *testing.T) {
 	require.ErrorIs(t, err, tsbundle.ErrBundle)
 	assert.Equal(t, 2, strings.Count(err.Error(), "no such file in the plugin"), err.Error())
 	assert.Contains(t, err.Error(), "; ", "separated")
+}
+
+// answer is a status-prefixed result: its status and its body, the message decoded for other statuses than OK.
+type answer struct {
+	body   string
+	status wire.Status
+}
+
+// initGuest sends entrypoint to g's plg_init and returns its answer: the bundle, or why there is none.
+func initGuest(t *testing.T, g *tsbundle.Guest, entrypoint string) answer {
+	t.Helper()
+
+	copy(g.Alloc(uint32(len(entrypoint))), entrypoint) //nolint:gosec // G115: a short test path
+
+	return decode(t, g.Init(uint32(len(entrypoint)))) //nolint:gosec // G115: a short test path
+}
+
+// decode decodes a status-prefixed result.
+func decode(t *testing.T, out []byte) answer {
+	t.Helper()
+
+	require.NotEmpty(t, out)
+
+	status := wire.Status(out[0])
+	if status == wire.StatusOK {
+		return answer{status: status, body: string(out[1:])}
+	}
+
+	reader := wire.NewReader(out[1:])
+	msg, err := reader.Text()
+	require.NoError(t, err)
+	require.NoError(t, reader.End())
+
+	return answer{status: status, body: msg}
+}
+
+func TestGuestBundlesThroughThePlgABI(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"src/index.ts": file(`import { a } from "./a"; export function Create() { return a; }`),
+		"src/a.ts":     file(`export const a: string = "A";`),
+		"bad.ts":       file(`import "./gone";`),
+	}
+
+	want, err := tsbundle.Bundle(files, "src/index.ts")
+	require.NoError(t, err)
+
+	assert.Equal(t, answer{status: wire.StatusOK, body: want}, initGuest(t, tsbundle.NewGuest(files), "src/index.ts"),
+		"the bundle")
+
+	_, wantErr := tsbundle.Bundle(files, "bad.ts")
+	require.ErrorIs(t, wantErr, tsbundle.ErrBundle)
+
+	got := initGuest(t, tsbundle.NewGuest(files), "bad.ts")
+	assert.Equal(t, wire.StatusLoad, got.status)
+	assert.Equal(t, wantErr.Error(), tsbundle.ErrBundle.Error()+": "+got.body, "esbuild's errors, after ErrBundle")
+}
+
+func TestGuestRefusesWhatTheABIDoesNotAllow(t *testing.T) {
+	t.Parallel()
+
+	guest := tsbundle.NewGuest(fstest.MapFS{})
+
+	assert.Len(t, guest.Alloc(10), 10)
+	assert.Len(t, guest.Alloc(3), 3, "a smaller request reuses the buffer")
+
+	assert.Equal(t, answer{status: wire.StatusABI, body: "init payload exceeds the input buffer"},
+		decode(t, guest.Init(4)), "a payload beyond the buffer")
+	assert.Equal(t, answer{status: wire.StatusABI, body: "the bundler has no methods"}, decode(t, guest.Call()))
+
+	assert.Equal(t, []byte{byte(wire.StatusOK)}, guest.Close())
 }

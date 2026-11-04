@@ -1,6 +1,7 @@
 package plg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -32,7 +33,11 @@ func (luaLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
 func (luaLoader) multiplexes() bool { return true }
 
-func (luaLoader) prepare(reg *registration, files fs.FS, entrypoint string) (launchSpec, error) {
+func (luaLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
+	launchSpec, error,
+) {
+	entrypoint := src.desc.Entrypoint
+
 	tree, err := luaSourceTree(files, entrypoint)
 	if err != nil {
 		return launchSpec{}, err

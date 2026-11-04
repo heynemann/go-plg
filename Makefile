@@ -81,9 +81,14 @@ QUICKJS_FLAGS := -D_GNU_SOURCE -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_
 TS_STACK := 2097152
 TS_GUEST := guest/typescript/typescript.wasm
 TS_SRC := guestsrc/typescript
+# The TypeScript bundler guest: esbuild (internal/tsbundle) compiled to a wasip1 reactor, which the host runs to
+# bundle each plugin inside a sandbox (PLAN.md). It is Go, built with the pinned Go like the Go guest, and
+# committed gzip-compressed (the module is about 14 MB).
+TS_BUNDLER := guest/typescript/bundler.wasm.gz
+TS_BUNDLER_RAW := $(BIN)/bundler.wasm
 
 .PHONY: check fmt-check lint test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest lua-guest \
-	ts-guest verify-guests clean
+	ts-guest ts-bundler verify-guests clean
 
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
@@ -160,7 +165,7 @@ symbols: $(BIN)/yaegi
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
-guests: go-guest lua-guest ts-guest
+guests: go-guest lua-guest ts-guest ts-bundler
 
 # Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
 go-guest:
@@ -194,10 +199,16 @@ ts-guest: $(WASI_CC) $(QUICKJS)/quickjs-amalgam.c
 		-o $(TS_GUEST) $(BIN)/quickjs.o $(BIN)/ts-glue.o -lwasi-emulated-process-clocks -lwasi-emulated-signal
 	chmod 644 $(TS_GUEST)
 
+# Build the TypeScript bundler guest (esbuild + internal/tsbundle compiled to a wasip1 reactor), then compress it.
+ts-bundler:
+	mkdir -p $(BIN)
+	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(TS_BUNDLER_RAW) ./guestsrc/tsbundle
+	go run scripts/gzipwasm.go $(TS_BUNDLER_RAW) $(TS_BUNDLER)
+
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests
-	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST)
-	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST))"
+	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER)
+	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER))"
 
 clean:
 	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT) examples/$(COVERAGE)

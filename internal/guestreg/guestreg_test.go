@@ -1,6 +1,8 @@
 package guestreg_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"testing"
 
@@ -91,4 +93,25 @@ func TestAllIsSortedByLanguage(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{first, second}, mine)
+}
+
+func TestInflateRejectsCorruptArtifacts(t *testing.T) {
+	t.Parallel()
+
+	var compressed bytes.Buffer
+
+	zw := gzip.NewWriter(&compressed)
+	_, err := zw.Write(bytes.Repeat([]byte("wasm"), 1000))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	raw, err := guestreg.Inflate(compressed.Bytes())
+	require.NoError(t, err)
+	assert.Equal(t, bytes.Repeat([]byte("wasm"), 1000), raw)
+
+	_, err = guestreg.Inflate([]byte("not gzip"))
+	require.Error(t, err, "bad header")
+
+	_, err = guestreg.Inflate(compressed.Bytes()[:compressed.Len()-10])
+	require.Error(t, err, "truncated stream")
 }

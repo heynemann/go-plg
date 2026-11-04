@@ -55,7 +55,11 @@ type Container struct {
 	catalogue    atomic.Pointer[snapshot]
 	budget       memoryBudget
 	closeTimeout time.Duration // closeTimeout; tests shorten it
-	closed       atomic.Bool
+	// bundleTimeBase is the base of a bundling's time limit (bundleTimeBase) and bundleMemory the bundler's
+	// memory limit (bundleMemoryLimit); tests change them.
+	bundleTimeBase time.Duration
+	bundleMemory   uint64
+	closed         atomic.Bool
 	// genericBinder makes bind ignore the adapters plg gen generated (Contract.Fast), so tests and benchmarks
 	// can hold the generic binder to the same suite.
 	genericBinder atomic.Bool
@@ -78,6 +82,9 @@ func New(opts ...Option) *Container {
 		retired:      xsync.NewMap[*plugin, context.CancelFunc](),
 		budget:       memoryBudget{total: cfg.memoryBudget},
 		closeTimeout: closeTimeout,
+		// The bundler's limits, see typescript.go.
+		bundleTimeBase: bundleTimeBase,
+		bundleMemory:   bundleMemoryLimit,
 	}
 	ctr.catalogue.Store(&snapshot{})
 

@@ -46,6 +46,8 @@ func TestConformsToFSSemantics(t *testing.T) {
 	})
 
 	require.NoError(t, fstest.TestFS(fsys, "src/a/a.go", "src/a/b/b.go", "src/plg/x.go", "top.txt", "src/a/zz/deep.go"))
+	assert.Equal(t, int64(len("package a")+len("package b")+len("package x")+len("package deep")), fsys.Size(),
+		"the files' bytes together")
 }
 
 func TestEmptyTree(t *testing.T) {
@@ -57,6 +59,7 @@ func TestEmptyTree(t *testing.T) {
 	entries, err := fs.ReadDir(fsys, ".")
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+	assert.Zero(t, fsys.Size())
 }
 
 func TestBuilderRejects(t *testing.T) {
