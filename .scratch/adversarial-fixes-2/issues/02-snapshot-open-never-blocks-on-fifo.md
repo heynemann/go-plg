@@ -10,9 +10,11 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Deterministic tests swapping a plugin file and `plugin.json` for a FIFO between the walk/stat and the open (via the existing test hooks) reproduces the bug (fails on the current code) and passes with the fix
-The load fails promptly with the existing 'replaced' / invalid-manifest error; no open blocks
-Docs and PLAN.md residual-risk notes updated
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+**Resolution:** `NewFSStorage` never opens without `O_NONBLOCK`: files and directories through the walk, the copy and List open at once on a FIFO, and the existing checks refuse it (`replaced while the plugin's files were copied`, `a plugin key is a directory name`, `plugin.json is not a regular file`). Directories are opened as `name/.`, so `os.Root` opens them as directories only. fs.FS trees cannot open without waiting; that is documented. See PLAN.md, "Second adversarial review fixes", 02.
+
+- [x] Deterministic tests swapping a plugin file and `plugin.json` for a FIFO between the walk/stat and the open (via the existing test hooks) reproduces the bug (fails on the current code) and passes with the fix
+- [x] The load fails promptly with the existing 'replaced' / invalid-manifest error; no open blocks
+- [x] Docs and PLAN.md residual-risk notes updated
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -33,6 +35,37 @@ import (
 	"github.com/heynemann/go-plg/internal/httpcap"
 	"github.com/heynemann/go-plg/internal/wire"
 )
+
+// TestNonblockingFSIsAnFS checks nonblockingFS by fstest.TestFS (opens, directory reads, stats and link reads,
+// invalid names refused) over a directory with a nested file and a link inside, and that its Stat, Lstat and
+// ReadLink refuse invalid names too.
+func TestNonblockingFSIsAnFS(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "sub"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("b"), 0o600))
+	require.NoError(t, os.Symlink("a.txt", filepath.Join(dir, "link")))
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, root.Close()) })
+
+	fsys := nonblockingFS{root: root}
+	require.NoError(t, fstest.TestFS(fsys, "a.txt", "sub/b.txt", "link"))
+
+	for _, name := range []string{"", "/a.txt", "../a.txt", "sub/../a.txt"} {
+		_, err = fsys.Stat(name)
+		require.ErrorIs(t, err, fs.ErrInvalid, name)
+
+		_, err = fsys.Lstat(name)
+		require.ErrorIs(t, err, fs.ErrInvalid, name)
+
+		_, err = fsys.ReadLink(name)
+		require.ErrorIs(t, err, fs.ErrInvalid, name)
+	}
+}
 
 // FuzzCheckData builds a type from the fuzz input and checks the validator against an oracle computed while
 // building it: the type is data exactly when every part of it is.

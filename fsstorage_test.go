@@ -289,6 +289,31 @@ func TestFSStorageBoundsManifestReads(t *testing.T) {
 	require.NoError(t, err, "a manifest of exactly MaxManifestSize bytes is accepted")
 }
 
+// TestFSStorageListNeverWaitsOnASwappedManifest replaces a plugin.json List found to be a regular file by a FIFO
+// right before List opens it: a read-only open of a FIFO waits for a writer, so it would block List forever. List
+// fails at once with ErrInvalidManifest naming the directory.
+func TestFSStorageListNeverWaitsOnASwappedManifest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "p", "plugin.json")
+	require.NoError(t, os.Mkdir(filepath.Dir(manifest), 0o700))
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"language":"go","entrypoint":"."}`), 0o600))
+
+	swapped := false
+
+	_, err := plg.ListSwapping(t.Context(), plg.NewFSStorage(dir), func(name string) {
+		if name == "p/plugin.json" {
+			swapped = true
+
+			swapFIFO(t, manifest)
+		}
+	})
+	require.True(t, swapped, "List opened plugin.json")
+	require.ErrorIs(t, err, plg.ErrInvalidManifest)
+	require.ErrorContains(t, err, "plugin directory p: plugin.json is not a regular file")
+}
+
 func TestFSStorageListAndOpenErrors(t *testing.T) {
 	t.Parallel()
 
@@ -439,6 +464,18 @@ func TestFSStorageOpen(t *testing.T) {
 
 		_, err := store.Open(t.Context(), plg.Descriptor{Key: "README.md"})
 		require.ErrorContains(t, err, "plugin directory README.md: a plugin key is a directory name")
+	})
+
+	t.Run("a FIFO", func(t *testing.T) {
+		t.Parallel()
+
+		// What List listed as a plugin directory may be a FIFO by the time Open opens it, which a read-only open
+		// would wait on for a writer forever.
+		dir := t.TempDir()
+		require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "p"), 0o600))
+
+		_, err := plg.NewFSStorage(dir).Open(t.Context(), plg.Descriptor{Key: "p"})
+		require.ErrorContains(t, err, "plugin directory p: a plugin key is a directory name")
 	})
 
 	t.Run("over an fs.FS", func(t *testing.T) {

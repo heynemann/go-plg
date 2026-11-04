@@ -60,8 +60,9 @@ const LanguageTypeScript Language = "typescript"
 // replaced by a link in between, so the rules above hold for a tree nobody changes during the copy (an embed.FS,
 // an fstest.MapFS, the copies [FSStorage] and [MemoryStorage] return); an fs.FS that follows links when it opens
 // a file can be led out of the plugin's files by someone writing to the tree while it is copied ([os.DirFS]
-// follows them anywhere on the host). A storage over a directory others can write to should return the copy an
-// [FSStorage] from [NewFSStorage] opens: that one follows no link, whatever changes while it copies.
+// follows them anywhere on the host), and its open of a file replaced by a FIFO may wait for a writer. A storage
+// over a directory others can write to should return the copy an [FSStorage] from [NewFSStorage] opens: that one
+// follows no link and never waits, whatever changes while it copies.
 type Storage interface {
 	// Name identifies the storage in errors and logs.
 	Name() string

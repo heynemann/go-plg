@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 
@@ -209,8 +210,17 @@ func swapLink(target string) func(t *testing.T, name string) {
 	}
 }
 
+// swapFIFO replaces the entry it is given with a FIFO: opening it read-only would wait for a writer forever.
+func swapFIFO(t *testing.T, name string) {
+	t.Helper()
+
+	require.NoError(t, os.RemoveAll(name))
+	require.NoError(t, syscall.Mkfifo(name, 0o600))
+}
+
 // swapCase swaps an entry of the plugin directory of a swapRoot while FSStorage.Open copies it: right before the
-// copy opens the entry, or the first entry below it.
+// copy opens the entry, or the first entry below it (right before the walk of the plugin's files opens it, for
+// walk).
 type swapCase struct {
 	is    error // what the error wraps, when want is not empty
 	swap  func(t *testing.T, name string)
@@ -219,6 +229,7 @@ type swapCase struct {
 	entry string // the entry swapped, relative to the plugin directory ("." for the plugin directory)
 	want  string // the error, after "copying the plugin's files: "
 	root  bool   // whether root skips the case, since root reads unreadable files
+	walk  bool   // whether the swap happens before the walk opens the entry, not before the copy does
 }
 
 // run copies the plugin directory of a new swapRoot, swapping tc's entry, and checks the copy.
@@ -232,7 +243,12 @@ func (tc *swapCase) run(t *testing.T) {
 	root := swapRoot(t)
 	swapped := false
 
-	files, err := plg.OpenSwapping(t.Context(), plg.NewFSStorage(root), plg.Descriptor{Key: "p"}, func(name string) {
+	swapping := plg.OpenSwapping
+	if tc.walk {
+		swapping = plg.WalkSwapping
+	}
+
+	files, err := swapping(t.Context(), plg.NewFSStorage(root), plg.Descriptor{Key: "p"}, func(name string) {
 		if !swapped && (tc.entry == "." || name == tc.entry || strings.HasPrefix(name, tc.entry+"/")) {
 			swapped = true
 
@@ -259,7 +275,9 @@ func (tc *swapCase) run(t *testing.T) {
 // TestFSStorageCopyNeverFollowsASwappedLink swaps an entry of a plugin directory after the walk of its files,
 // right before the copy opens it (or, for a directory or the plugin directory, a file below it): an entry that
 // became a symbolic link is judged as the walk judges links, with the same errors, whether it is a file or a
-// directory, and never followed; one replaced otherwise fails the copy; nothing next to the plugin is ever copied.
+// directory, and never followed; one replaced otherwise fails the copy, a FIFO (which a read-only open would
+// wait on for a writer forever) at once, also when a directory becomes one before the walk reads it; nothing
+// next to the plugin is ever copied.
 func TestFSStorageCopyNeverFollowsASwappedLink(t *testing.T) {
 	t.Parallel()
 
@@ -326,6 +344,25 @@ func TestFSStorageCopyNeverFollowsASwappedLink(t *testing.T) {
 				require.NoError(t, os.WriteFile(name, []byte(secretContent), 0o600))
 			},
 			want: "sub: replaced while the plugin's files were copied",
+		},
+		{
+			name:  "a file to a FIFO",
+			entry: "x.txt",
+			swap:  swapFIFO,
+			want:  "x.txt: replaced while the plugin's files were copied",
+		},
+		{
+			name:  "a directory to a FIFO",
+			entry: "sub",
+			swap:  swapFIFO,
+			want:  "sub: replaced while the plugin's files were copied",
+		},
+		{
+			name:  "a directory to a FIFO, before the walk reads it",
+			entry: "sub",
+			swap:  swapFIFO,
+			want:  "sub: replaced while the plugin's files were copied",
+			walk:  true,
 		},
 		{
 			name:  "a removed file",

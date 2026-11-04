@@ -72,8 +72,10 @@ const contentVersionPrefix = "sha256:"
 // Over a directory ([NewFSStorage]) these rules hold even while others write to it: the plugin directory, then
 // each directory and file below it, is opened relative to its open parent and must then be the very entry that
 // parent holds under its name, so an entry swapped for a link during the copy is judged as a link (left out, or
-// failing the load, never followed), and one replaced otherwise fails the load. Over an fs.FS
-// ([NewFSStorageFromFS]) the copy can only trust what the fs.FS reports, as [Storage] describes.
+// failing the load, never followed), and one replaced otherwise fails the load. No open there waits: a
+// plugin.json, directory or file swapped for a FIFO (which an ordinary open waits on for a writer) fails List or
+// the load at once. Over an fs.FS ([NewFSStorageFromFS]) the copy can only trust what the fs.FS reports, as
+// [Storage] describes, and an fs.FS's open of an entry swapped for a FIFO may wait.
 //
 // An FSStorage is safe for concurrent use when its file tree is.
 type FSStorage struct {
@@ -94,8 +96,9 @@ func NewFSStorage(dir string) *FSStorage {
 
 // NewFSStorageFromFS returns a storage named name over the plugin directories at the root of fsys, such as an
 // embed.FS (use [fs.Sub] to pick one of its directories). Open copies a plugin directory through fsys's own
-// interface, so a link swapped into fsys during the copy is followed if fsys follows it (see [Storage]): use
-// [NewFSStorage], not an [os.DirFS], for a directory others can write to.
+// interface, so a link swapped into fsys during the copy is followed if fsys follows it, and an entry swapped for
+// a FIFO may block fsys's open of it (see [Storage]): use [NewFSStorage], not an [os.DirFS], for a directory
+// others can write to.
 func NewFSStorageFromFS(name string, fsys fs.FS) *FSStorage {
 	return &FSStorage{fsys: fsys, name: name}
 }
@@ -108,9 +111,22 @@ func (s *FSStorage) Name() string {
 // List reads every plugin directory's plugin.json and returns the plugins, sorted by key. It fails with
 // [ErrInvalidManifest], naming the directory, if a plugin.json is missing or malformed.
 func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
+	return s.listCalling(ctx, nil)
+}
+
+var errPluginKey = errors.New("a plugin key is a directory name")
+
+// Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
+func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
+	return s.copyPlugin(ctx, desc, openHooks{})
+}
+
+// listCalling is List; beforeOpen, when not nil, is called with each name of the storage's directory (not of an
+// fs.FS tree) right before it is opened.
+func (s *FSStorage) listCalling(ctx context.Context, beforeOpen func(name string)) ([]Descriptor, error) {
 	var descs []Descriptor
 
-	err := s.withTree(func(fsys fs.FS, _ *os.Root) error {
+	err := s.withTree(beforeOpen, func(fsys fs.FS, _ *os.Root) error {
 		entries, err := fs.ReadDir(fsys, ".")
 		if err != nil {
 			return fmt.Errorf("plg: reading the plugin directories: %w", err)
@@ -145,15 +161,8 @@ func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 	return descs, nil
 }
 
-var errPluginKey = errors.New("a plugin key is a directory name")
-
-// Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
-func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
-	return s.copyPlugin(ctx, desc, nil)
-}
-
-// copyPlugin is Open; beforeOpen, when not nil, is called as snapshotDir describes.
-func (s *FSStorage) copyPlugin(ctx context.Context, desc Descriptor, beforeOpen func(name string)) (fs.FS, error) {
+// copyPlugin is Open; hooks are called as snapshotDir describes.
+func (s *FSStorage) copyPlugin(ctx context.Context, desc Descriptor, hooks openHooks) (fs.FS, error) {
 	key := desc.Key
 	if key == "." || strings.Contains(key, "/") || !fs.ValidPath(key) {
 		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, errPluginKey)
@@ -161,11 +170,11 @@ func (s *FSStorage) copyPlugin(ctx context.Context, desc Descriptor, beforeOpen 
 
 	var files *memfs.FS
 
-	err := s.withTree(func(fsys fs.FS, root *os.Root) error {
+	err := s.withTree(nil, func(fsys fs.FS, root *os.Root) error {
 		var err error
 
 		if root != nil {
-			files, err = snapshotDir(ctx, root, key, beforeOpen)
+			files, err = snapshotDir(ctx, root, key, hooks)
 		} else {
 			files, err = snapshotSub(ctx, fsys, key)
 		}
@@ -205,8 +214,9 @@ func snapshotSub(ctx context.Context, fsys fs.FS, key string) (*memfs.FS, error)
 }
 
 // withTree calls use with the storage's file tree: its fs.FS, with a nil root, or its directory opened as an
-// [os.Root] and that root's fs.FS, closed once use returns.
-func (s *FSStorage) withTree(use func(fsys fs.FS, root *os.Root) error) error {
+// [os.Root] and that root as an fs.FS whose opens never wait (calling beforeOpen, when not nil, right before
+// each), closed once use returns.
+func (s *FSStorage) withTree(beforeOpen func(name string), use func(fsys fs.FS, root *os.Root) error) error {
 	if s.fsys != nil {
 		return use(s.fsys, nil)
 	}
@@ -216,7 +226,7 @@ func (s *FSStorage) withTree(use func(fsys fs.FS, root *os.Root) error) error {
 		return fmt.Errorf("plg: opening the plugin directories: %w", err)
 	}
 
-	err = use(root.FS(), root)
+	err = use(nonblockingFS{root: root, beforeOpen: beforeOpen}, root)
 
 	closeErr := root.Close()
 	if closeErr != nil {
@@ -250,8 +260,10 @@ var (
 )
 
 // readManifest reads the plugin.json name of fsys: a regular file (followed through links the tree allows) of at
-// most [MaxManifestSize] bytes. It checks the type before opening, since opening a FIFO waits for a writer, and
-// again on the opened file, and reads at most one byte past the cap.
+// most [MaxManifestSize] bytes. It checks the type before opening, since opening a FIFO can wait for a writer, and
+// again on the opened file, and reads at most one byte past the cap. The storage's directory is read through a
+// nonblockingFS, whose open never waits, so a plugin.json replaced by a FIFO after the first check fails the
+// second; an fs.FS tree's open may wait (see [FSStorage]).
 func readManifest(fsys fs.FS, name string) ([]byte, error) {
 	info, err := fs.Stat(fsys, name)
 	if err != nil {

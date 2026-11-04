@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/memfs"
@@ -22,23 +23,23 @@ var (
 )
 
 // snapshotDir copies the plugin directory key of root, by the rules of [Storage], through rooted operations that
-// follow no symbolic link, whatever changes while they run. The plugin directory, then each directory and file
-// below it, is opened relative to its already open parent, and must then be the very entry that parent holds
-// under its name (the same file as its Lstat, which follows no link), of the kind the walk listed. [os.Root]
-// follows only links that stay inside the directory it opens from, so nothing outside the plugin is ever read,
-// and this check refuses even those links: an entry that became a link is judged as the walk judges links
-// (left out when its target stays inside the plugin's files, failing the copy otherwise), and one replaced
-// otherwise fails the copy. beforeOpen, when not nil, is called with the plugin-relative name of each directory
-// and file right before it is opened, once the walk listed them.
-func snapshotDir(ctx context.Context, root *os.Root, key string, beforeOpen func(name string)) (*memfs.FS, error) {
+// follow no symbolic link and never wait, whatever changes while they run. The plugin directory, then each
+// directory and file below it, is opened relative to its already open parent, without waiting (see
+// nonblockingRead), and must then be the very entry that parent holds under its name (the same file as its
+// Lstat, which follows no link), of the kind the walk listed. [os.Root] follows only links that stay inside the
+// directory it opens from, so nothing outside the plugin is ever read, and this check refuses even those links:
+// an entry that became a link is judged as the walk judges links (left out when its target stays inside the
+// plugin's files, failing the copy otherwise), and one replaced otherwise (a FIFO included) fails the copy.
+// hooks are called as openHooks describes.
+func snapshotDir(ctx context.Context, root *os.Root, key string, hooks openHooks) (*memfs.FS, error) {
 	dir, err := openPluginDir(root, key)
 	if err != nil {
 		return nil, err
 	}
 
-	files := dirFiles{dirs: []*os.Root{dir}, beforeOpen: beforeOpen}
+	files := dirFiles{dirs: []*os.Root{dir}, beforeOpen: hooks.beforeCopy}
 
-	copied, err := copySnapshot(ctx, dir.FS(), files.open)
+	copied, err := copySnapshot(ctx, nonblockingFS{root: dir, beforeOpen: hooks.beforeWalk}, files.open)
 
 	err = errors.Join(err, files.close())
 	if err != nil {
@@ -48,17 +49,134 @@ func snapshotDir(ctx context.Context, root *os.Root, key string, beforeOpen func
 	return copied, nil
 }
 
+// openHooks are called with a plugin-relative name right before an open, so tests can swap entries while a
+// plugin directory is copied; either may be nil. beforeWalk is called before the walk of the plugin's files opens
+// a directory (its parent's walk listed it), beforeCopy before the copy opens a directory or file the walk listed.
+type openHooks struct {
+	beforeWalk func(name string)
+	beforeCopy func(name string)
+}
+
+// nonblockingRead opens a file read-only without waiting. A read-only open of a FIFO waits until a writer opens
+// it, before anything can check what was opened or look at a context, so a name listed or stated as a regular
+// file or a directory, then replaced by a FIFO, would block its open forever; with O_NONBLOCK the open returns at
+// once. Every file opened so is checked to be a regular file or a directory before it is read, and neither reads
+// differently in non-blocking mode, so the mode is never cleared.
+const nonblockingRead = os.O_RDONLY | oNonblock
+
+// openRootDir opens the directory name of root as an [os.Root], without waiting: [os.Root.OpenRoot] opens the last
+// name of its path as it is, which waits on a FIFO, but every name before it as a directory only, which fails at
+// once on anything else, so the directory is opened as name/. instead.
+func openRootDir(root *os.Root, name string) (*os.Root, error) {
+	return root.OpenRoot(name + "/.") //nolint:wrapcheck // os.Root's own error; the callers name the entry
+}
+
+// nonblockingFS is an [os.Root] as an fs.FS, like its FS method's, whose opens never wait (see nonblockingRead):
+// List reads the plugin.json files it stated, and the walk of a plugin directory reads the directories it listed,
+// either of which may have become a FIFO since. Its ReadDir fails when what it opens is no directory: the walk
+// listed one there, which was replaced. beforeOpen, when not nil, is called with each name right before it is
+// opened.
+type nonblockingFS struct {
+	root       *os.Root
+	beforeOpen func(name string)
+}
+
+var (
+	_ fs.ReadDirFS  = nonblockingFS{}
+	_ fs.StatFS     = nonblockingFS{}
+	_ fs.ReadLinkFS = nonblockingFS{}
+)
+
+// Open opens the file name without waiting.
+func (f nonblockingFS) Open(name string) (fs.File, error) {
+	file, err := f.openFile(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return file, nil
+}
+
+// ReadDir reads the directory name without waiting, sorted by name, failing when name is no directory.
+func (f nonblockingFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	file, err := f.openFile(name)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []fs.DirEntry
+
+	info, err := file.Stat()
+
+	switch {
+	case err != nil:
+	case !info.IsDir():
+		err = fmt.Errorf("%s: %w", name, errReplaced)
+	default:
+		entries, err = file.ReadDir(-1)
+	}
+
+	err = errors.Join(err, file.Close())
+	if err != nil {
+		return nil, err
+	}
+
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+
+	return entries, nil
+}
+
+// Stat returns the file information of name, following links inside the root.
+func (f nonblockingFS) Stat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
+	}
+
+	return f.root.Stat(name) //nolint:wrapcheck // os.Root's own error, as its fs.FS returns it
+}
+
+// Lstat returns the file information of name, following no link at its end.
+func (f nonblockingFS) Lstat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrInvalid}
+	}
+
+	return f.root.Lstat(name) //nolint:wrapcheck // os.Root's own error, as its fs.FS returns it
+}
+
+// ReadLink returns the target of the symbolic link name.
+func (f nonblockingFS) ReadLink(name string) (string, error) {
+	if !fs.ValidPath(name) {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+	}
+
+	return f.root.Readlink(name) //nolint:wrapcheck // os.Root's own error, as its fs.FS returns it
+}
+
+// openFile opens the file name without waiting, after calling beforeOpen.
+func (f nonblockingFS) openFile(name string) (*os.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
+	if f.beforeOpen != nil {
+		f.beforeOpen(name)
+	}
+
+	return f.root.OpenFile(name, nonblockingRead, 0) //nolint:wrapcheck // os.Root's own error, as its fs.FS returns it
+}
+
 // openPluginDir opens the plugin directory key of root: the directory root holds under key, not one a link leads
 // to, since a link to a directory is not a plugin (List does not list it).
 func openPluginDir(root *os.Root, key string) (*os.Root, error) {
-	dir, err := root.OpenRoot(key)
+	dir, err := openRootDir(root, key)
 	if err != nil {
 		entry, lstatErr := root.Lstat(key)
 		if lstatErr == nil && !entry.IsDir() {
 			return nil, errPluginKey
 		}
 
-		return nil, err //nolint:wrapcheck // copyPlugin wraps it, naming the plugin directory
+		return nil, err
 	}
 
 	info, err := dir.Stat(".")
@@ -159,7 +277,7 @@ func openDir(parent *os.Root, part, name string, beforeOpen func(name string)) (
 		beforeOpen(name)
 	}
 
-	dir, err := parent.OpenRoot(part)
+	dir, err := openRootDir(parent, part)
 	if err != nil {
 		return nil, changed(parent, part, name, fs.ModeDir, err)
 	}
@@ -178,7 +296,7 @@ func openFile(parent *os.Root, part, name string, beforeOpen func(name string)) 
 		beforeOpen(name)
 	}
 
-	file, err := parent.Open(part)
+	file, err := parent.OpenFile(part, nonblockingRead, 0)
 	if err != nil {
 		return nil, changed(parent, part, name, 0, err)
 	}
