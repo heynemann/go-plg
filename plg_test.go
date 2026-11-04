@@ -88,6 +88,27 @@ type (
 func (a *clashInAdapter) Ping(ctx context.Context, c clash) error    { return a.WPing(ctx, c) }
 func (a *clashOutAdapter) Ping(ctx context.Context) ([]clash, error) { return a.WPing(ctx) }
 
+// aliasClash's anonymous structs embed different types under the alias name Embedded, and hostReservedAlias's
+// an alias named as the dispatcher's PlgClose: the Go dispatcher, which declares an alias of each such name to
+// keep the fields' names, cannot render them.
+type (
+	aliasTarget struct{ ID string }
+	Embedded    = aliasTarget
+	PlgClose    = aliasTarget
+	counterIn   = struct{ testcontract.Embedded }
+	targetIn    = struct{ *Embedded }
+	aliasClash  interface {
+		Ping(ctx context.Context, a counterIn, b targetIn) error
+	}
+	aliasClashAdapter struct {
+		WPing func(context.Context, counterIn, targetIn) error
+	}
+)
+
+func (a *aliasClashAdapter) Ping(ctx context.Context, x counterIn, y targetIn) error {
+	return a.WPing(ctx, x, y)
+}
+
 var errStorage = errors.New("storage unavailable")
 
 // failingStorage is a memory storage whose List or Open fails.
@@ -760,6 +781,14 @@ func TestRegisterContractRejectsInvalidContracts(t *testing.T) {
 			name: "result with clashing field names", want: "result 0: wire: unsupported type: plg_test.clash",
 			contract: plg.Contract{
 				Interface: reflect.TypeFor[clashOut](), Adapter: reflect.TypeFor[clashOutAdapter](), Source: source,
+			},
+		},
+		{
+			name: "one alias name for two embedded types",
+			want: "rendering the Go dispatcher: method Ping: goabi: cannot render dispatcher: embedded fields named " +
+				"Embedded have the types testcontract.Counter and plg_test.aliasTarget",
+			contract: plg.Contract{
+				Interface: reflect.TypeFor[aliasClash](), Adapter: reflect.TypeFor[aliasClashAdapter](), Source: source,
 			},
 		},
 		{

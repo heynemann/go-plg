@@ -141,6 +141,40 @@ func (a *plgHosted) Value(p0 context.Context) (string, error) {
 	return a.WValue(p0)
 }
 
+// plgAliased implements Aliased for plg, which fills each W field with a call into a plugin.
+type plgAliased struct {
+	WBump func(context.Context, struct {
+		Embedded
+		By int
+	}) (struct {
+		Embedded
+		By int
+	}, error)
+	WDouble func(context.Context, struct {
+		Embedded
+		By int
+	}) (struct{ *Embedded }, error)
+}
+
+var _ Aliased = (*plgAliased)(nil)
+
+func (a *plgAliased) Bump(p0 context.Context, p1 struct {
+	Embedded
+	By int
+}) (struct {
+	Embedded
+	By int
+}, error) {
+	return a.WBump(p0, p1)
+}
+
+func (a *plgAliased) Double(p0 context.Context, p1 struct {
+	Embedded
+	By int
+}) (struct{ *Embedded }, error) {
+	return a.WDouble(p0, p1)
+}
+
 // plgFooerFast implements Fooer for plg with the fast paths plg gen generated: typed calls, and codecs
 // specialized to the interface's types.
 type plgFooerFast struct {
@@ -1156,6 +1190,114 @@ func (c *plgHostedValueCall) DecodeResults(r *plgimpl.Reader) error {
 	var err error
 
 	c.r0, err = plgimpl.ReadString[string](r)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+// plgAliasedFast implements Aliased for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgAliasedFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Aliased = (*plgAliasedFast)(nil)
+
+func (a *plgAliasedFast) Bump(p0 context.Context, p1 struct {
+	Embedded
+	By int
+}) (struct {
+	Embedded
+	By int
+}, error) {
+	c := plgAliasedBumpCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgAliasedBumpCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgAliasedBumpCall is one call of Aliased.Bump: its arguments, then its results.
+type plgAliasedBumpCall struct {
+	p1 struct {
+		Embedded
+		By int
+	}
+	r0 struct {
+		Embedded
+		By int
+	}
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgAliasedBumpCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode17(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgAliasedBumpCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode17(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgAliasedFast) Double(p0 context.Context, p1 struct {
+	Embedded
+	By int
+}) (struct{ *Embedded }, error) {
+	c := plgAliasedDoubleCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgAliasedDoubleCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgAliasedDoubleCall is one call of Aliased.Double: its arguments, then its results.
+type plgAliasedDoubleCall struct {
+	p1 struct {
+		Embedded
+		By int
+	}
+	r0 struct{ *Embedded }
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgAliasedDoubleCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncode17(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgAliasedDoubleCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecode18(r, &c.r0, 0)
 	if err != nil {
 		return plgimpl.Result(err, 0)
 	}
@@ -2274,6 +2416,140 @@ func plgDecode15(r *plgimpl.Reader, v *map[string]struct{}, depth int) error {
 	return nil
 }
 
+func plgEncodeCounter(b []byte, v *Embedded, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.N))
+	if err != nil {
+		return b, plgimpl.AtField(err, "N")
+	}
+
+	return b, nil
+}
+
+func plgDecodeCounter(r *plgimpl.Reader, v *Embedded, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	v.N, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "N")
+	}
+
+	return nil
+}
+
+func plgEncode17(b []byte, v *struct {
+	Embedded
+	By int
+}, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgEncodeCounter(b, &v.Embedded, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Embedded")
+	}
+
+	b, err = plgimpl.AppendInt(b, int64(v.By))
+	if err != nil {
+		return b, plgimpl.AtField(err, "By")
+	}
+
+	return b, nil
+}
+
+func plgDecode17(r *plgimpl.Reader, v *struct {
+	Embedded
+	By int
+}, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	err = plgDecodeCounter(r, &v.Embedded, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Embedded")
+	}
+
+	v.By, err = plgimpl.ReadInt[int](r, "int")
+	if err != nil {
+		return plgimpl.AtField(err, "By")
+	}
+
+	return nil
+}
+
+func plgEncode19(b []byte, v **Embedded, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendBool(b, false), nil
+	}
+
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b = plgimpl.AppendBool(b, true)
+	b, err = plgEncodeCounter(b, *v, depth+1)
+
+	return b, err
+}
+
+func plgDecode19(r *plgimpl.Reader, v **Embedded, depth int) error {
+	present, err := plgimpl.ReadPresent(r, v, depth)
+	if err != nil || !present {
+		return err
+	}
+
+	p := new(Embedded)
+
+	err = plgDecodeCounter(r, p, depth+1)
+	if err != nil {
+		return err
+	}
+
+	*v = p
+
+	return nil
+}
+
+func plgEncode18(b []byte, v *struct{ *Embedded }, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgEncode19(b, &v.Embedded, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Embedded")
+	}
+
+	return b, nil
+}
+
+func plgDecode18(r *plgimpl.Reader, v *struct{ *Embedded }, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	err = plgDecode19(r, &v.Embedded, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Embedded")
+	}
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
@@ -2295,5 +2571,12 @@ func init() {
 		Source:    plgFooerSource,
 		Fast:      func(inv plgimpl.Invoker) any { return &plgHostedFast{inv: inv} },
 		Layout:    "fa285dd9b86974542e460f75fc9268495a86fb6f94f8e67546ed9bbce3afc1b5",
+	})
+	plg.MustRegisterContract(plg.Contract{
+		Interface: reflect.TypeFor[Aliased](),
+		Adapter:   reflect.TypeFor[plgAliased](),
+		Source:    plgFooerSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgAliasedFast{inv: inv} },
+		Layout:    "566369ff06ea6bb452569b063ce205009a515241b949e04005fa96536ac6e8a9",
 	})
 }

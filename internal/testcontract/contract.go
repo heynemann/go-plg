@@ -3,7 +3,7 @@
 // line below (`go generate ./internal/testcontract`), exactly as in a service's contract package.
 package testcontract
 
-//go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer Shaper Hosted
+//go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer Shaper Hosted Aliased
 
 import (
 	"context"

@@ -247,6 +247,70 @@ func TestRenderDispatcherTypeExpressions(t *testing.T) {
 }
 
 type (
+	Number = int
+	Pair   = struct{ A, B int }
+	Time   = time.Time // named as its type: embedded as p.Time
+	// Embedded is another alias of the name testcontract.Embedded has.
+	Embedded = Point
+	PlgClose = Point
+
+	PlgHostCall_Point = Point //nolint:revive,staticcheck // var-naming, ST1003: the name of a Host stub variable
+	aliasShapes       interface {
+		M(ctx context.Context, s struct {
+			*Pair
+			Time
+			Number
+			testcontract.Counter
+		}) (struct{ *testcontract.Embedded }, error)
+	}
+	conflictingAliases interface {
+		M(ctx context.Context, a struct{ testcontract.Embedded }, b struct{ *Embedded }) error
+	}
+	reservedAlias interface {
+		M(ctx context.Context, s struct{ PlgClose }) error
+	}
+	reservedPrefixAlias interface {
+		M(ctx context.Context, s struct{ PlgHostCall_Point }) error
+	}
+)
+
+// TestRenderDispatcherKeepsEmbeddedAliases checks embedded fields whose name is not their type's: reflection
+// resolves the alias they embed, so the dispatcher declares its own alias of the name and embeds it, keeping the
+// field's name. Fields embedding a type by its own name are unchanged.
+func TestRenderDispatcherKeepsEmbeddedAliases(t *testing.T) {
+	t.Parallel()
+
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Aliased](),
+		reflect.TypeFor[testcontract.AliasHost]())
+	require.NoError(t, err)
+	parse(t, src)
+
+	text := string(src)
+	assert.Equal(t, 1, strings.Count(text, "type Embedded = "), "one alias serves every field:\n%s", text)
+
+	for _, want := range []string{
+		"\tplugin \"plg.local/plugin\"\n)\n\ntype Embedded = p1.Counter\n\nvar create func(p1.AliasHost) (p1.Aliased, error)",
+		"var PlgCall_Bump func(p0.Context, struct{ Embedded; By int }) (struct{ Embedded; By int }, error)\n",
+		"var PlgHostCall_Double func(p0.Context, struct{ Embedded; By int }) (struct{ *Embedded }, error)\n",
+		"func (plgHost) Double(a0 p0.Context, a1 struct{ Embedded; By int }) (struct{ *Embedded }, error) {\n",
+	} {
+		assert.Contains(t, text, want)
+	}
+
+	src, err = goabi.RenderDispatcher(reflect.TypeFor[aliasShapes](), nil)
+	require.NoError(t, err)
+	parse(t, src)
+
+	text = string(src)
+	for _, want := range []string{
+		"type Embedded = p2.Counter\ntype Number = int\ntype Pair = struct{ A int; B int }\n\n",
+		"var PlgCall_M func(p0.Context, struct{ *Pair; p3.Time; Number; p2.Counter }) (struct{ *Embedded }, error)\n",
+	} {
+		assert.Contains(t, text, want)
+	}
+}
+
+type (
 	generic[T any] struct{ V T }
 	hidden         interface{ m() }
 	badFunc        interface {
@@ -298,6 +362,19 @@ func TestRenderDispatcherRejects(t *testing.T) {
 		{"nested func", reflect.TypeFor[badNested](), "unnamed func"},
 		{"chan map key", reflect.TypeFor[badKey](), "unnamed chan"},
 		{"func struct field", reflect.TypeFor[badFieldType](), "unnamed func"},
+		{
+			"one name, two aliases", reflect.TypeFor[conflictingAliases](),
+			"embedded fields named Embedded have the types testcontract.Counter and goabi_test.Point: the " +
+				"dispatcher can declare only one alias Embedded",
+		},
+		{
+			"alias named as the dispatcher's variable", reflect.TypeFor[reservedAlias](),
+			"embedded field PlgClose (of type goabi_test.Point) has a name the dispatcher declares",
+		},
+		{
+			"alias named as a Host stub variable", reflect.TypeFor[reservedPrefixAlias](),
+			"embedded field PlgHostCall_Point (of type goabi_test.Point) has a name the dispatcher declares",
+		},
 	}
 
 	for _, tc := range tests {

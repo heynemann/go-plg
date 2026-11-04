@@ -33,7 +33,7 @@ func TestCommittedContractsAreUpToDate(t *testing.T) {
 	t.Parallel()
 
 	for pkg, ifaces := range map[string][]string{
-		"testcontract": {"Fooer", "Shaper", "Hosted"},
+		"testcontract": {"Fooer", "Shaper", "Hosted", "Aliased"},
 		"fastcontract": {"Kinds"},
 	} {
 		dir := filepath.Join("..", pkg)

@@ -121,7 +121,8 @@ func prepareContract(spec *Contract) (*contract, error) {
 		return nil, err
 	}
 
-	// The interface passed validation, so the dispatcher renders and the payload encodes.
+	// The interface passed validation, so the payload encodes, and the dispatcher renders unless anonymous
+	// structs embed different types under one alias name, or an alias named as one of the dispatcher's own.
 	prepared.dispatcher, err = goabi.RenderDispatcher(spec.Interface, nil)
 	if err != nil {
 		return nil, fmt.Errorf("rendering the Go dispatcher: %w", err)

@@ -230,6 +230,12 @@ rules with `plg.ErrInvalidInterface`:
 - **Data only:** `bool`, integers, floats, `string`, `[]byte`, slices, maps with string keys, structs whose
   fields are all exported, pointers to structs, `time.Time`, and named types of these (recursive types included).
   Functions, channels, interfaces, arrays, complex numbers and `uintptr` are refused.
+- **Embedded aliases:** an anonymous struct may embed an alias (`struct{ Embedded }` with `type Embedded =
+  Counter`): the field keeps the alias's name, so Go plugins bind to exactly the contract's type. The Go
+  dispatcher declares one alias per name, so all such fields embedding an alias named `Embedded`, in the
+  interface and its Host, must denote the same type, and the name cannot be `PlgInit`, `PlgClose` or start with
+  `PlgCall_` or `PlgHostCall_`: otherwise registering the contract fails with `plg.ErrInvalidContract`, or
+  Register with `plg.ErrInvalidHost` when the Host brings the clash.
 - **Integers cross exactly or not at all:** Lua and JavaScript numbers are float64, so an integer beyond ±2^53
   fails the call with `plg.ErrConversion` (naming the parameter or result and the field) instead of losing
   precision. Go plugins obey the same limit, so every language behaves alike.

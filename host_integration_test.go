@@ -4,6 +4,7 @@ package plg_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -237,6 +238,46 @@ func hostedSource(t *testing.T) string {
 	require.NoError(t, err)
 
 	return string(src)
+}
+
+// bump is the struct testcontract.Aliased and testcontract.AliasHost take: it embeds the Embedded alias.
+type bump = struct {
+	testcontract.Embedded
+
+	By int
+}
+
+// doubler is the testcontract.AliasHost of TestEmbeddedAliasesCrossAGoPlugin.
+type doubler struct{}
+
+func (doubler) Double(_ context.Context, c bump) (struct{ *testcontract.Embedded }, error) {
+	return struct{ *testcontract.Embedded }{&testcontract.Embedded{N: 2 * c.N}}, nil
+}
+
+// TestEmbeddedAliasesCrossAGoPlugin loads a Go plugin whose method and Host signatures embed an alias in
+// anonymous structs. Reflection reports the embedded field's type, not the alias, so the dispatcher and Host
+// stubs must keep the field's name: struct{ Counter } is not the contract's struct{ Embedded }, and a plugin
+// written against the contract would not bind.
+func TestEmbeddedAliasesCrossAGoPlugin(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+	err := plg.Register[testcontract.Aliased](t.Context(), ctr, "aliased",
+		plg.WithStorage(goStorage(t, "aliased", map[string]string{"ref": "aliased"})),
+		plg.WithHost[testcontract.AliasHost](doubler{}))
+	require.NoError(t, err)
+
+	aliased, err := plg.Get[testcontract.Aliased](t.Context(), ctr, "aliased/ref")
+	require.NoError(t, err)
+
+	bumped, err := aliased.Bump(t.Context(), bump{N: 40, By: 2})
+	require.NoError(t, err)
+	assert.Equal(t, bump{N: 42, By: 2}, bumped)
+
+	doubled, err := aliased.Double(t.Context(), bump{N: 21})
+	require.NoError(t, err)
+	require.NotNil(t, doubled.Embedded, "the host's result crossed host -> guest -> host")
+	assert.Equal(t, 42, doubled.N)
 }
 
 func TestHostServesConcurrentPlugins(t *testing.T) {

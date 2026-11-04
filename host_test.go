@@ -102,13 +102,19 @@ type (
 	hostClash interface {
 		Note(ctx context.Context, c clash) error
 	}
-	pingHostImpl  struct{}
-	clashHostImpl struct{}
+	hostReservedAlias interface {
+		Note(ctx context.Context, s struct{ PlgClose }) error
+	}
+	pingHostImpl     struct{}
+	clashHostImpl    struct{}
+	reservedHostImpl struct{}
 )
 
 func (pingHostImpl) Note(context.Context, string) error { return nil }
 
 func (clashHostImpl) Note(context.Context, clash) error { return nil }
+
+func (reservedHostImpl) Note(context.Context, struct{ PlgClose }) error { return nil }
 
 func TestRegisterAcceptsAHostFromTheContractPackage(t *testing.T) {
 	t.Parallel()
@@ -165,6 +171,16 @@ func TestRegisterRejectsInvalidHosts(t *testing.T) {
 				"plg: invalid host testcontract.Host must be declared in the contract package " +
 					"github.com/heynemann/go-plg_test of plg_test.pinger, whose source Go plugins interpret; it is in " +
 					"github.com/heynemann/go-plg/internal/testcontract",
+			},
+			false,
+		},
+		{
+			plg.WithHost[hostReservedAlias](reservedHostImpl{}),
+			"alias named as the dispatcher's own",
+			[]string{
+				"plg: invalid host plg_test.hostReservedAlias: rendering the Go dispatcher: host: method Note: goabi: " +
+					"cannot render dispatcher: embedded field PlgClose (of type plg_test.aliasTarget) has a name the " +
+					"dispatcher declares",
 			},
 			false,
 		},
