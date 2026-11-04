@@ -318,10 +318,11 @@ func UseGenericBinder(c *Container) {
 	c.genericBinder.Store(true)
 }
 
-// UnguardGuestOutput makes the instances c starts log their output straight to its logger, so that a panicking
-// handler escapes their start as it did before guest output was guarded. Call it before Register.
-func UnguardGuestOutput(c *Container) {
-	c.unguardedOutput.Store(true)
+// UnguardLogger makes c log every record straight to its logger, without the callback boundary, or behind it
+// again with unguarded false, so that a panicking handler escapes where c logs as it did before logging was
+// guarded: tests use it to prove that such a panic leaves nothing behind.
+func UnguardLogger(c *Container, unguarded bool) {
+	c.panics.unguarded.Store(unguarded)
 }
 
 // FastAdapter returns the adapter plg gen generated for iface's registered contract, calling inv, or nil when

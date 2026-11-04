@@ -213,8 +213,8 @@ type reloadChanges struct {
 }
 
 // reloadRound reloads reg once. A panic in the round that no inner boundary recovered (a storage's Name, List and
-// Open, a plugin's load and every measurement report their own) is reported as a [PanicError] in [PhasePoll] and
-// returned, so that the reloader survives it; generations loaded but not published are closed.
+// Open, a plugin's load, every measurement and every log report their own) is reported as a [PanicError] in
+// [PhasePoll] and returned, so that the reloader survives it; generations loaded but not published are closed.
 func (c *Container) reloadRound(ctx context.Context, reg *registration) (err error) {
 	var changes reloadChanges
 
@@ -450,8 +450,8 @@ func (c *Container) retire(ctx context.Context, gen *plugin) {
 
 // closeRetired closes a retired generation once no call is in flight, or once ctx ends: Close gave up waiting
 // for the calls, and their instances are left to the runtimes. Closing gets the container's close timeout; a
-// failure is logged and kept in gen.closeErr. A panic meanwhile (the user's logger) is reported as a
-// [PanicError] in [PhaseClose] and kept too; the generation counts as closed all the same.
+// failure is logged and kept in gen.closeErr. A panic meanwhile (not the logger's handler's, which is guarded) is
+// reported as a [PanicError] in [PhaseClose] and kept too; the generation counts as closed all the same.
 func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 	defer func() {
 		if v := recover(); v != nil {

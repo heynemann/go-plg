@@ -43,7 +43,7 @@ var (
 	errBudgetFull = fmt.Errorf("%w: no room for another instance", ErrMemoryBudget)
 )
 
-// poolConfig configures a pool. The pool logs through its panic reporter's logger.
+// poolConfig configures a pool. The pool logs through a guarded logger of its panic reporter.
 type poolConfig struct {
 	panics       *panicReporter
 	spawn        func(context.Context) (instance, error) // starts an instance, running the plugin's Create
@@ -110,7 +110,7 @@ func newPool(cfg *poolConfig) *pool {
 	lanes := max(cfg.lanes, 1)
 
 	return &pool{
-		logger:       cfg.panics.logger,
+		logger:       cfg.panics.guardedLogger(cfg.key, cfg.lang),
 		panics:       cfg.panics,
 		spawn:        cfg.spawn,
 		http:         cfg.http,
@@ -283,10 +283,8 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 
 	err := p.closeInstance(ended, held)
 	if err != nil {
-		p.guard(ctx, logMethod, func() {
-			p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
-				slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
-		})
+		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
+			slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
 	}
 }
 
@@ -324,10 +322,8 @@ func (p *pool) closeIdle(ctx context.Context) {
 		case held := <-p.idle:
 			err := p.closeInstance(ctx, held)
 			if err != nil {
-				p.guard(ctx, logMethod, func() {
-					p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
-						slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
-				})
+				p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
+					slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
 			}
 		default:
 			return
@@ -365,10 +361,10 @@ func (p *pool) disengage(held *slot) {
 	}
 }
 
-// guard runs fn, the user's code (named method) the pool calls: the logger's handler or the meter provider's
-// instruments. A panic in it is reported as a [PanicError] in [PhaseCallback].
-func (p *pool) guard(ctx context.Context, method string, fn func()) {
-	p.panics.callback(ctx, p.key, p.lang, method, fn)
+// measure runs fn, which calls the meter provider's instruments, the user's code. A panic in it is reported as a
+// [PanicError] in [PhaseCallback]. The pool's logger guards itself.
+func (p *pool) measure(ctx context.Context, fn func()) {
+	p.panics.callback(ctx, p.key, p.lang, meterMethod, fn)
 }
 
 // reserve takes a place for a new instance: [errPoolFull] at the pool's maximum, [errBudgetFull] when the
@@ -526,10 +522,8 @@ func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
 
 		*delay = backoff(*delay)
 
-		p.guard(ctx, logMethod, func() {
-			p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
-				slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
-		})
+		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
+			slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
 
 		return sleep(ctx, *delay)
 	}

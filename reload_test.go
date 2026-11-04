@@ -167,13 +167,14 @@ func (h panickingLogger) Handle(ctx context.Context, rec slog.Record) error {
 }
 
 // TestReloadSurvivesAPanicInTheRound panics in a reload round outside any storage call or load (the user's
-// logger, logging the round's failure): the round fails with a PanicError in PhasePoll, and the reloader
-// survives to serve the next one.
+// logger, unguarded as it was before logging was guarded, logging the round's failure): the round fails with a
+// PanicError in PhasePoll, and the reloader survives to serve the next one.
 func TestReloadSurvivesAPanicInTheRound(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(panickingLogger{Handler: slog.DiscardHandler, msg: "plg: reload failed"})
 	ctr := plg.New(plg.WithLogger(logger))
+	plg.UnguardLogger(ctr, true)
 
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 
@@ -199,14 +200,16 @@ func TestReloadSurvivesAPanicInTheRound(t *testing.T) {
 
 // TestReloadRoundsContainAPanickingMeterProvider fails reload rounds (a storage that cannot be listed) once every
 // measurement panics: counting the failure is a PanicError in PhaseCallback, also when the round itself panicked
-// (the user's logger, logging the failure) and its recovery counts it, and the reloader serves the next round.
+// (the user's logger, unguarded, logging the failure) and its recovery counts it, and the reloader serves the next
+// round.
 func TestReloadRoundsContainAPanickingMeterProvider(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		check   func(t *testing.T, err error, recent []*plg.PanicError)
-		handler slog.Handler
-		name    string
+		check     func(t *testing.T, err error, recent []*plg.PanicError)
+		handler   slog.Handler
+		name      string
+		unguarded bool
 	}{
 		{
 			name: "failed round", handler: slog.DiscardHandler,
@@ -218,6 +221,7 @@ func TestReloadRoundsContainAPanickingMeterProvider(t *testing.T) {
 		},
 		{
 			name: "panicking round", handler: panickingLogger{Handler: slog.DiscardHandler, msg: "plg: reload failed"},
+			unguarded: true,
 			check: func(t *testing.T, err error, recent []*plg.PanicError) {
 				t.Helper()
 
@@ -240,6 +244,7 @@ func TestReloadRoundsContainAPanickingMeterProvider(t *testing.T) {
 
 			broken := new(atomic.Bool)
 			ctr := plg.New(plg.WithLogger(slog.New(tc.handler)), plg.WithMeterProvider(brokenMeters{broken: broken}))
+			plg.UnguardLogger(ctr, tc.unguarded)
 
 			t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 

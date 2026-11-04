@@ -477,7 +477,8 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 
 // launch starts the minimum instances of an opened plugin's pool (running Create in each) and returns the
 // generation they serve. Its adapter and its memory reservation are the caller's to set. A panic once the
-// instances started (the user's logger) closes them before going on: nothing else owns them yet.
+// instances started closes them before going on, nothing else owning them yet (the logger is guarded, so its
+// handler's panic is not one).
 func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files *memfs.FS) (
 	*plugin, error,
 ) {
@@ -528,14 +529,9 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 func (c *Container) newLauncher(reg *registration, key string, src *source, spec launchSpec, mod *engine.Module,
 	meters *pluginMeters,
 ) *launcher {
-	output := c.panics.guardedLogger(c.logger, key, src.desc.Language)
-	if c.unguardedOutput.Load() {
-		output = c.logger
-	}
-
 	return &launcher{
 		mod:     mod,
-		output:  output,
+		output:  c.panics.guardedLogger(key, src.desc.Language),
 		panics:  c.panics,
 		payload: spec.payload,
 		opts: engine.InstanceOptions{

@@ -1201,8 +1201,8 @@ func TestGuardedLoggerContainsItsHandlersPanics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			reporter := reporting(slog.DiscardHandler)
-			logger := reporter.guardedLogger(slog.New(tc.handler), "test/k", LanguageGo)
+			reporter := reporting(tc.handler)
+			logger := reporter.guardedLogger("test/k", LanguageGo)
 
 			assert.NotPanics(t, func() { tc.log(logger) })
 
@@ -1213,6 +1213,28 @@ func TestGuardedLoggerContainsItsHandlersPanics(t *testing.T) {
 			assert.Equal(t, "slog.Handler.Handle", failure.Method)
 			assert.Equal(t, "log handler bug", failure.Value)
 		})
+	}
+}
+
+// The container's own guarded logger has no key: a panic on a record about a plugin is reported under the
+// record's key attribute, and under no key for a record of the container's own.
+func TestGuardedLoggerReportsUnderTheRecordsKey(t *testing.T) {
+	t.Parallel()
+
+	reporter := reporting(panickingHandler{})
+	logger := reporter.guardedLogger("", "")
+
+	logger.LogAttrs(t.Context(), slog.LevelInfo, "about a plugin", slog.Int("n", 1), slog.String("key", "name/k"),
+		slog.String("other", "x"))
+	logger.Info("the container's own", slog.String("guest", "go"))
+
+	recent := reporter.history.recent()
+	require.Len(t, recent, 2)
+
+	for i, key := range []string{"name/k", ""} {
+		assert.Equal(t, PhaseCallback, recent[i].Phase)
+		assert.Equal(t, logMethod, recent[i].Method)
+		assert.Equal(t, key, recent[i].Key)
 	}
 }
 
@@ -1260,7 +1282,7 @@ func TestGuestOutputGuardsDoNotAllocate(t *testing.T) {
 
 	direct, guarded := &countingHandler{}, &countingHandler{}
 	unguardedAllocs := allocs(slog.New(direct))
-	guardedAllocs := allocs(reporting(slog.DiscardHandler).guardedLogger(slog.New(guarded), "test/k", LanguageGo))
+	guardedAllocs := allocs(reporting(guarded).guardedLogger("test/k", LanguageGo))
 
 	assert.Zero(t, guardedAllocs-unguardedAllocs, "the guard's allocations per line")
 	assert.Equal(t, 101, direct.handled, "AllocsPerRun's warm-up run and its 100 measured ones")

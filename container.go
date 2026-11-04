@@ -42,7 +42,9 @@ const closeTimeout = 10 * time.Second
 // memory limit, all sharing the container's compilation cache. Create it with [New] and release it with
 // [Container.Close].
 type Container struct {
-	engine       *engine.Engine
+	engine *engine.Engine
+	// logger is the user's logger behind the callback boundary ([panicReporter.guardedLogger]), for the records
+	// the container logs itself; a plugin version's instances and pool log through guarded loggers of their own.
 	logger       *slog.Logger
 	panics       *panicReporter
 	meters       *instruments
@@ -63,9 +65,6 @@ type Container struct {
 	// genericBinder makes bind ignore the adapters plg gen generated (Contract.Fast), so tests and benchmarks
 	// can hold the generic binder to the same suite.
 	genericBinder atomic.Bool
-	// unguardedOutput makes instances log their output straight to the logger, without the panic boundary, so
-	// that tests can prove a panic escaping an instance's start still closes the instance.
-	unguardedOutput atomic.Bool
 }
 
 // New returns an empty container.
@@ -73,8 +72,12 @@ func New(opts ...Option) *Container {
 	cfg := containerOptions(opts)
 
 	ctr := &Container{
-		engine:       engine.New(context.Background(), engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir}),
-		logger:       cfg.logger,
+		panics: newPanicReporter(
+			cfg.logger,
+			cfg.onPanic,
+			cfg.panicHistory,
+			nil,
+		), // instrument gives it the meters
 		runtimes:     xsync.NewMap[uint64, *engine.Runtime](),
 		modules:      xsync.NewMap[moduleKey, *compiledGuest](),
 		names:        xsync.NewMap[string, bool](),
@@ -88,8 +91,11 @@ func New(opts ...Option) *Container {
 	}
 	ctr.catalogue.Store(&snapshot{})
 
-	ctr.panics = newPanicReporter(cfg.logger, cfg.onPanic, cfg.panicHistory, nil) // instrument gives it the meters
+	ctr.logger = ctr.panics.guardedLogger("", "")
 	ctr.instrument(&cfg)
+
+	// After the instruments: a panic in the logger's handler on the engine's warning is counted in them.
+	ctr.engine = engine.New(context.Background(), engine.Options{Logger: ctr.logger, CacheDir: cfg.cacheDir})
 
 	return ctr
 }
@@ -214,20 +220,32 @@ func (c *Container) module(ctx context.Context, lang Language, guest guestreg.Gu
 	}
 }
 
+// errCompileUnwound is a compilation a panic unwound before it had a module or an error.
+var errCompileUnwound = errors.New("the guest's compilation was interrupted")
+
+// compile compiles the guest for the runtime of key into entry, the waiting callers' to read once done is closed.
+// entry is complete however compile ends: a compilation a panic unwinds (the engine logs the compile) is a
+// failure, forgotten like any other, so that a later call compiles the guest anew.
 func (c *Container) compile(ctx context.Context, key moduleKey, guest guestreg.Guest, entry *compiledGuest) (
 	*engine.Module, error,
 ) {
-	defer close(entry.done)
+	defer func() {
+		if entry.mod == nil && entry.err == nil {
+			entry.err = errCompileUnwound
+		}
+
+		if entry.err != nil {
+			c.modules.Delete(key)
+		}
+
+		close(entry.done)
+	}()
 
 	rt, err := c.runtime(ctx, key.limit)
 	if err != nil {
 		entry.err = err
 	} else {
 		entry.mod, entry.err = compileGuest(ctx, rt, key.lang, guest)
-	}
-
-	if entry.err != nil {
-		c.modules.Delete(key)
 	}
 
 	return entry.mod, entry.err

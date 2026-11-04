@@ -58,7 +58,8 @@ type PanicError struct {
 	Time time.Time
 	// Key is the plugin key, "<name>/<descriptor key>", or the Register name when no plugin is involved (a
 	// storage's List, polling); it is empty for the container's own calls to its meter provider ([New] creating
-	// the instruments, [Container.Close] unregistering them).
+	// the instruments, [Container.Close] unregistering them) and to the logger's handler on records about no plugin
+	// (a guest compiled, a cache warning).
 	Key string
 	// Language is the plugin's language, empty when no plugin is involved.
 	Language Language
@@ -111,16 +112,21 @@ func (e *PanicError) Unwrap() []error {
 }
 
 // panicReporter reports a container's PanicErrors: an Error-level log, the panic history, the plg.plugin.panics
-// metric and the WithOnPanic function. It is safe for concurrent use.
+// metric and the WithOnPanic function. It holds the user's logger, which plg logs to only through it: the
+// reports here, and every other record through a guarded logger ([panicReporter.guardedLogger]). It is safe for
+// concurrent use.
 type panicReporter struct {
 	logger  *slog.Logger
 	onPanic func(context.Context, *PanicError)
-	meters  *instruments
+	meters  *instruments // nil counts nothing
 	history panicHistory
+	// unguarded makes the guarded loggers log straight to logger, without the callback boundary, so that tests
+	// can prove that a panic escaping where plg logs leaves nothing behind.
+	unguarded atomic.Bool
 }
 
-// newPanicReporter returns a reporter keeping the newest history PanicErrors (none for zero or less) and
-// counting them in meters.
+// newPanicReporter returns a reporter logging to logger, keeping the newest history PanicErrors (none for zero or
+// less) and counting them in meters (nothing for nil).
 func newPanicReporter(logger *slog.Logger, onPanic func(context.Context, *PanicError), history int,
 	meters *instruments,
 ) *panicReporter {
@@ -144,7 +150,11 @@ func (r *panicReporter) recovered(ctx context.Context, failure *PanicError, valu
 func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	failure.Time = time.Now()
 	r.history.record(failure)
-	r.callback(ctx, failure.Key, failure.Language, meterMethod, func() { r.meters.countPanic(ctx, failure) })
+
+	if r.meters != nil {
+		r.callback(ctx, failure.Key, failure.Language, meterMethod, func() { r.meters.countPanic(ctx, failure) })
+	}
+
 	r.callback(ctx, failure.Key, failure.Language, logMethod, func() { r.log(ctx, failure) })
 
 	if r.onPanic != nil {
@@ -162,7 +172,7 @@ func (r *panicReporter) callback(ctx context.Context, key string, lang Language,
 			failed := callbackFailure(key, lang, method, v)
 			r.history.record(failed)
 
-			if method != meterMethod {
+			if method != meterMethod && r.meters != nil {
 				r.quietly(failed, meterMethod, func() { r.meters.countPanic(ctx, failed) })
 			}
 
@@ -186,13 +196,14 @@ func (r *panicReporter) quietly(failed *PanicError, method string, fn func()) {
 	fn()
 }
 
-// guardedLogger returns logger with its handler behind the callback boundary, for records about the plugin key in
-// lang: a panic in the handler is reported as a PanicError in [PhaseCallback] (Method slog.Handler.Handle) and
-// the record is dropped. Instances log their output through it, inside the guest's steps: a complete line from the
-// host function serving the guest's write, whose panic wazero would make the guest's trap, and the partial line a
-// step leaves once it returned, before the pool owns a new instance.
-func (r *panicReporter) guardedLogger(logger *slog.Logger, key string, lang Language) *slog.Logger {
-	return slog.New(&guardedHandler{handler: logger.Handler(), panics: r, key: key, lang: lang})
+// guardedLogger returns the user's logger with its handler behind the callback boundary, for records about the
+// plugin key in lang: a panic in the handler (Enabled or Handle) is reported as a PanicError in [PhaseCallback]
+// (Method slog.Handler.Handle) and the record is dropped; what was logging carries on. Every record plg logs, but
+// the reports of PanicErrors themselves, goes through a guarded logger: the container's own, without a key (a
+// panic on a record with a "key" attribute is reported under that key), and each plugin version's, which its
+// instances log their output through, inside the guest's steps, and its pool its failures.
+func (r *panicReporter) guardedLogger(key string, lang Language) *slog.Logger {
+	return slog.New(&guardedHandler{handler: r.logger.Handler(), panics: r, key: key, lang: lang})
 }
 
 // guardedHandler is a slog handler behind the callback boundary; see [panicReporter.guardedLogger].
@@ -204,6 +215,10 @@ type guardedHandler struct {
 }
 
 func (h *guardedHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	if h.panics.unguarded.Load() {
+		return h.handler.Enabled(ctx, level)
+	}
+
 	enabled := false
 
 	h.panics.callback(ctx, h.key, h.lang, logMethod, func() { enabled = h.handler.Enabled(ctx, level) })
@@ -213,9 +228,24 @@ func (h *guardedHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 //nolint:gocritic // hugeParam: slog.Handler fixes the signature
 func (h *guardedHandler) Handle(ctx context.Context, rec slog.Record) error {
+	if h.panics.unguarded.Load() {
+		return h.handler.Handle(ctx, rec) //nolint:wrapcheck // the user's handler's own error, as slog returns it
+	}
+
+	key := h.key
+	if key == "" {
+		rec.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == "key" {
+				key = attr.Value.String()
+			}
+
+			return key == ""
+		})
+	}
+
 	var err error
 
-	h.panics.callback(ctx, h.key, h.lang, logMethod, func() { err = h.handler.Handle(ctx, rec) })
+	h.panics.callback(ctx, key, h.lang, logMethod, func() { err = h.handler.Handle(ctx, rec) })
 
 	return err //nolint:wrapcheck // the user's handler's own error, as slog returns it
 }

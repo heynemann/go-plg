@@ -314,9 +314,9 @@ func TestAPanickingLoggerNeverFailsAStepOnGuestOutput(t *testing.T) {
 // TestAFailedStartClosesItsInstance fails a plugin's start on every path between instantiating its instance and
 // handing it to the pool: the guest trapping in Create, Create returning an error, the source failing to load in
 // the guest, the guest panicking, and a panic on the host once Create returned (the logger's, on the partial line
-// Create printed, with guest output unguarded as it was before this was fixed). Register fails each time and
+// Create printed, with the logger unguarded as it was before logging was guarded). Register fails each time and
 // leaves no instance open, no memory charged and none reserved. The cases share one container, in order: the last
-// unguards its output.
+// unguards the logger.
 func TestAFailedStartClosesItsInstance(t *testing.T) {
 	t.Parallel()
 
@@ -362,7 +362,7 @@ func TestAFailedStartClosesItsInstance(t *testing.T) {
 
 	for _, tc := range tests {
 		if tc.unguarded {
-			plg.UnguardGuestOutput(ctr)
+			plg.UnguardLogger(ctr, true)
 		}
 
 		err := plg.Register[testcontract.Fooer](t.Context(), ctr, "failing", plg.WithStorage(tc.storage),

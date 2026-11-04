@@ -10,9 +10,11 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests with a handler panicking on each of the cited records (skipped plugin, cleanup during reload, guest compiled) reproduces the bug (fails on the current code) and passes with the fix
+**Resolution:** every record plg logs goes through the panic reporter's guarded logger (the container's own, keyless, reporting under a record's `key` attribute; one per plugin version for its instances and pool; `Warm`'s), so a panicking handler is a `PanicError` in `PhaseCallback` and the record is dropped; `Container.compile` completes its entry however it ends, forgetting one a panic unwound. Audit table of every logger call site in PLAN.md, "Second adversarial review fixes", 05.
+
+- [x] Tests with a handler panicking on each of the cited records (skipped plugin, cleanup during reload, guest compiled) reproduces the bug (fails on the current code) and passes with the fix
 Register leaves no name reserved, the reloader keeps running, a later Register compiles the guest correctly; each panic recorded as PhaseCallback
 Audit table of every logger call site in PLAN.md, each guarded
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

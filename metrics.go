@@ -198,7 +198,7 @@ func (c *Container) observe(ctx context.Context, obs metric.Observer) error {
 func (p *pool) observe(ctx context.Context, obs metric.Observer) {
 	inst, opts := p.meters.inst, p.meters.observe
 
-	p.guard(ctx, meterMethod, func() {
+	p.measure(ctx, func() {
 		obs.ObserveInt64(inst.instances, int64(p.size.Load()), opts...)
 		obs.ObserveInt64(inst.inUse, int64(p.inUse.Load()), opts...)
 		obs.ObserveInt64(inst.inFlight, int64(p.busy.Load()), opts...)
@@ -209,13 +209,13 @@ func (p *pool) observe(ctx context.Context, obs metric.Observer) {
 // count adds one to counter with opts. A panic in the instrument is reported as a [PanicError] in
 // [PhaseCallback].
 func (p *pool) count(ctx context.Context, counter metric.Int64Counter, opts []metric.AddOption) {
-	p.guard(ctx, meterMethod, func() { counter.Add(ctx, 1, opts...) })
+	p.measure(ctx, func() { counter.Add(ctx, 1, opts...) })
 }
 
 // called records a call in the plugin's call metrics, as [pluginMeters.called] does; a panic in the instruments
 // is reported as a [PanicError] in [PhaseCallback].
 func (p *pool) called(ctx context.Context, index uint32, elapsed time.Duration, err error) {
-	p.guard(ctx, meterMethod, func() { p.meters.called(ctx, index, elapsed, err) })
+	p.measure(ctx, func() { p.meters.called(ctx, index, elapsed, err) })
 }
 
 // countPanic counts a reported PanicError; the panic reporter guards it.

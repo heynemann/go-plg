@@ -19,10 +19,11 @@ import (
 //
 // The containers must then use the same directory: [WithCompilationCacheDir] or the PLG_CACHE_DIR environment
 // variable, resolved as [New] does. Of the options, only [WithCompilationCacheDir] and [WithLogger] (each
-// compile is logged at Info, with its duration) apply. The cache is keyed by the guest module's content, the
-// wazero version and the CPU features, so it serves services built against the same plg version on machines
-// with the CPU of the warming one; anything else is an ordinary cold compile, never an error. Custom guests
-// ([WithGoGuest]) are not linked, so Warm does not compile them.
+// compile is logged at Info, with its duration; a panic in the logger's handler drops the record, as there is no
+// container to report it to) apply. The cache is keyed by the guest module's content, the wazero version and the
+// CPU features, so it serves services built against the same plg version on machines with the CPU of the warming
+// one; anything else is an ordinary cold compile, never an error. Custom guests ([WithGoGuest]) are not linked, so
+// Warm does not compile them.
 //
 // Unlike [New], Warm fails when the cache directory cannot be created or written, rather than compiling into
 // memory, and it fails with [ErrGuestNotLinked] when the program links no guest.
@@ -34,7 +35,9 @@ func Warm(ctx context.Context, opts ...Option) error {
 		return fmt.Errorf("plg: warm: %w: the program links no guest package", ErrGuestNotLinked)
 	}
 
-	eng, err := engine.NewOnDisk(engine.Options{Logger: cfg.logger, CacheDir: cfg.cacheDir})
+	logger := newPanicReporter(cfg.logger, nil, 0, nil).guardedLogger("", "")
+
+	eng, err := engine.NewOnDisk(engine.Options{Logger: logger, CacheDir: cfg.cacheDir})
 	if err != nil {
 		return fmt.Errorf("plg: warm: %w", err)
 	}

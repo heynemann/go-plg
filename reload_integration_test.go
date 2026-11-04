@@ -623,14 +623,16 @@ func TestAHangingCloseCannotHoldARetiredVersion(t *testing.T) {
 }
 
 // TestFailuresClosingRetiredVersionsAreReported removes plugins whose Close returns an error or panics, and one
-// whose closing the user's logger panics on: an error is logged, a panic in the guest or on the host is a
-// PanicError in PhaseClose, and each version is closed all the same, its memory given back.
+// whose closing the user's logger panics on, unguarded as it was before logging was guarded: an error is logged, a
+// panic in the guest or on the host is a PanicError in PhaseClose, and each version is closed all the same, its
+// memory given back.
 func TestFailuresClosingRetiredVersionsAreReported(t *testing.T) {
 	t.Parallel()
 
 	sink := &logSink{lines: make(chan string, 4096)}
 	logger := panickingLogger{Handler: slog.NewJSONHandler(sink, nil), msg: "plg: plugin version closed"}
 	ctr := newContainer(t, plg.WithLogger(slog.New(logger)))
+	plg.UnguardLogger(ctr, true)
 
 	store := plg.NewMemoryStorage("closes")
 	versions := map[string]string{"fails": "close-fails", "panics": "close-panics", "ok": "v1"}
@@ -678,13 +680,15 @@ func TestFailuresClosingRetiredVersionsAreReported(t *testing.T) {
 }
 
 // TestAPanicAfterAPluginStartedClosesItsInstances loads a plugin with a logger that panics on the load's log line,
-// once the plugin's instance has started: Register fails with a PanicError in PhaseLoad, and that instance is
-// closed, its memory given back (and its refiller stopped, which goleak checks for the package).
+// unguarded as it was before logging was guarded, once the plugin's instance has started: Register fails with a
+// PanicError in PhaseLoad, and that instance is closed, its memory given back (and its refiller stopped, which
+// goleak checks for the package).
 func TestAPanicAfterAPluginStartedClosesItsInstances(t *testing.T) {
 	t.Parallel()
 
 	logger := panickingLogger{Handler: slog.DiscardHandler, msg: "plg: plugin loaded"}
 	ctr := newContainer(t, plg.WithLogger(slog.New(logger)))
+	plg.UnguardLogger(ctr, true)
 
 	store := plg.NewMemoryStorage("loud")
 	putVersioned(t, store, "k", "v1")

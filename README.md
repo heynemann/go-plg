@@ -631,10 +631,12 @@ type PanicError struct {
   it. `errors.Is(err, plg.ErrCall)` holds for every failed call, and `errors.Is(err, context.DeadlineExceeded)`
   for a deadline stop.
 - **On the host:** every boundary where plg runs code it does not control is behind `recover`: storages, the
-  codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler (the
-  plugins' own output included) and your meter provider (a panic there is a `PanicError` in phase `callback`;
-  `New`, `Register`, the reload, the call, the pool and its instances carry on). esbuild does not run on the
-  host: it bundles TypeScript plugins in a WebAssembly sandbox with its own time and memory limits.
+  codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler (on every
+  record plg logs: loads, skipped plugins, compiles, reloads, closes, HTTP requests and the plugins' own output)
+  and your meter provider (a panic there is a `PanicError` in phase `callback`, the record or measurement is
+  dropped, and `New`, `Register`, the reload, the call, the pool and its instances carry on, their state intact).
+  esbuild does not run on the host: it bundles TypeScript plugins in a WebAssembly sandbox with its own time and
+  memory limits.
 - **Reporting:** each `PanicError` is logged at Error level, counted (`plg.plugin.panics`), passed to
   `plg.WithOnPanic(fn)` and kept in `c.RecentPanics()` (the last 64, `plg.WithPanicHistory(n)`).
 
