@@ -10,8 +10,8 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A testcontainers test storing an oversized file and an oversized total for an enabled plugin reproduces the bug (fails on the current code) and passes with the fix
+- [x] A testcontainers test storing an oversized file and an oversized total for an enabled plugin reproduces the bug (fails on the current code) and passes with the fix
 `Open` fails with `ErrPluginTooLarge` (or equivalent) without transferring the content; `Put` refuses oversized files
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

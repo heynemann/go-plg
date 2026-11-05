@@ -14,6 +14,7 @@ import (
 	_ "embed" // the migrations
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strconv"
 	"testing/fstest"
@@ -150,12 +151,67 @@ func scanDescriptor(row pgx.CollectableRow) (plg.Descriptor, error) {
 var errFilePath = errors.New("file path is not a valid path inside the plugin")
 
 // Open returns the plugin's files, as they are when it runs. It fails with fs.ErrNotExist when the plugin has
-// none, and if a path in the table is not a valid fs.FS path.
+// none, if a path in the table is not a valid fs.FS path, and with [plg.ErrPluginTooLarge] when the files are
+// over plg's limits ([plg.MaxPluginSize]): their sizes are checked in the database, in the snapshot the files
+// are then read from, so an oversized plugin's content never leaves it.
 func (s *Storage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
-	rows, err := s.db.Query(ctx,
-		"SELECT path, content FROM plg_plugin_files WHERE registration = $1 AND key = $2",
-		s.registration, desc.Key)
-	files := make(fstest.MapFS)
+	var files fstest.MapFS
+
+	err := pgx.BeginFunc(ctx, s.db, func(txn pgx.Tx) error {
+		var err error
+
+		files, err = readFiles(ctx, txn, s.registration, desc.Key)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pgstorage: opening %s/%s: %w", s.registration, desc.Key, err)
+	}
+
+	return files, nil
+}
+
+// sizesSQL selects the number of a plugin's files, the bytes of their paths and contents, and the first file over
+// $3 bytes, if any. octet_length reads a stored value's size without its content.
+const sizesSQL = `
+	SELECT count(*), coalesce(sum(octet_length(path)), 0), coalesce(sum(octet_length(content)), 0),
+		coalesce((SELECT path FROM plg_plugin_files
+			WHERE registration = $1 AND key = $2 AND octet_length(content) > $3 ORDER BY path LIMIT 1), '')
+	FROM plg_plugin_files WHERE registration = $1 AND key = $2`
+
+// readFiles reads, in txn, the files of the plugin key of registration, once their sizes are within plg's limits.
+func readFiles(ctx context.Context, txn pgx.Tx, registration, key string) (fstest.MapFS, error) {
+	var (
+		count, pathBytes, size int64
+		oversized              string
+	)
+
+	// One snapshot for both queries: the files read are the files checked.
+	_, err := txn.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+	if err == nil {
+		err = txn.QueryRow(ctx, sizesSQL, registration, key, plg.MaxPluginFileSize).
+			Scan(&count, &pathBytes, &size, &oversized)
+	}
+
+	switch {
+	case err != nil:
+		return nil, err //nolint:wrapcheck // Open wraps it
+	case oversized != "":
+		return nil, fmt.Errorf("%w: %s is over %d bytes", plg.ErrPluginTooLarge, oversized, plg.MaxPluginFileSize)
+	case size > plg.MaxPluginSize:
+		return nil, fmt.Errorf("%w: %d bytes, limit %d", plg.ErrPluginTooLarge, size, plg.MaxPluginSize)
+	case count > plg.MaxPluginEntries:
+		return nil, fmt.Errorf("%w: %d files, limit %d", plg.ErrPluginTooLarge, count, plg.MaxPluginEntries)
+	case pathBytes > plg.MaxPluginPathBytes:
+		return nil, fmt.Errorf("%w: paths of %d bytes, limit %d", plg.ErrPluginTooLarge, pathBytes,
+			plg.MaxPluginPathBytes)
+	case count == 0:
+		return nil, fs.ErrNotExist
+	}
+
+	rows, err := txn.Query(ctx, "SELECT path, content FROM plg_plugin_files WHERE registration = $1 AND key = $2",
+		registration, key)
+	files := make(fstest.MapFS, count)
 
 	var (
 		name    string
@@ -174,15 +230,7 @@ func (s *Storage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) 
 		})
 	}
 
-	if err == nil && len(files) == 0 {
-		err = fs.ErrNotExist
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("pgstorage: opening %s/%s: %w", s.registration, desc.Key, err)
-	}
-
-	return files, nil
+	return files, err //nolint:wrapcheck // Open wraps it
 }
 
 // Plugin is a plugin's row: what [Storage.Put] writes besides the files.
@@ -213,17 +261,21 @@ func (s *Storage) Put(ctx context.Context, plugin Plugin, files fs.FS) error {
 		return fmt.Errorf("pgstorage: putting %s/%s: %w", s.registration, plugin.Key, errMemoryLimit)
 	}
 
-	var rows [][]any
+	var (
+		rows [][]any
+		read int
+	)
 
 	err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil || !entry.Type().IsRegular() {
 			return err
 		}
 
-		content, err := fs.ReadFile(files, name)
+		content, err := readFile(files, name, read)
+		read += len(content)
 		rows = append(rows, []any{s.registration, plugin.Key, name, content})
 
-		return err //nolint:wrapcheck // Put wraps it
+		return err
 	})
 	if err == nil {
 		err = pgx.BeginFunc(ctx, s.db, func(txn pgx.Tx) error { return s.writePlugin(ctx, txn, plugin, rows) })
@@ -234,6 +286,41 @@ func (s *Storage) Put(ctx context.Context, plugin Plugin, files fs.FS) error {
 	}
 
 	return nil
+}
+
+// readFile reads the file name of files, after read bytes of the plugin's other files, failing with
+// [plg.ErrPluginTooLarge] when it is over plg's limits ([plg.MaxPluginSize]): by the size it states, before it
+// is read, and by what it holds, read up to the limit and one byte more.
+func readFile(files fs.FS, name string, read int) ([]byte, error) {
+	limit := int64(min(plg.MaxPluginFileSize, plg.MaxPluginSize-read))
+
+	file, err := files.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Put wraps it
+	}
+	defer file.Close() //nolint:errcheck // the file was only read
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Put wraps it
+	}
+
+	if info.Size() > limit {
+		return nil, fileTooLarge(name)
+	}
+
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err == nil && int64(len(content)) > limit {
+		return nil, fileTooLarge(name)
+	}
+
+	return content, err //nolint:wrapcheck // Put wraps it
+}
+
+// fileTooLarge reports the file name, over [plg.MaxPluginFileSize] or bringing the plugin over [plg.MaxPluginSize].
+func fileTooLarge(name string) error {
+	return fmt.Errorf("%w: %s is over %d bytes or brings the plugin's files over %d", plg.ErrPluginTooLarge,
+		name, plg.MaxPluginFileSize, plg.MaxPluginSize)
 }
 
 // SetEnabled enables or disables the plugin. It fails with [ErrNoPlugin] when there is no such plugin.

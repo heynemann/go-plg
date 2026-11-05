@@ -10,11 +10,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -422,6 +425,180 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 
 	_, err = store.Open(t.Context(), descs[0])
 	require.ErrorIs(t, err, fs.ErrNotExist, "its files went with it")
+}
+
+// countingDB is a pgstorage.DB counting the bytes of the values its queries return, in transactions too.
+type countingDB struct {
+	*pgxpool.Pool
+
+	received *atomic.Int64
+}
+
+//nolint:ireturn // it implements pgstorage.DB, whose Begin returns pgx.Tx
+func (db countingDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	txn, err := db.Pool.Begin(ctx)
+
+	return countingTx{Tx: txn, received: db.received}, err //nolint:wrapcheck // a transparent wrapper
+}
+
+//nolint:ireturn // it implements pgstorage.DB, whose Query returns pgx.Rows
+func (db countingDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	rows, err := db.Pool.Query(ctx, sql, args...)
+
+	return countingRows{Rows: rows, received: db.received}, err //nolint:wrapcheck // a transparent wrapper
+}
+
+type countingTx struct {
+	pgx.Tx
+
+	received *atomic.Int64
+}
+
+//nolint:ireturn // it implements pgx.Tx, whose Query returns pgx.Rows
+func (txn countingTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	rows, err := txn.Tx.Query(ctx, sql, args...)
+
+	return countingRows{Rows: rows, received: txn.received}, err //nolint:wrapcheck // a transparent wrapper
+}
+
+type countingRows struct {
+	pgx.Rows
+
+	received *atomic.Int64
+}
+
+func (rows countingRows) Next() bool {
+	next := rows.Rows.Next()
+	if next {
+		for _, value := range rows.RawValues() {
+			rows.received.Add(int64(len(value)))
+		}
+	}
+
+	return next
+}
+
+// TestStorageOpenRefusesOversizedPluginsBeforeReadingThem: a plugin with a file over plg.MaxPluginFileSize, or
+// files over plg.MaxPluginSize together, fails to open with plg.ErrPluginTooLarge before its content leaves the
+// database, and Put refuses such files.
+func TestStorageOpenRefusesOversizedPluginsBeforeReadingThem(t *testing.T) {
+	t.Parallel()
+
+	registration := newRegistration()
+	received := new(atomic.Int64)
+	store := pgstorage.New(countingDB{Pool: database, received: received}, registration)
+
+	// The content is made in the database: the test transfers none of it either.
+	insert := func(key string, sizes ...int) {
+		t.Helper()
+
+		require.NoError(t, store.Put(t.Context(), luaPlugin(key), files("main.lua", "")))
+
+		for i, size := range sizes {
+			_, err := database.Exec(t.Context(), `INSERT INTO plg_plugin_files
+				VALUES ($1, $2, $3, convert_to(repeat('x', $4), 'UTF8'))`,
+				registration, key, "f"+strconv.Itoa(i), size)
+			require.NoError(t, err)
+		}
+	}
+
+	insert("file", plg.MaxPluginFileSize+1)
+	insert("total", plg.MaxPluginFileSize, plg.MaxPluginFileSize, plg.MaxPluginFileSize, plg.MaxPluginFileSize, 1)
+	insert("fits", plg.MaxPluginFileSize)
+
+	// Many files, and long paths (a path index entry holds at most ~2.7 KB, so many paths of ~2,000 bytes).
+	for key, sql := range map[string]string{
+		"entries": `INSERT INTO plg_plugin_files SELECT $1, 'entries', 'e' || i, '' FROM generate_series(1, $2) i`,
+		"paths": `INSERT INTO plg_plugin_files
+			SELECT $1, 'paths', repeat('p', 1990) || i, '' FROM generate_series(1, $2 / 1900 + 1) i`,
+	} {
+		limit := plg.MaxPluginEntries
+		if key == "paths" {
+			limit = plg.MaxPluginPathBytes
+		}
+
+		require.NoError(t, store.Put(t.Context(), luaPlugin(key), files("main.lua", "")))
+
+		_, err := database.Exec(t.Context(), sql, registration, limit)
+		require.NoError(t, err)
+	}
+
+	for _, key := range []string{"file", "total", "entries", "paths"} {
+		received.Store(0)
+
+		_, err := store.Open(t.Context(), plg.Descriptor{Key: key})
+		require.ErrorIs(t, err, plg.ErrPluginTooLarge, key)
+		assert.Less(t, received.Load(), int64(1<<10), "%s: no content was transferred", key)
+	}
+
+	got, err := store.Open(t.Context(), plg.Descriptor{Key: "fits"})
+	require.NoError(t, err, "the limits themselves are allowed")
+
+	data, err := fs.ReadFile(got, "f0")
+	require.NoError(t, err)
+	assert.Len(t, data, plg.MaxPluginFileSize)
+
+	big := fstest.MapFS{"main.lua": {Data: make([]byte, plg.MaxPluginFileSize+1)}}
+	require.ErrorIs(t, store.Put(t.Context(), luaPlugin("put"), big), plg.ErrPluginTooLarge, "a file too large")
+
+	many := make(fstest.MapFS)
+	chunk := make([]byte, plg.MaxPluginFileSize)
+
+	for i := range plg.MaxPluginSize/plg.MaxPluginFileSize + 1 {
+		many["f"+strconv.Itoa(i)] = &fstest.MapFile{Data: chunk}
+	}
+
+	require.ErrorIs(t, store.Put(t.Context(), luaPlugin("put"), many), plg.ErrPluginTooLarge, "files too large")
+
+	err = store.Put(t.Context(), luaPlugin("put"), lyingFS{"main.lua": {}})
+	require.ErrorIs(t, err, plg.ErrPluginTooLarge, "a file holding more than it states is read up to the limit")
+
+	for name, want := range map[string]error{"unopenable": fs.ErrPermission, "unstatable": fs.ErrInvalid} {
+		require.ErrorIs(t, store.Put(t.Context(), luaPlugin("put"), lyingFS{name: {}}), want, name)
+	}
+
+	assert.Len(t, list(t, store), 5, "the refused plugin was not written")
+}
+
+// lyingFS is a MapFS whose files misbehave: "unopenable" fails to open, "unstatable" to stat, and any other
+// states 0 bytes but holds endless zeros.
+type lyingFS fstest.MapFS
+
+func (fsys lyingFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return fstest.MapFS(fsys).ReadDir(name) //nolint:wrapcheck // a transparent wrapper
+}
+
+func (fsys lyingFS) Open(name string) (fs.File, error) {
+	if name == "unopenable" {
+		return nil, fs.ErrPermission
+	}
+
+	file, err := fstest.MapFS(fsys).Open(name)
+	if err != nil || name == "." {
+		return file, err //nolint:wrapcheck // a transparent wrapper
+	}
+
+	return lyingFile{File: file, unstatable: name == "unstatable"}, nil
+}
+
+type lyingFile struct {
+	fs.File
+
+	unstatable bool
+}
+
+func (f lyingFile) Stat() (fs.FileInfo, error) {
+	if f.unstatable {
+		return nil, fs.ErrInvalid
+	}
+
+	return f.File.Stat() //nolint:wrapcheck // a transparent wrapper
+}
+
+func (lyingFile) Read(p []byte) (int, error) {
+	clear(p)
+
+	return len(p), nil
 }
 
 func TestStorageReportsDatabaseFailures(t *testing.T) {
