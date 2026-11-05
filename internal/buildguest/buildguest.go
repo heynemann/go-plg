@@ -337,7 +337,7 @@ func isStandard(pkg string) bool {
 }
 
 // extract writes the guest's packages: main, and the extra package with its symbol table declaration and one
-// file per package, extracted by yaegi for wasip1.
+// file per package, extracted by yaegi for wasip1 and renamed neutrally.
 func (b *builder) extract(ctx context.Context, pkgs []string) error {
 	err := b.work.Mkdir(extraPackage, dirMode)
 	if err == nil {
@@ -371,6 +371,22 @@ func (b *builder) extract(ctx context.Context, pkgs []string) error {
 	if missing := b.firstUnextracted(pkgs); err != nil || missing != "" {
 		return fmt.Errorf("%w: yaegi extract (%s) wrote no symbols for %q:\n%s", ErrExtract, cmd.ProcessState,
 			missing, bytes.TrimSpace(out))
+	}
+
+	return b.neutralize(pkgs)
+}
+
+// neutralize renames the file yaegi extract wrote for each package, named after the package's path, to
+// symbols.<index>.go. A name after the path can end in _test.go or _<GOOS>.go or _<GOARCH>.go (a package
+// helper_test or helper_linux), which the go command would leave out of the wasip1 build without a word. The
+// dot in the neutral names keeps them apart from every name yaegi writes (it replaces dots with underscores).
+func (b *builder) neutralize(pkgs []string) error {
+	for i, pkg := range pkgs {
+		err := b.work.Rename(path.Join(extraPackage, extractedFile(pkg)),
+			path.Join(extraPackage, fmt.Sprintf("symbols.%d.go", i)))
+		if err != nil {
+			return fmt.Errorf("renaming the symbols of %s: %w", pkg, err)
+		}
 	}
 
 	return nil

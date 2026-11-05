@@ -73,7 +73,11 @@ func buildCustomGoGuest(service *os.Root) ([]byte, error) {
 
 	var stderr bytes.Buffer
 
-	args := []string{"build-guest", "-pkg", "encoding/xml", "-pkg", "example.com/greet", "-o", "guest.wasm"}
+	// The packages ending in _test and _linux must not drop out through file-name build constraints.
+	args := []string{
+		"build-guest", "-pkg", "encoding/xml", "-pkg", "example.com/greet",
+		"-pkg", "example.com/greet/helper_test", "-pkg", "example.com/greet/helper_linux", "-o", "guest.wasm",
+	}
 	if code := cli.Main(args, service.Name(), &stderr); code != 0 {
 		return nil, fmt.Errorf("%w (exit code %d): %s", errBuildGuest, code, stderr.String())
 	}
@@ -124,8 +128,8 @@ func TestCustomGoGuestLetsPluginsImportItsPackages(t *testing.T) {
 
 	got, err := getFooer(t, ctr, "custom/xml").Foo(t.Context(), "ada")
 	require.NoError(t, err)
-	assert.Equal(t, `hello, <person name="ada"></person> / ada`, got,
-		"encoding/xml and the third-party package run inside the guest")
+	assert.Equal(t, `hello, <person name="ada"></person> / ada / test,linux`, got,
+		"encoding/xml and the third-party packages, even those ending in _test and _linux, run inside the guest")
 
 	got, err = getFooer(t, ctr, "custom/ref").Foo(t.Context(), "bob")
 	require.NoError(t, err)

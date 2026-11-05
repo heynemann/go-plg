@@ -10,8 +10,8 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A buildguest test requesting packages ending in `_test` and `_linux` reproduces the bug (fails on the current code) and passes with the fix
-Both packages are importable by a plugin in the built guest (or rejected with a clear error)
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A buildguest test requesting packages ending in `_test` and `_linux` reproduces the bug (fails on the current code) and passes with the fix
+- [x] Both packages are importable by a plugin in the built guest (or rejected with a clear error)
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

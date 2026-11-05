@@ -1,5 +1,6 @@
 // Package xmlfooer imports packages outside the default Go guest's allowlist: encoding/xml from the standard
-// library and example.com/greet, a third-party module. Only a custom guest built with both can load it.
+// library and example.com/greet, a third-party module, with its packages whose paths end in _test and _linux.
+// Only a custom guest built with all of them can load it.
 package xmlfooer
 
 import (
@@ -7,6 +8,8 @@ import (
 	"encoding/xml"
 
 	"example.com/greet"
+	"example.com/greet/helper_linux"
+	"example.com/greet/helper_test"
 
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
@@ -37,7 +40,7 @@ func (fooer) Foo(_ context.Context, name string) (string, error) {
 		return "", err
 	}
 
-	return greet.Hello(string(doc)) + " / " + back.Name, nil
+	return greet.Hello(string(doc)) + " / " + back.Name + " / " + helpertest.Suffix() + "," + helperlinux.Suffix(), nil
 }
 
 func (fooer) Count(context.Context) (int, error) { return 0, nil }
