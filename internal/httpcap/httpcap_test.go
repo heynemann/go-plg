@@ -296,6 +296,33 @@ func TestHandlerRefusals(t *testing.T) {
 	t.Cleanup(func() { assert.Zero(t, srv.hits.Load(), "no refused request reached the server") })
 }
 
+// TestRefusedURLsNeverLogCredentials: a URL the handler cannot parse is refused with a reason naming neither its
+// credentials nor its query, in the log or in the plugin's answer.
+func TestRefusedURLsNeverLogCredentials(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(t, nil)
+
+	for _, rawURL := range []string{
+		"https://alice:hunter2pw@api.example/%zz?access_token=s3cr3tTok",
+		"https://alice:hunter2pw@api.example:bad/?access_token=s3cr3tTok",
+		"http://alice:hunter2pw@[::1/?access_token=s3cr3tTok",
+		"https://alice:hunter2pw@api.example/\x7f?access_token=s3cr3tTok",
+	} {
+		client, logs := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t), "api.example"}})
+
+		got := serve(t.Context(), t, client, request("GET", rawURL, nil, ""), 1)
+		assert.True(t, strings.HasPrefix(got.refused, httpcap.ErrBadRequest.Error()+": "), "%q", got.refused)
+		assert.Contains(t, got.refused, "URL", "the reason is still clear")
+		assert.Contains(t, logs.String(), `"msg":"plg: http request refused or failed"`)
+
+		for _, secret := range []string{"hunter2pw", "s3cr3tTok", "alice"} {
+			assert.NotContains(t, got.refused, secret, rawURL)
+			assert.NotContains(t, logs.String(), secret, rawURL)
+		}
+	}
+}
+
 func TestDisabledRefusesEverything(t *testing.T) {
 	t.Parallel()
 

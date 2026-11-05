@@ -196,7 +196,7 @@ func (c *Client) request(ctx context.Context, xch *exchange, raw []byte) (*http.
 
 	target, err := url.Parse(decoded.URL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
+		return nil, nil, errUnparsableURL
 	}
 
 	xch.target = (&url.URL{Scheme: target.Scheme, Host: target.Host, Path: target.Path}).String()
@@ -219,7 +219,7 @@ func (c *Client) request(ctx context.Context, xch *exchange, raw []byte) (*http.
 	if err != nil {
 		cancel()
 
-		return nil, nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrBadRequest, withoutURL(err))
 	}
 
 	// The transport writes Host, Content-Length and Transfer-Encoding itself and skips the header's entries of
@@ -249,8 +249,21 @@ func failure(callCtx, reqCtx context.Context, timeout time.Duration, err error) 
 	case reqCtx.Err() != nil:
 		return fmt.Errorf("%w after %s", ErrTimeout, timeout)
 	default:
-		return fmt.Errorf("%w: %w", ErrFailed, err)
+		return fmt.Errorf("%w: %w", ErrFailed, withoutURL(err))
 	}
+}
+
+// errUnparsableURL refuses a URL that does not parse. The parser's own error quotes the whole URL, credentials
+// and query included, and its details quote parts of it: neither reaches the log or the plugin.
+var errUnparsableURL = fmt.Errorf("%w: unparsable URL", ErrBadRequest)
+
+// withoutURL is err without the URL a *url.Error quotes, credentials and query included.
+func withoutURL(err error) error {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		return fmt.Errorf("%s: %w", urlErr.Op, withoutURL(urlErr.Err))
+	}
+
+	return err
 }
 
 // message is what the plugin is told: the refusal without addresses the plugin should not learn (a private

@@ -237,6 +237,31 @@ func httpRefusals(t *testing.T, lang contractLanguage) {
 	}
 }
 
+// TestPluginHTTPUnparsableURLsNeverLogCredentials: a plugin's URL the host cannot parse is refused without its
+// credentials or query reaching the host's log or the refusal the plugin gets.
+func TestPluginHTTPUnparsableURLsNeverLogCredentials(t *testing.T) {
+	t.Parallel()
+
+	eachLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		var logs bytes.Buffer
+
+		plug := fetcher(t, lang, &logs, plg.WithHTTP(openPolicy("api.example")))
+
+		_, err := plug.Foo(t.Context(), "GET https://alice:hunter2pw@api.example/%zz?access_token=s3cr3tTok")
+		require.Error(t, err)
+
+		for _, secret := range []string{"hunter2pw", "s3cr3tTok"} {
+			assert.NotContains(t, logs.String(), secret)
+
+			if lang.lang != plg.LanguageGo { // Go's net/http in the guest refuses the URL itself, in the plugin's words
+				assert.NotContains(t, err.Error(), secret)
+			}
+		}
+	})
+}
+
 func TestPluginHTTPRedirectsAreCheckedHopByHop(t *testing.T) {
 	t.Parallel()
 

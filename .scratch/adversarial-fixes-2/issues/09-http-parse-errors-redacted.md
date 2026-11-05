@@ -10,8 +10,8 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test with such a URL (password and token) through the handler and a plugin fetch, capturing logs reproduces the bug (fails on the current code) and passes with the fix
+- [x] A test with such a URL (password and token) through the handler and a plugin fetch, capturing logs reproduces the bug (fails on the current code) and passes with the fix
 Neither the password nor the token appears in logs, metrics or the error returned to the plugin; the refusal reason is still clear
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
