@@ -759,6 +759,61 @@ func TestTypeScriptDetachedBuffersFailToCross(t *testing.T) {
 	assert.Equal(t, []byte{}, empty, "a genuine empty result crosses as empty, not nil")
 }
 
+// TestTypeScriptMultipleResultsStopAtAThrowingGetter: Boil returns its two results as an array whose first element
+// is a getter, which throws (c = 1), runs out of memory (c = 2) or returns true; the second element's getter counts
+// its runs in later, which Count returns. A throw fails the call with the plugin's own error and an out-of-memory
+// discards the instance, as anywhere else in the plugin, and in both no later getter runs.
+func TestTypeScriptMultipleResultsStopAtAThrowingGetter(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+	fooer := tsFooer(t, ctr, `
+		later: 0,
+		Boil(c: number) {
+			const self = this as any;
+			const results: unknown[] = [];
+			Object.defineProperty(results, 0, { enumerable: true, get() {
+				if (c === 1) throw new Error("getter failed");
+				const hoard: unknown[] = [];
+				while (c === 2) hoard.push(new Array(1 << 16).fill("leak"));
+				return true;
+			} });
+			Object.defineProperty(results, 1, { enumerable: true, get() { self.later++; return 1.5; } });
+			return results;
+		},
+		Count() { return (this as any).later; }`, plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit))
+
+	served := instanceID(t, ctr, "ts/p")
+
+	_, _, err := fooer.Boil(t.Context(), 1)
+
+	var pluginErr *plg.PluginError
+
+	require.ErrorAs(t, err, &pluginErr)
+	assert.Equal(t, "getter failed", pluginErr.Message, "the getter's own exception")
+	require.NotErrorIs(t, err, plg.ErrConversion)
+
+	later, err := fooer.Count(t.Context())
+	require.NoError(t, err)
+	assert.Zero(t, later, "no getter ran after the one that threw")
+	assert.Equal(t, served, instanceID(t, ctr, "ts/p"), "a thrown error keeps the instance")
+
+	_, _, err = fooer.Boil(t.Context(), 2)
+	failure := requirePanic(t, err, "ts/p", plg.PhaseCall)
+	assert.Equal(t, "out of memory", failure.Value)
+	assert.Contains(t, failure.Guest, "the plugin ran out of memory")
+	assert.NotEqual(t, served, instanceID(t, ctr, "ts/p"), "out of memory discards the instance")
+
+	boiled, temp, err := fooer.Boil(t.Context(), 0)
+	require.NoError(t, err)
+	assert.True(t, boiled)
+	assert.InDelta(t, 1.5, temp, 0)
+
+	later, err = fooer.Count(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, later, "the fresh instance ran the second getter once, for the call that succeeded")
+}
+
 // TestTypeScriptFetch exercises the parts of fetch the contract suite does not: JSON bodies, consumed bodies,
 // the redirect modes, relative redirects, byte bodies and Headers, and refusals as TypeErrors.
 func TestTypeScriptFetch(t *testing.T) {

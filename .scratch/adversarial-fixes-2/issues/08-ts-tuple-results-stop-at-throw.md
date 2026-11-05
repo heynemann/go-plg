@@ -10,9 +10,9 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] TS tests with a multi-result method whose result getter throws, whose later getter records side effects, and whose getter runs out of memory reproduces the bug (fails on the current code) and passes with the fix
+- [x] TS tests with a multi-result method whose result getter throws, whose later getter records side effects, and whose getter runs out of memory reproduces the bug (fails on the current code) and passes with the fix
 Plugin error returned (not ErrConversion), later getters not run, OOM discards the instance
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

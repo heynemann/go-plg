@@ -1441,10 +1441,21 @@ static uint64_t encode_result(const method_t *m, JSValue v) {
     }
     JSValue *vals = calloc(m->nresults, sizeof *vals);
     if (!vals) return message(ST_PANIC, "out of memory", 13);
-    for (uint32_t k = 0; k < m->nresults; k++) vals[k] = JS_GetPropertyUint32(ctx, v, k);
+    // Reading an element runs the plugin's getter: one that throws (or runs out of memory) fails the call as
+    // any throw does, and no later getter runs.
+    uint32_t got = 0;
+    for (; got < m->nresults; got++) {
+      vals[got] = JS_GetPropertyUint32(ctx, v, got);
+      if (JS_IsException(vals[got])) break;
+    }
     begin(ST_OK);
-    r = encode_values(&enc, m->results, m->nresults, vals, (int)m->nresults, "result", 0);
-    for (uint32_t k = 0; k < m->nresults; k++) JS_FreeValue(ctx, vals[k]);
+    if (got < m->nresults) {
+      enc.conv[0] = 0; // the getter's exception, not a conversion failure
+      r = -1;
+    } else {
+      r = encode_values(&enc, m->results, m->nresults, vals, (int)m->nresults, "result", 0);
+    }
+    for (uint32_t k = 0; k < got; k++) JS_FreeValue(ctx, vals[k]);
     free(vals);
   }
   uint64_t res;
