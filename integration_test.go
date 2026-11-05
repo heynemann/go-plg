@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -642,6 +643,12 @@ func TestCloseClosesIdleInstances(t *testing.T) {
 // holds none of its compiled guest, so each keeps well under 256 KiB of live heap. It used to keep the decoded
 // guest module: about 30 MiB for Go, 1.5 MiB for TypeScript, 0.5 MiB for Lua.
 //
+// Each container lives in a synctest bubble, which ends only once every goroutine started in it has exited. Every
+// call into an instance starts a wazero goroutine holding the instance (it closes the instance if the call's
+// context ends) that exits whenever the scheduler gets to it, after the call; one not yet run when the heap is
+// measured would keep the closed instance's memory and decoded guest for that collection (a TypeScript
+// container's then measured 1.13 MB).
+//
 //nolint:paralleltest // it measures the process heap, which no other test may move meanwhile
 func TestClosedContainersKeepNoGuestMemory(t *testing.T) {
 	const containers, bound = 4, 256 << 10
@@ -652,16 +659,18 @@ func TestClosedContainersKeepNoGuestMemory(t *testing.T) {
 				kept := make([]any, 0, 2*n)
 
 				for range n {
-					ctr := plg.New()
-					registerFooersIn(t, lang, ctr, "fooer", map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
+					synctest.Test(t, func(t *testing.T) {
+						ctr := plg.New()
+						registerFooersIn(t, lang, ctr, "fooer", map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
 
-					ref := getFooer(t, ctr, "fooer/ref")
-					got, err := ref.Foo(t.Context(), "x")
-					require.NoError(t, err)
-					require.Equal(t, "hello, x", got)
-					require.NoError(t, ctr.Close(t.Context()))
+						ref := getFooer(t, ctr, "fooer/ref")
+						got, err := ref.Foo(t.Context(), "x")
+						require.NoError(t, err)
+						require.Equal(t, "hello, x", got)
+						require.NoError(t, ctr.Close(t.Context()))
 
-					kept = append(kept, ctr, ref)
+						kept = append(kept, ctr, ref)
+					})
 				}
 
 				return kept
