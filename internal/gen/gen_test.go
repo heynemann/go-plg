@@ -27,14 +27,15 @@ func TestMain(m *testing.M) {
 }
 
 // TestCommittedContractsAreUpToDate regenerates internal/testcontract, whose generated file the plg tests run
-// on, and internal/fastcontract, whose generated codecs they hold to the reflective codec: each must be exactly
-// what is committed.
+// on, and internal/fastcontract and internal/shadowcontract, whose generated codecs they hold to the reflective
+// codec: each must be exactly what is committed.
 func TestCommittedContractsAreUpToDate(t *testing.T) {
 	t.Parallel()
 
 	for pkg, ifaces := range map[string][]string{
-		"testcontract": {"Fooer", "Shaper", "Hosted", "Aliased", "Family"},
-		"fastcontract": {"Kinds"},
+		"testcontract":   {"Fooer", "Shaper", "Hosted", "Aliased", "Family"},
+		"fastcontract":   {"Kinds"},
+		"shadowcontract": {"Tables"},
 	} {
 		dir := filepath.Join("..", pkg)
 
@@ -127,10 +128,19 @@ type (
 	Bool    = bool
 	Byte    = byte
 	Error   = error
+	Float32 = float32
 	Float64 = float64
 	Int     = int
+	Int8    = int8
+	Int16   = int16
+	Int32   = int32
 	Int64   = int64
+	Rune    = rune
 	String  = string
+	Uint    = uint
+	Uint8   = uint8
+	Uint16  = uint16
+	Uint32  = uint32
 	Uint64  = uint64
 )
 
@@ -631,6 +641,27 @@ type Svc interface {
 				"func (c *plgSvcDoCall) AppendArgs(b []plgimpl.Byte) ([]plgimpl.Byte, error) {",
 				"func plgEncode(b []plgimpl.Byte, v *map[json.Number]*Rec, depth plgimpl.Int) ([]plgimpl.Byte, error) {",
 			},
+		},
+		{
+			// The int field of unicode.RangeTable, from another package, still denotes the predeclared int.
+			name: "redeclared predeclared types in the fields of an imported struct",
+			files: map[string]string{"c.go": `package c
+
+import (
+	"context"
+	"unicode"
+)
+
+type int = int32
+
+type Tables interface {
+	Table(ctx context.Context, t unicode.RangeTable) (unicode.RangeTable, error)
+}
+`},
+			ifaces:   []string{"Tables"},
+			adapters: map[string]string{"Tables": "plgTables"},
+			fast:     map[string]string{"Tables": "plgTablesFast"},
+			want:     []string{"v.LatinOffset, err = plgimpl.ReadInt[plgimpl.Int](r, \"int\")"},
 		},
 		{
 			name: "redeclared error",

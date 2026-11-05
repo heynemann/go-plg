@@ -13,12 +13,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/fastcontract"
+	"github.com/heynemann/go-plg/internal/shadowcontract"
 	"github.com/heynemann/go-plg/internal/testcontract"
 	"github.com/heynemann/go-plg/internal/wire"
 	"github.com/heynemann/go-plg/plgimpl"
@@ -29,6 +31,7 @@ func fastContracts() []reflect.Type {
 	return []reflect.Type{
 		reflect.TypeFor[testcontract.Fooer](), reflect.TypeFor[testcontract.Shaper](),
 		reflect.TypeFor[testcontract.Hosted](), reflect.TypeFor[fastcontract.Kinds](),
+		reflect.TypeFor[shadowcontract.Tables](),
 	}
 }
 
@@ -302,6 +305,35 @@ func sampleEvery() fastcontract.Every {
 	every.Kids = []fastcontract.Every{{S: "kid", Next: &fastcontract.Every{S: "grandkid"}}}
 
 	return every
+}
+
+// TestFastPathsNameShadowedPredeclaredTypes round-trips structs of the unicode package through the codecs plg
+// gen generated in internal/shadowcontract, which redeclares int and uint16, and holds them to the generic
+// binder: their int and uint16 fields still decode as the predeclared types.
+func TestFastPathsNameShadowedPredeclaredTypes(t *testing.T) {
+	t.Parallel()
+
+	tables := reflect.TypeFor[shadowcontract.Tables]()
+	table := *unicode.Latin
+
+	for _, call := range []struct {
+		arg  any
+		name string
+	}{
+		{name: "Table", arg: table},
+		{name: "Ranges", arg: table.R16},
+	} {
+		method, ok := tables.MethodByName(call.name)
+		require.True(t, ok, call.name)
+
+		args := []reflect.Value{reflect.ValueOf(t.Context()), reflect.ValueOf(call.arg)}
+		checkParity(t, tables, method.Index, args, encodeValues(t, call.arg))
+
+		results := reflect.ValueOf(plg.FastAdapter(tables, &answeringInvoker{body: encodeValues(t, call.arg)})).
+			MethodByName(call.name).Call(args)
+		require.Nil(t, results[1].Interface(), call.name)
+		assert.Equal(t, call.arg, results[0].Interface(), "%s round-trips", call.name)
+	}
 }
 
 // FuzzFastPathsMatchTheGenericBinder calls a method of a contract with arguments decoded from args through the

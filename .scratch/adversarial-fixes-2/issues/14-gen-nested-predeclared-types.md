@@ -10,8 +10,8 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A generator test with `type int = int32` and an imported struct containing an `int` field, compiling the output reproduces the bug (fails on the current code) and passes with the fix
-Generated code compiles and round-trips; output for existing contracts unchanged
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] A generator test with `type int = int32` and an imported struct containing an `int` field, compiling the output reproduces the bug (fails on the current code) and passes with the fix
+- [x] Generated code compiles and round-trips; output for existing contracts unchanged
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

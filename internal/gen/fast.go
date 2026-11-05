@@ -130,6 +130,7 @@ func signatures(iface *types.Interface) ([]layout.Signature[types.Type], bool) {
 // per method; per composite type the interfaces' methods reach, an encoder and a decoder shared by the file.
 type fastGen struct {
 	n      *namer
+	impl   string       // plgimpl's local name
 	pairs  []string     // {placeholder} → name, for code templates
 	codecs []*typeCodec // in the order they were first needed
 	funcs  bytes.Buffer // the codecs' functions
@@ -207,7 +208,7 @@ const predeclaredNil = "nil"
 
 func newFastGen(n *namer) *fastGen {
 	impl := n.importAs(plgimplImportPath, "plgimpl")
-	fast := &fastGen{n: n, pairs: []string{"{impl}", impl}}
+	fast := &fastGen{n: n, impl: impl, pairs: []string{"{impl}", impl}}
 
 	for _, name := range localNames {
 		fast.pairs = append(fast.pairs, "{"+name+"}", n.unique(name))
@@ -388,7 +389,7 @@ func ({c} *{call}) DecodeResults({r} *{impl}.Reader) {=error} {
 }
 
 func (g *fastGen) typeString(node *layout.Node[types.Type]) string {
-	return types.TypeString(node.Type, g.n.qualify)
+	return g.n.typeString(node.Type, g.impl)
 }
 
 // reflectName is the name reflect gives a basic-kinded type: `pkg.Name` for a named one (by package name, as

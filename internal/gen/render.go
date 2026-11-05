@@ -70,6 +70,59 @@ func (n *namer) predeclaredType(name, impl string) string {
 	}
 }
 
+// typeString returns how the generated file names typ: as types.TypeString does, except that every
+// predeclared type the package redeclares is named through predeclaredType, so that the field types of a
+// struct from another package (a unicode.RangeTable's int LatinOffset, in a package declaring int) still
+// denote the predeclared types.
+func (n *namer) typeString(typ types.Type, impl string) string {
+	if _, shadowed := shadowedIn(n.pkg, typ); !shadowed {
+		return types.TypeString(typ, n.qualify)
+	}
+
+	switch concrete := typ.(type) {
+	case *types.Basic:
+		return n.predeclaredType(concrete.Name(), impl)
+	case *types.Pointer:
+		return "*" + n.typeString(concrete.Elem(), impl)
+	case *types.Slice:
+		return "[]" + n.typeString(concrete.Elem(), impl)
+	case *types.Map:
+		return "map[" + n.typeString(concrete.Key(), impl) + "]" + n.typeString(concrete.Elem(), impl)
+	case *types.Struct:
+		return n.structString(concrete, impl)
+	default: // any and error, the only named types without a package
+		return n.predeclaredType(types.TypeString(typ, nil), impl)
+	}
+}
+
+// structString returns how the generated file names the struct literal typ (see typeString).
+func (n *namer) structString(typ *types.Struct, impl string) string {
+	var text strings.Builder
+
+	text.WriteString("struct{")
+
+	for i := range typ.NumFields() {
+		if i > 0 {
+			text.WriteString("; ")
+		}
+
+		field := typ.Field(i)
+		if !field.Embedded() {
+			text.WriteString(field.Name() + " ")
+		}
+
+		text.WriteString(n.typeString(field.Type(), impl))
+
+		if tag := typ.Tag(i); tag != "" {
+			text.WriteString(" " + strconv.Quote(tag))
+		}
+	}
+
+	text.WriteString("}")
+
+	return text.String()
+}
+
 // checkUnshadowed fails when the package redeclares one of the predeclared identifiers names, which the
 // generated file uses and cannot name otherwise.
 func (n *namer) checkUnshadowed(names []string) error {
