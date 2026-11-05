@@ -3,7 +3,7 @@
 // instance's memory. Its other methods behave like the reference fooer's, so each instance is healthy until
 // provoked.
 let calls = 0;
-const hoard: string[][] = [];
+const hoard: ArrayBuffer[] = [];
 
 function deeper(msg: string): never {
   throw new Error(msg);
@@ -33,8 +33,10 @@ export function Create() {
           await Promise.resolve();
           throw new TypeError("hostile rejection");
         case "oom":
+          // 1 MiB at a time, in one allocation: filling an array runs a guest loop iteration per element, and every
+          // iteration exits to the host to check the call's context, seconds per hoard on a loaded machine.
           for (;;) {
-            hoard.push(new Array(1 << 16).fill("leak"));
+            hoard.push(new ArrayBuffer(1 << 20));
           }
         case "recurse":
           recurse(0);

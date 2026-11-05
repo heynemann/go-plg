@@ -1,7 +1,7 @@
-// A hostile TypeScript plugin whose Create runs out of memory.
+// A hostile TypeScript plugin whose Create runs out of memory, 1 MiB at a time (see the hostile plugin's oom).
 export function Create() {
-  const hoard: number[][] = [];
+  const hoard: ArrayBuffer[] = [];
   for (;;) {
-    hoard.push(new Array(1 << 16).fill(1));
+    hoard.push(new ArrayBuffer(1 << 20));
   }
 }

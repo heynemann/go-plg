@@ -239,14 +239,14 @@ func TestHostileLuaPluginsCannotTakeTheHostDown(t *testing.T) {
 
 	ctr := loggedContainer(t, &logs)
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer",
-		plg.WithStorage(luaCorpus("hostile")), plg.WithPool(1, 1)))
+		plg.WithStorage(luaCorpus("hostile")), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
 
 	hostile := getFooer(t, ctr, "fooer/hostile")
 	served := instanceID(t, ctr, "fooer/hostile")
 
 	// Ordinary Lua errors, which the plugin could have caught: the instance keeps serving.
 	for _, tc := range []struct{ msg, want string }{
-		{msg: "error", want: "plugin.lua:28: hostile error"},
+		{msg: "error", want: "plugin.lua:35: hostile error"},
 		{msg: "oomcaught", want: "caught: false not enough memory"},
 		{msg: "recurse", want: "stack overflow"},
 		{msg: "cstack", want: "stack overflow"},
@@ -349,7 +349,8 @@ func TestLuaPluginsThatFailToLoadFailRegister(t *testing.T) {
 
 	assert.Empty(t, ctr.RecentPanics(), "a plugin that fails to load is an ordinary error")
 
-	err := plg.Register[testcontract.Fooer](t.Context(), ctr, "createoom", plg.WithStorage(luaCorpus("createoom")))
+	err := plg.Register[testcontract.Fooer](t.Context(), ctr, "createoom", plg.WithStorage(luaCorpus("createoom")),
+		plg.WithMemoryLimit(hostileLimit))
 	require.ErrorIs(t, err, plg.ErrLoad)
 
 	failure := requirePanic(t, err, "createoom/createoom", plg.PhaseCreate)

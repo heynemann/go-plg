@@ -13,10 +13,17 @@
 local Hostile = {}
 Hostile.__index = Hostile
 
+-- mib returns 1 MiB of c, repeating 1 KiB. string.rep(c, 1 << 20) would loop a million times, and every guest loop
+-- iteration exits to the host to check the call's context: seconds per hoard under the race detector, past the
+-- tests' deadline on a loaded machine.
+local function mib(c)
+  return string.rep(string.rep(c, 1 << 10), 1 << 10)
+end
+
 local function hog()
-  local hoard = {}
+  local hoard, chunk = {}, mib("x")
   while true do
-    hoard[#hoard + 1] = string.rep("x", 1 << 20) .. #hoard
+    hoard[#hoard + 1] = chunk .. #hoard
   end
 end
 
@@ -41,12 +48,12 @@ local actions = {
     print("hostile says hello on stdout")
     error("after printing")
   end,
-  hugeerror = function() error(string.rep("e", 1 << 20), 0) end,
+  hugeerror = function() error(mib("e"), 0) end,
 }
 
 function Hostile:Foo(name)
   if name == "huge" then
-    return string.rep("h", 40 << 20)
+    return string.rep(mib("h"), 40)
   end
   return "hello, " .. name
 end
