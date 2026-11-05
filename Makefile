@@ -13,6 +13,14 @@ BENCH_OUT := bench.txt
 BUDGET_RUNS := 5
 BUDGET_OUT := $(BIN)/budgets.txt
 
+# golangci-lint is pinned and built with the repo's toolchain, into bin/, with a cache of its own. A binary built
+# with an older Go (a distro or Homebrew build) loads this go1.27.3 module without full type information and
+# silently skips type-aware rules such as revive's time-naming, and sharing its cache replays those results; CI
+# then failed on findings the local gate never showed. `make check` and CI both lint with this binary.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)/golangci-lint
+export GOLANGCI_LINT_CACHE := $(BIN)/golangci-lint-cache
+
 # The Go guest's standard library allowlist (PLAN.md) has one source, internal/goallow/packages.txt, which
 # `plg gen` and the tests read too. Symbol tables are extracted for every package except cmp (yaegi compiles it
 # from source) and two extracted separately: encoding/json, whose Options interface has a method on an internal
@@ -93,13 +101,16 @@ TS_BUNDLER_RAW := $(BIN)/bundler.wasm
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
 # Formatting must leave no diff.
-fmt-check:
-	golangci-lint fmt ./...
+fmt-check: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) fmt ./...
 	git diff --exit-code -- '*.go'
 
-lint:
-	golangci-lint run --build-tags integration ./...
-	GOOS=wasip1 GOARCH=wasm golangci-lint run ./guestsrc/...
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --build-tags integration ./...
+	GOOS=wasip1 GOARCH=wasm $(GOLANGCI_LINT) run ./guestsrc/...
+
+$(GOLANGCI_LINT):
+	GOFLAGS= GOBIN=$(dir $@) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 # Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
 # caps the parallel subtests (each holding wasm instances under the race detector): the root package's run peaks
@@ -142,10 +153,10 @@ repeat:
 # lint, tidy go.mod/go.sum, its unit and integration tests with the race detector (the storages against MinIO and
 # PostgreSQL containers, so Docker is required; the service and the README's quick start with real plugins), the
 # same coverage gate, and its unit tests repeated.
-examples:
-	cd examples && golangci-lint fmt ./...
+examples: $(GOLANGCI_LINT)
+	cd examples && $(GOLANGCI_LINT) fmt ./...
 	git diff --exit-code -- 'examples/*.go'
-	cd examples && golangci-lint run --build-tags integration ./...
+	cd examples && $(GOLANGCI_LINT) run --build-tags integration ./...
 	cd examples && go mod tidy -diff
 	rm -f examples/$(COVERAGE)
 	cd examples && go test -race -shuffle=on -tags integration -covermode=atomic -coverpkg=./... \

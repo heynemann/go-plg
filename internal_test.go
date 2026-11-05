@@ -1145,7 +1145,7 @@ func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
 		instances.discard(t.Context(), held) // the refiller replaces it: a panic, then a success
 
 		first, second := <-spawner.attempts, <-spawner.attempts
-		assert.Equal(t, refillBackoffMin, second.Sub(first), "the panic was a failure: the refiller backed off")
+		assert.Equal(t, refillBackoffFirst, second.Sub(first), "the panic was a failure: the refiller backed off")
 
 		synctest.Wait()
 		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
@@ -1184,7 +1184,7 @@ func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0]) // the failure's Warn log panics
 
 		first, second := <-spawner.attempts, <-spawner.attempts
-		assert.Equal(t, refillBackoffMin, second.Sub(first), "the failure backed off, once")
+		assert.Equal(t, refillBackoffFirst, second.Sub(first), "the failure backed off, once")
 
 		synctest.Wait()
 		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the refiller went on")
@@ -1492,7 +1492,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
 
 		failed, retried := <-spawner.attempts, <-spawner.attempts
-		assert.Equal(t, refillBackoffMin, retried.Sub(failed), "the refiller backed off once")
+		assert.Equal(t, refillBackoffFirst, retried.Sub(failed), "the refiller backed off once")
 		synctest.Wait()
 		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 2}, instances.stats())
 		assert.Equal(t, uint64(testLimit), budget.used.Load(), "one instance charged")
@@ -2427,7 +2427,7 @@ func TestPoolMeasurements(t *testing.T) {
 		instances.discard(t.Context(), held)
 
 		failed, retried := <-spawner.attempts, <-spawner.attempts
-		assert.Equal(t, refillBackoffMin, retried.Sub(failed), "the refiller retried after its backoff")
+		assert.Equal(t, refillBackoffFirst, retried.Sub(failed), "the refiller retried after its backoff")
 		synctest.Wait() // the retry's instance is idle
 
 		measured := collect(t, reader)

@@ -7,10 +7,9 @@ These rules apply to every change in this repository. A ticket is **not done** u
 - **Config:** [.golangci.yml](.golangci.yml), with `default: all` linters. The only exceptions are listed in the file, each with its reason. `wsl_v5` is enabled; the deprecated `wsl` is not.
 - **Before every commit**, run:
   ```sh
-  golangci-lint fmt ./...
-  golangci-lint run ./...
+  make fmt-check lint
   ```
-  Both must pass with zero issues. CI runs the same commands and fails on any issue.
+  Both must pass with zero issues; CI runs the same targets and fails on any issue. They use the golangci-lint pinned in the Makefile, built with the repo's toolchain into `bin/` with its own cache. Don't rely on a system-wide golangci-lint: one built with an older Go silently skips type-aware rules, so it can pass where CI fails.
 - **`//nolint` needs justification:** it must name the specific linter and give an explanation (`nolintlint` enforces both). It's acceptable only when the linter is demonstrably wrong for that line. Never use it to silence a real finding.
 - **Changing the config:** adding a disable or exclusion requires a written reason in the config itself. Never weaken thresholds to make a change pass.
 - **The config enforces project rules mechanically:**
@@ -113,8 +112,8 @@ This library runs third-party code inside other people's servers, so tests are t
   - **Include the ticket file:** the same commit flips the ticket's **Status** to `done` and ticks its acceptance criteria.
   - **Never** split one ticket across commits, combine two tickets in one commit, or commit unrelated changes.
 - **Commit only when every gate passes on the final tree.** If anything changes after a gate ran, run all of them again.
-  1. **Formatting:** `golangci-lint fmt ./...` produces no diff.
-  2. **Linting:** `golangci-lint run ./...` reports zero issues.
+  1. **Formatting:** `make fmt-check` produces no diff.
+  2. **Linting:** `make lint` reports zero issues.
   3. **Testing:**
      - unit tests with `-race -shuffle=on`;
      - integration tests with `-tags integration`;

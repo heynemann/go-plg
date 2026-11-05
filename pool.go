@@ -32,10 +32,10 @@ type slot struct {
 	mem  uint64 // the instance's memory when last sampled, counted in the pool's memory
 }
 
-// The refiller retries a failing Create after refillBackoffMin, doubling the delay up to refillBackoffMax.
+// The refiller retries a failing Create after refillBackoffFirst, doubling the delay up to refillBackoffLimit.
 const (
-	refillBackoffMin = 100 * time.Millisecond
-	refillBackoffMax = 30 * time.Second
+	refillBackoffFirst = 100 * time.Millisecond
+	refillBackoffLimit = 30 * time.Second
 )
 
 var (
@@ -544,7 +544,7 @@ func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
 
 // backoff returns the delay after a failure that followed one delay.
 func backoff(delay time.Duration) time.Duration {
-	return min(max(2*delay, refillBackoffMin), refillBackoffMax)
+	return min(max(2*delay, refillBackoffFirst), refillBackoffLimit)
 }
 
 // refillOne starts one instance and makes it idle.
