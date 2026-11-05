@@ -840,6 +840,32 @@ func TestPoolCloseGivesUpWaitingWhenItsContextEnds(t *testing.T) {
 	})
 }
 
+// A caller that saw the pool open, then paused before taking a place while a forced close found nothing to wait
+// for and returned, does not start an instance nobody would close.
+func TestPoolNeverStartsAnInstanceAfterItClosed(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		spawner, budget := &fakeSpawner{}, &memoryBudget{}
+		instances := startPool(t, spawner, &poolConfig{budget: budget, minSize: 0, maxSize: 1})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		instances.beforeGrow = func() {
+			assert.NoError(t, instances.close(ctx), "nothing to drain")
+		}
+
+		_, err := instances.acquire(t.Context())
+		require.ErrorIs(t, err, ErrClosed)
+		synctest.Wait()
+		assert.Zero(t, spawner.started.Load(), "no instance started after close")
+		assert.Zero(t, spawner.closed.Load())
+		assert.Equal(t, PoolStats{}, instances.stats())
+		assert.Zero(t, budget.used.Load())
+	})
+}
+
 func TestPoolCloseFailsWaitingCallers(t *testing.T) {
 	t.Parallel()
 

@@ -82,6 +82,7 @@ type pool struct {
 	http         engine.HTTPFunc
 	budget       *memoryBudget
 	meters       *pluginMeters
+	beforeGrow   func()             // test hook: runs in await between its check for closure and its reservation
 	stop         context.CancelFunc // ends the refiller's context
 	idle         chan *slot
 	wake         chan struct{} // one pending signal for the refiller (and close): an instance retired
@@ -206,10 +207,22 @@ func (p *pool) await(ctx context.Context) (*slot, error) {
 		return nil, ErrClosed
 	}
 
+	if p.beforeGrow != nil {
+		p.beforeGrow()
+	}
+
 	p.waiting.Add(1)
 
 	if p.reserve() == nil {
 		p.waiting.Add(-1)
+
+		// close may have run since the check above and found nothing to wait for: with the place taken, it
+		// either is seen closed here or waits for it.
+		if p.closed.Load() {
+			p.retire()
+
+			return nil, ErrClosed
+		}
 
 		held, err := p.start(ctx, PhaseCall)
 		if err != nil {

@@ -10,8 +10,8 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A synctest test interleaving a caller's reservation with a forced close (via a test hook between check and reserve) reproduces the bug (fails on the current code) and passes with the fix
+- [x] A synctest test interleaving a caller's reservation with a forced close (via a test hook between check and reserve) reproduces the bug (fails on the current code) and passes with the fix
 No instance or owner goroutine survives the close (goleak); budget and pool counters return to zero
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
