@@ -10,9 +10,9 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] TS tests returning, passing to a Host method, and POSTing a detached `Uint8Array` (via `ArrayBuffer.prototype.transfer`) reproduces the bug (fails on the current code) and passes with the fix
+- [x] TS tests returning, passing to a Host method, and POSTing a detached `Uint8Array` (via `ArrayBuffer.prototype.transfer`) reproduces the bug (fails on the current code) and passes with the fix
 Each fails with the plugin-side TypeError; genuine empty buffers still cross as empty
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

@@ -836,7 +836,7 @@ static int encode_bytes(enc_t *enc, JSValueConst v) {
   } else {
     return fail(enc, "want a Uint8Array, got %s", type_name(v));
   }
-  if (!p && n) return -1;
+  if (!p && JS_HasException(ctx)) return -1; // unreadable (detached): NULL, size 0 and a TypeError
   if (n >= NIL_LENGTH) return fail(enc, "wire: value too long");
   put_u32(enc->b, (uint32_t)n);
   put(enc->b, p, n);
@@ -1259,7 +1259,7 @@ static JSValue http_request(JSContext *c, buf_t *b, JSValueConst *argv) {
   if (!JS_IsNull(argv[3]) && !JS_IsUndefined(argv[3])) {
     size_t n;
     uint8_t *p = JS_GetUint8Array(c, &n, argv[3]);
-    if (!p && n) return JS_EXCEPTION;
+    if (!p && JS_HasException(c)) return JS_EXCEPTION;
     put(b, p, n);
   }
   if (b->failed) return JS_ThrowOutOfMemory(c);
@@ -1288,7 +1288,7 @@ static JSValue native_decode(JSContext *c, JSValueConst this_val, int argc, JSVa
   (void)this_val;
   size_t n = 0;
   uint8_t *p = argc ? JS_GetUint8Array(c, &n, argv[0]) : NULL;
-  if (!p && n) return JS_EXCEPTION;
+  if (!p && JS_HasException(c)) return JS_EXCEPTION;
   if (!p) return JS_NewStringLen(c, "", 0);
   return JS_NewStringLen(c, (const char *)p, n);
 }

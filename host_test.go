@@ -88,6 +88,14 @@ func (*testHost) Keys(_ context.Context, keys map[string]struct{}) (map[string]s
 	return keys, nil
 }
 
+func (*testHost) Size(_ context.Context, b []byte) (int, error) {
+	if b == nil {
+		return -1, nil
+	}
+
+	return len(b), nil
+}
+
 // Host interfaces for the validation tests. They are declared next to pinger, as a contract's Host must be.
 type (
 	pingHost interface {
@@ -328,7 +336,7 @@ func TestHostDispatchRejectsInvalidRequests(t *testing.T) {
 		args   []byte
 		method uint32
 	}{
-		{"unknown method", "unknown host method 5 of testcontract.Host", nil, 5},
+		{"unknown method", "unknown host method 6 of testcontract.Host", nil, 6},
 		{
 			"truncated arguments", "malformed host call arguments: testcontract.Host.Lookup: parameter 1: wire:",
 			[]byte{1, 0},

@@ -511,7 +511,7 @@ func TestTypeScriptHostArgumentsThatDoNotFitReject(t *testing.T) {
 
 	got, err = hosted.Origin(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, "function Fail,Keys,Lookup,Sum,Value", got, "host has exactly the Host's methods")
+	assert.Equal(t, "function Fail,Keys,Lookup,Size,Sum,Value", got, "host has exactly the Host's methods")
 
 	total, err := hosted.Total(t.Context(), 1, 2, 3)
 	require.NoError(t, err)
@@ -661,6 +661,102 @@ func TestTypeScriptReentrantHostCallsKeepTheirOwnArguments(t *testing.T) {
 			assert.Empty(t, recorder.received(), "no host call that does not fit reached the host")
 		})
 	}
+}
+
+// detachedMembers is a Hosted plugin whose Relay(op [url]) hands bytes to the glue: a Uint8Array or ArrayBuffer
+// detached by ArrayBuffer.prototype.transfer, or a genuine empty one, to a Host method, as a POST body, or to
+// UTF-8 decoding. It returns the Host's answer, or the exception the plugin caught.
+const detachedMembers = `
+	async Relay(cmd: string) {
+		const [op, url] = cmd.split(" ");
+		const u8 = () => { const b = new Uint8Array([1, 2, 3]); (b.buffer as any).transfer(); return b; };
+		const ab = () => { const b = new ArrayBuffer(3); (b as any).transfer(); return b; };
+		const ops: Record<string, () => Promise<unknown>> = {
+			"host-u8": () => host.Size(u8()),
+			"host-ab": () => host.Size(ab()),
+			"host-empty": () => host.Size(new Uint8Array(0)),
+			"host-empty-ab": () => host.Size(new ArrayBuffer(0)),
+			"post-u8": () => fetch(url, { method: "POST", body: u8() }).then((r) => r.text()),
+			"post-empty": () => fetch(url, { method: "POST", body: new Uint8Array(0) }).then((r) => r.text()),
+			"text-u8": () => new Response(u8()).text().then((s) => "text " + JSON.stringify(s)),
+			"text-empty": () => new Response(new Uint8Array(0)).text().then((s) => "text " + JSON.stringify(s)),
+		};
+		try {
+			return String(await ops[op]());
+		} catch (e: any) {
+			return e.name + ": " + e.message;
+		}
+	},
+	Describe: () => ({}),
+	Value: () => "",
+	Origin: () => "",
+	Total: (base: number) => base,
+	Keys: (keys: object) => keys`
+
+// TestTypeScriptDetachedBuffersFailToCross: a detached Uint8Array or ArrayBuffer cannot be read, so handing one to
+// the host — as a method's result, a Host method's argument or a POST body — or decoding it as UTF-8 fails with the
+// plugin-side TypeError, where it used to cross as empty bytes. Genuine empty buffers still cross as empty.
+func TestTypeScriptDetachedBuffersFailToCross(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		assert.NoError(t, err)
+
+		_, err = fmt.Fprintf(writer, "%s %d", req.Method, len(body)) //nolint:gosec // G705: echoes its own test
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(srv.Close)
+
+	ctr := newContainer(t)
+	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "detached",
+		plg.WithStorage(tsSource(t, tsPlugin(detachedMembers))), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit),
+		plg.WithHost[testcontract.Host](newTestHost()), plg.WithHTTP(openPolicy(hostOf(t, srv.URL)))))
+	require.NoError(t, plg.Register[testcontract.Shaper](t.Context(), ctr, "shaper",
+		plg.WithStorage(tsSource(t, tsPlugin(shaperMembers(`Reverse: (b: Uint8Array) => {
+			if (b.length === 0) return new Uint8Array(0);
+			const d = b.length === 1 ? new Uint8Array(3) : new ArrayBuffer(3);
+			((d as any).buffer ?? d).transfer();
+			return d;
+		}`)))), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
+
+	hosted, err := plg.Get[testcontract.Hosted](t.Context(), ctr, "detached/p")
+	require.NoError(t, err)
+
+	// QuickJS's messages: a Uint8Array over a detached buffer is out of bounds, an ArrayBuffer itself detached.
+	const detachedView, detachedBuffer = "ArrayBuffer is detached or resized", "ArrayBuffer is detached"
+
+	for _, call := range []struct{ cmd, want string }{
+		{cmd: "host-u8", want: "TypeError: " + detachedView},
+		{cmd: "host-ab", want: "TypeError: " + detachedBuffer},
+		{cmd: "host-empty", want: "0"},
+		{cmd: "host-empty-ab", want: "0"},
+		{cmd: "post-u8 " + srv.URL, want: "TypeError: " + detachedView},
+		{cmd: "post-empty " + srv.URL, want: "POST 0"},
+		{cmd: "text-u8", want: "TypeError: " + detachedView},
+		{cmd: "text-empty", want: `text ""`},
+	} {
+		got, relayErr := hosted.Relay(t.Context(), call.cmd)
+		require.NoError(t, relayErr, call.cmd)
+		assert.Equal(t, call.want, got, call.cmd)
+	}
+
+	shaper, err := plg.Get[testcontract.Shaper](t.Context(), ctr, "shaper/p")
+	require.NoError(t, err)
+
+	for in, want := range map[string]string{"\x01": detachedView, "\x01\x02": detachedBuffer} {
+		_, err = shaper.Reverse(t.Context(), []byte(in))
+
+		var pluginErr *plg.PluginError
+
+		require.ErrorAs(t, err, &pluginErr, "a detached result (%q)", in)
+		assert.Equal(t, want, pluginErr.Message, "the plugin's own TypeError (%q)", in)
+		require.NotErrorIs(t, err, plg.ErrConversion)
+	}
+
+	empty, err := shaper.Reverse(t.Context(), []byte{})
+	require.NoError(t, err)
+	assert.Equal(t, []byte{}, empty, "a genuine empty result crosses as empty, not nil")
 }
 
 // TestTypeScriptFetch exercises the parts of fetch the contract suite does not: JSON bodies, consumed bodies,

@@ -26,6 +26,8 @@ type Host interface {
 	Sum(ctx context.Context, base int, more ...int) (int, error)
 	// Keys returns keys unchanged: a map whose values encode as nothing.
 	Keys(ctx context.Context, keys map[string]struct{}) (map[string]struct{}, error)
+	// Size returns the length of b, or -1 when b is nil.
+	Size(ctx context.Context, b []byte) (int, error)
 }
 
 // Hosted is implemented by plugins whose Create takes the Host.
