@@ -100,8 +100,9 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 
 	tests := []struct {
 		msg      string
-		guest    []string // in the guest traceback
-		oneOf    []string // the guest traceback holds at least one of these
+		guest    []string   // in the guest traceback
+		oneOf    []string   // the guest traceback holds at least one of these
+		allOfOne [][]string // the guest traceback holds every string of at least one of these
 		deadline bool
 	}{
 		{msg: "panic", guest: []string{
@@ -110,13 +111,20 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 				"/gopath/src/plg.local/plugin/plugin.go:37:9: panic: plg.local/plugin.Fail(...)\n",
 		}},
 		{msg: "oom", guest: []string{"fatal error: out of memory", "runtime.throw", "runtime.mallocgc"}},
-		// The goroutine stack cannot grow. Its allocation runs out of memory or, when its size is the address of
-		// one of the runtime's heap growth hints, Go's sysAlloc mistakes the failed reservation for one at address
-		// 0, where the arenas are in use (PLAN.md, "Unbounded recursion's two fatal errors").
+		// Unbounded recursion runs the instance out of memory, too deep for its goroutine's trace to print whole,
+		// copying the goroutine's stack to a bigger one or (seen once, under load) allocating the interpreter's next
+		// call frame. Go's page heap then gives up with one of its three fatal errors on wasm: the allocation's own,
+		// its metadata's, or sysAlloc mistaking a failed reservation for one at address 0, where arenas are in use.
+		// Which one depends on the guest build's memory layout and on the run (PLAN.md, "Unbounded recursion ends on
+		// the stack or the heap").
 		{
 			msg:   "recurse",
-			guest: []string{"runtime.stackalloc", "runtime.newstack", "runtime.morestack"},
-			oneOf: []string{"fatal error: out of memory", "fatal error: arena already initialized"},
+			guest: []string{" frames elided...\n"},
+			oneOf: []string{
+				"fatal error: out of memory\n", "fatal error: runtime: cannot allocate memory\n",
+				"fatal error: arena already initialized\n",
+			},
+			allOfOne: [][]string{{"runtime.stackalloc", "runtime.newstack", "runtime.morestack"}, {"runtime.mallocgc"}},
 		},
 		{msg: "abort", guest: []string{"fatal error: all goroutines are asleep - deadlock!", "reflect.Select"}},
 		{msg: "loop", deadline: true},
@@ -153,6 +161,21 @@ func hostileGoPluginsCannotTakeTheHostDown(t *testing.T, opts ...plg.RegisterOpt
 			assert.True(t, slices.ContainsFunc(tc.oneOf, func(want string) bool {
 				return strings.Contains(failure.Guest, want)
 			}), "%s: the guest traceback holds none of %q:\n%s", tc.msg, tc.oneOf, failure.Guest)
+		}
+
+		if tc.allOfOne != nil {
+			holdsAll := func(all []string) bool {
+				for _, want := range all {
+					if !strings.Contains(failure.Guest, want) {
+						return false
+					}
+				}
+
+				return true
+			}
+
+			assert.True(t, slices.ContainsFunc(tc.allOfOne, holdsAll),
+				"%s: the guest traceback holds every string of none of %q:\n%s", tc.msg, tc.allOfOne, failure.Guest)
 		}
 
 		if tc.deadline {
