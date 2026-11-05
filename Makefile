@@ -115,7 +115,8 @@ test:
 coverage: test
 	scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
 
-# The gates' own tests: the coverage gate fails closed on unusable profiles and runs after the tests.
+# The gates' own tests: the coverage gate fails closed on unusable profiles and runs after the tests. Also checks
+# that every test container is terminated through its test's cleanup (RULES.md §7).
 gate-test:
 	scripts/gate-test.sh
 

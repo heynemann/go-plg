@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,61 +33,48 @@ import (
 
 const postgresImage = "postgres:17-alpine"
 
-//nolint:gochecknoglobals // the server TestMain starts, shared by every test of the package
-var (
-	// database is a pool on the migrated database of the PostgreSQL server TestMain starts; each test works
-	// with registrations of its own.
-	database *pgxpool.Pool
-	// dsn is that database's connection string.
-	dsn string
-)
-
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(withPostgres{m})
+	goleak.VerifyTestMain(m)
 }
 
-// withPostgres runs the tests against a PostgreSQL server in a container.
-type withPostgres struct{ m *testing.M }
+// postgresServer is a PostgreSQL server in a container of the test that started it.
+type postgresServer struct {
+	// pool is a pool on its default database.
+	pool *pgxpool.Pool
+	// dsn is that database's connection string.
+	dsn string
+}
 
-func (w withPostgres) Run() int {
-	ctx := context.Background()
+// startPostgres starts a PostgreSQL server for tb and its subtests; tb's cleanup terminates it, whether the test
+// passes, fails or the server never became ready (RULES.md §7).
+func startPostgres(tb testing.TB) *postgresServer {
+	tb.Helper()
 
-	publish, err := pricingtest.PublishOnFreePort(ctx, "5432/tcp")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "publishing PostgreSQL:", err)
+	publish := pricingtest.PublishOnFreePort(tb, "5432/tcp")
 
-		return 1
-	}
+	ctr, err := postgres.Run(tb.Context(), postgresImage, postgres.BasicWaitStrategies(), publish)
+	testcontainers.CleanupContainer(tb, ctr)
+	require.NoError(tb, err)
 
-	ctr, err := postgres.Run(ctx, postgresImage, postgres.BasicWaitStrategies(), publish)
-	defer func() {
-		termErr := testcontainers.TerminateContainer(ctr)
-		if termErr != nil {
-			fmt.Fprintln(os.Stderr, "terminating PostgreSQL:", termErr)
-		}
-	}()
+	dsn, err := ctr.ConnectionString(tb.Context(), "sslmode=disable")
+	require.NoError(tb, err)
 
-	if err == nil {
-		dsn, err = ctr.ConnectionString(ctx, "sslmode=disable")
-	}
+	pool, err := pgxpool.New(tb.Context(), dsn)
+	require.NoError(tb, err)
+	tb.Cleanup(pool.Close)
 
-	if err == nil {
-		database, err = pgxpool.New(ctx, dsn)
-	}
+	return &postgresServer{dsn: dsn, pool: pool}
+}
 
-	if err == nil {
-		defer database.Close()
+// migratedDatabase starts a PostgreSQL server for tb and its subtests and returns a pool on its migrated default
+// database.
+func migratedDatabase(tb testing.TB) *pgxpool.Pool {
+	tb.Helper()
 
-		err = pgstorage.Migrate(ctx, database)
-	}
+	pool := startPostgres(tb).pool
+	require.NoError(tb, pgstorage.Migrate(tb.Context(), pool))
 
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "starting PostgreSQL:", err)
-
-		return 1
-	}
-
-	return w.m.Run()
+	return pool
 }
 
 // newRegistration returns a registration name no other test uses.
@@ -96,16 +82,16 @@ func newRegistration() string {
 	return "r" + strings.ToLower(rand.Text())
 }
 
-// newDatabase creates an empty database and returns a pool on it, closed when the test ends.
-func newDatabase(t *testing.T) *pgxpool.Pool {
+// newDatabase creates an empty database on the server and returns a pool on it, closed when the test ends.
+func (s *postgresServer) newDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	name := "d" + strings.ToLower(rand.Text())
 
-	_, err := database.Exec(t.Context(), "CREATE DATABASE "+name)
+	_, err := s.pool.Exec(t.Context(), "CREATE DATABASE "+name)
 	require.NoError(t, err)
 
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := pgxpool.ParseConfig(s.dsn)
 	require.NoError(t, err)
 
 	cfg.ConnConfig.Database = name
@@ -142,7 +128,7 @@ func list(t *testing.T, store *pgstorage.Storage) []plg.Descriptor {
 func TestMigrateIsIdempotentAndSafeConcurrently(t *testing.T) {
 	t.Parallel()
 
-	pool := newDatabase(t)
+	pool := startPostgres(t).pool
 
 	var wg sync.WaitGroup
 
@@ -201,11 +187,13 @@ func TestMigrateFailsAsAWhole(t *testing.T) {
 		},
 	}
 
+	server := startPostgres(t)
+
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			pool := newDatabase(t)
+			pool := server.newDatabase(t)
 			_, err := pool.Exec(t.Context(), tc.existing)
 			require.NoError(t, err)
 
@@ -225,6 +213,7 @@ func TestMigrateFailsAsAWhole(t *testing.T) {
 func TestStorageListsOnlyEnabledPlugins(t *testing.T) {
 	t.Parallel()
 
+	database := migratedDatabase(t)
 	registration := newRegistration()
 	store := pgstorage.New(database, registration)
 	assert.Equal(t, "postgres:"+registration, store.Name())
@@ -269,6 +258,7 @@ func TestStorageListsOnlyEnabledPlugins(t *testing.T) {
 func TestStorageVersionsFollowTheRows(t *testing.T) {
 	t.Parallel()
 
+	database := migratedDatabase(t)
 	registration := newRegistration()
 	store := pgstorage.New(database, registration)
 	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "return 1", "lib/x.lua", "")))
@@ -339,6 +329,7 @@ func TestStorageVersionsFollowTheRows(t *testing.T) {
 func TestStorageOpen(t *testing.T) {
 	t.Parallel()
 
+	database := migratedDatabase(t)
 	registration := newRegistration()
 	store := pgstorage.New(database, registration)
 
@@ -370,7 +361,7 @@ func TestStorageOpen(t *testing.T) {
 func TestStorageRefusesInvalidPlugins(t *testing.T) {
 	t.Parallel()
 
-	store := pgstorage.New(database, newRegistration())
+	store := pgstorage.New(migratedDatabase(t), newRegistration())
 
 	tests := map[string]pgstorage.Plugin{
 		"empty key":         {Language: plg.LanguageLua, Entrypoint: "main.lua"},
@@ -484,6 +475,7 @@ func (rows countingRows) Next() bool {
 func TestStorageOpenRefusesOversizedPluginsBeforeReadingThem(t *testing.T) {
 	t.Parallel()
 
+	database := migratedDatabase(t)
 	registration := newRegistration()
 	received := new(atomic.Int64)
 	store := pgstorage.New(countingDB{Pool: database, received: received}, registration)
@@ -604,7 +596,7 @@ func (lyingFile) Read(p []byte) (int, error) {
 func TestStorageReportsDatabaseFailures(t *testing.T) {
 	t.Parallel()
 
-	pool := newDatabase(t)
+	pool := startPostgres(t).pool
 	store := pgstorage.New(pool, "r")
 
 	_, err := store.List(t.Context())
@@ -651,7 +643,7 @@ func putPlugins(t *testing.T, store *pgstorage.Storage, fsys fs.FS) {
 func TestStorageServesThePricingRules(t *testing.T) {
 	t.Parallel()
 
-	store := pgstorage.New(database, newRegistration())
+	store := pgstorage.New(migratedDatabase(t), newRegistration())
 	putPlugins(t, store, plugins.FS)
 
 	container := pricingtest.Register(t, store)

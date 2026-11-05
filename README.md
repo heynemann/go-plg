@@ -771,13 +771,16 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
 - [`examples/quickstart`](examples/quickstart): runs this README's quick start.
 
 Their tests start MinIO and PostgreSQL with [testcontainers](https://golang.testcontainers.org/), so they need
-Docker: `make examples`.
+Docker: `make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`
+(RULES.md §7), so a run leaves no container behind whether it passes or fails.
 
 ## Development
 
 - `make check` runs every gate CI runs: formatting, golangci-lint (host and wasip1), the unit and integration
-  tests with `-race`, the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh` tests it), allocation and benchmark budgets, a `-count=10` repeat
-  of the unit tests, and `make examples` (lint and tests of the examples module, Docker required).
+  tests with `-race`, the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh` tests it and
+  checks that every test container is terminated through its test's cleanup), allocation and benchmark budgets,
+  a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples module, Docker
+  required).
 - `make guests` rebuilds the guest artifacts with pinned toolchains; `make verify-guests` checks that the
   committed ones are reproducible.
 - [`RULES.md`](RULES.md) holds the engineering rules every change follows; [`PLAN.md`](PLAN.md) the design and

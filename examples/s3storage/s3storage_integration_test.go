@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -36,60 +35,35 @@ import (
 // minioImage is MinIO built from its release sources (the project no longer publishes images of its own).
 const minioImage = "alpine/minio:RELEASE.2025-10-15T17-29-55Z"
 
-// client reaches the MinIO server TestMain starts for the package's tests; each test works in a bucket of its own.
-var client *s3.Client //nolint:gochecknoglobals // the server TestMain starts, shared by every test of the package
-
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(withMinIO{m})
+	goleak.VerifyTestMain(m)
 }
 
-// withMinIO runs the tests against a MinIO server in a container.
-type withMinIO struct{ m *testing.M }
+// startMinIO starts a MinIO server for tb and its subtests and returns a client reaching it; tb's cleanup
+// terminates it, whether the test passes, fails or the server never became ready (RULES.md §7).
+func startMinIO(tb testing.TB) *s3.Client {
+	tb.Helper()
 
-func (w withMinIO) Run() int {
-	ctx := context.Background()
-
-	publish, err := pricingtest.PublishOnFreePort(ctx, "9000/tcp")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "publishing MinIO:", err)
-
-		return 1
-	}
+	publish := pricingtest.PublishOnFreePort(tb, "9000/tcp")
 
 	// The image runs MinIO as an unprivileged user that cannot write its /data volume.
-	ctr, err := minio.Run(ctx, minioImage, testcontainers.WithCmd("server", "/tmp/data"), publish)
-	defer func() {
-		termErr := testcontainers.TerminateContainer(ctr)
-		if termErr != nil {
-			fmt.Fprintln(os.Stderr, "terminating MinIO:", termErr)
-		}
-	}()
+	ctr, err := minio.Run(tb.Context(), minioImage, testcontainers.WithCmd("server", "/tmp/data"), publish)
+	testcontainers.CleanupContainer(tb, ctr)
+	require.NoError(tb, err)
 
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "starting MinIO:", err)
+	endpoint, err := ctr.ConnectionString(tb.Context())
+	require.NoError(tb, err)
 
-		return 1
-	}
-
-	endpoint, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "MinIO's endpoint:", err)
-
-		return 1
-	}
-
-	client = s3.New(s3.Options{
+	return s3.New(s3.Options{
 		Region:       "us-east-1",
 		BaseEndpoint: aws.String("http://" + endpoint),
 		UsePathStyle: true,
 		Credentials:  credentials.NewStaticCredentialsProvider(ctr.Username, ctr.Password, ""),
 	})
-
-	return w.m.Run()
 }
 
 // newBucket creates an empty bucket for one test.
-func newBucket(t *testing.T) string {
+func newBucket(t *testing.T, client *s3.Client) string {
 	t.Helper()
 
 	bucket := "plg-" + strings.ToLower(rand.Text())
@@ -100,7 +74,7 @@ func newBucket(t *testing.T) string {
 	return bucket
 }
 
-func put(t *testing.T, bucket, key, data string) {
+func put(t *testing.T, client *s3.Client, bucket, key, data string) {
 	t.Helper()
 
 	_, err := client.PutObject(t.Context(), &s3.PutObjectInput{
@@ -111,7 +85,7 @@ func put(t *testing.T, bucket, key, data string) {
 	require.NoError(t, err)
 }
 
-func remove(t *testing.T, bucket, key string) {
+func remove(t *testing.T, client *s3.Client, bucket, key string) {
 	t.Helper()
 
 	_, err := client.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
@@ -119,7 +93,7 @@ func remove(t *testing.T, bucket, key string) {
 }
 
 // upload puts every file of fsys into bucket under prefix.
-func upload(t *testing.T, bucket, prefix string, fsys fs.FS) {
+func upload(t *testing.T, client *s3.Client, bucket, prefix string, fsys fs.FS) {
 	t.Helper()
 
 	err := fs.WalkDir(fsys, ".", func(name string, entry fs.DirEntry, err error) error {
@@ -129,7 +103,7 @@ func upload(t *testing.T, bucket, prefix string, fsys fs.FS) {
 
 		data, readErr := fs.ReadFile(fsys, name)
 		require.NoError(t, readErr)
-		put(t, bucket, prefix+name, string(data))
+		put(t, client, bucket, prefix+name, string(data))
 
 		return nil
 	})
@@ -141,13 +115,14 @@ const isListingVersion = `^s3:[0-9a-f]{64}$`
 func TestStorageListsPluginDirectories(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	upload(t, bucket, "plugins/", plugins.FS)
-	put(t, bucket, "plugins/README.md", "objects directly under the prefix are not plugins")
-	put(t, bucket, "plugins/.git/config", "neither are dot directories")
-	put(t, bucket, "plugins/empty/", "") // a directory marker, with no plugin.json under it
-	put(t, bucket, "plugins/bulk/docs/", "")
-	put(t, bucket, "elsewhere/x/plugin.json", "{malformed: outside the prefix")
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	upload(t, client, bucket, "plugins/", plugins.FS)
+	put(t, client, bucket, "plugins/README.md", "objects directly under the prefix are not plugins")
+	put(t, client, bucket, "plugins/.git/config", "neither are dot directories")
+	put(t, client, bucket, "plugins/empty/", "") // a directory marker, with no plugin.json under it
+	put(t, client, bucket, "plugins/bulk/docs/", "")
+	put(t, client, bucket, "elsewhere/x/plugin.json", "{malformed: outside the prefix")
 
 	store := s3storage.New(client, bucket, s3storage.WithPrefix("plugins"))
 	assert.Equal(t, "s3://"+bucket+"/plugins/", store.Name())
@@ -189,9 +164,10 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 func TestStorageAtTheBucketRoot(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	put(t, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua","version":"7"}`)
-	put(t, bucket, "p/main.lua", "")
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua","version":"7"}`)
+	put(t, client, bucket, "p/main.lua", "")
 
 	store := s3storage.New(client, bucket)
 	assert.Equal(t, "s3://"+bucket+"/", store.Name())
@@ -209,11 +185,12 @@ func TestStorageAtTheBucketRoot(t *testing.T) {
 func TestStorageVersionsFollowTheObjects(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	put(t, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
-	put(t, bucket, "p/main.lua", "return 1")
-	put(t, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
-	put(t, bucket, "q/main.lua", "return 1")
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "p/main.lua", "return 1")
+	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "q/main.lua", "return 1")
 
 	store := s3storage.New(client, bucket)
 	versions := func() (string, string) {
@@ -240,16 +217,16 @@ func TestStorageVersionsFollowTheObjects(t *testing.T) {
 		name   string
 		same   string // the earlier step whose version the change restores, if any
 	}{
-		{name: "rewritten", change: func() { put(t, bucket, "p/main.lua", "return 2") }},
-		{name: "added", change: func() { put(t, bucket, "p/lib.lua", "") }},
-		{name: "removed", change: func() { remove(t, bucket, "p/lib.lua") }, same: "rewritten"},
+		{name: "rewritten", change: func() { put(t, client, bucket, "p/main.lua", "return 2") }},
+		{name: "added", change: func() { put(t, client, bucket, "p/lib.lua", "") }},
+		{name: "removed", change: func() { remove(t, client, bucket, "p/lib.lua") }, same: "rewritten"},
 		{name: "renamed", change: func() {
-			remove(t, bucket, "p/main.lua")
-			put(t, bucket, "p/other.lua", "return 2")
+			remove(t, client, bucket, "p/main.lua")
+			put(t, client, bucket, "p/other.lua", "return 2")
 		}},
 		{name: "renamed back", change: func() {
-			remove(t, bucket, "p/other.lua")
-			put(t, bucket, "p/main.lua", "return 2")
+			remove(t, client, bucket, "p/other.lua")
+			put(t, client, bucket, "p/main.lua", "return 2")
 		}, same: "rewritten"},
 	}
 
@@ -293,10 +270,11 @@ func (c *countingClient) GetObject(
 func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	put(t, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
-	put(t, bucket, "p/main.lua", "")
-	put(t, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "p/main.lua", "")
+	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
 
 	counting := &countingClient{Client: client}
 	store := s3storage.New(counting, bucket)
@@ -316,22 +294,24 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 	list()
 	assert.Equal(t, int64(2), counting.gets.Load(), "a poll with nothing changed downloads nothing")
 
-	put(t, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"init.lua"}`)
+	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"init.lua"}`)
 
 	descs := list()
 
 	assert.Equal(t, int64(3), counting.gets.Load(), "only the changed manifest")
 	assert.Equal(t, "init.lua", descs[0].Entrypoint, "the new manifest is read")
 
-	remove(t, bucket, "q/plugin.json")
+	remove(t, client, bucket, "q/plugin.json")
 	list()
-	put(t, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
 	list()
 	assert.Equal(t, int64(4), counting.gets.Load(), "a plugin that comes back is read again")
 }
 
 func TestStorageRejectsBadManifests(t *testing.T) {
 	t.Parallel()
+
+	client := startMinIO(t)
 
 	tests := map[string]map[string]string{
 		"no manifest": {"p/main.lua": ""},
@@ -347,9 +327,9 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			bucket := newBucket(t)
+			bucket := newBucket(t, client)
 			for key, data := range objects {
-				put(t, bucket, key, data)
+				put(t, client, bucket, key, data)
 			}
 
 			_, err := s3storage.New(client, bucket).List(t.Context())
@@ -362,9 +342,10 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
 	manifest := `{"language":"lua","entrypoint":"main.lua"}`
-	put(t, bucket, "p/plugin.json", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
+	put(t, client, bucket, "p/plugin.json", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
 
 	descs, err := s3storage.New(client, bucket).List(t.Context())
 	require.NoError(t, err)
@@ -374,12 +355,13 @@ func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 func TestStorageOpenFailures(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
 	manifest := `{"language":"lua","entrypoint":"main.lua"}`
-	put(t, bucket, "big/plugin.json", manifest)
-	put(t, bucket, "big/main.lua", strings.Repeat("-", 100-len(manifest))) // 100 bytes together, main.lua first
-	put(t, bucket, "odd/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
-	put(t, bucket, "odd/a/main.lua", "")
+	put(t, client, bucket, "big/plugin.json", manifest)
+	put(t, client, bucket, "big/main.lua", strings.Repeat("-", 100-len(manifest))) // 100 bytes together, main.lua first
+	put(t, client, bucket, "odd/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "odd/a/main.lua", "")
 
 	store := s3storage.New(client, bucket, s3storage.WithMaxPluginSize(100))
 
@@ -435,8 +417,9 @@ func (c *oddKeysClient) ListObjectsV2(
 func TestStorageReadsEveryPageOfAListing(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	upload(t, bucket, "", plugins.FS) // 9 objects
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	upload(t, client, bucket, "", plugins.FS) // 9 objects
 
 	store := s3storage.New(client, bucket)
 	s3storage.SetPageSize(store, 2)
@@ -509,8 +492,9 @@ func (c *generatingClient) ListObjectsV2(
 func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	put(t, bucket, "many/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	put(t, client, bucket, "many/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
 
 	const (
 		pages    = 100
@@ -570,8 +554,9 @@ func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 func TestStorageDownloadFailures(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	put(t, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
 
 	failing := &failingClient{Client: client}
 	store := s3storage.New(failing, bucket)
@@ -602,18 +587,19 @@ func (*failingClient) GetObject(
 func TestStorageServesThePricingRules(t *testing.T) {
 	t.Parallel()
 
-	bucket := newBucket(t)
-	upload(t, bucket, "rules/", plugins.FS)
+	client := startMinIO(t)
+	bucket := newBucket(t, client)
+	upload(t, client, bucket, "rules/", plugins.FS)
 
 	container := pricingtest.Register(t, s3storage.New(client, bucket, s3storage.WithPrefix("rules/")))
 	assert.Equal(t, pricingtest.Discounts(), pricingtest.Quote(t, container))
 
 	coupons, err := fs.ReadFile(plugins.FS, "coupon/coupons.ts")
 	require.NoError(t, err)
-	put(t, bucket, "rules/coupon/coupons.ts", string(bytes.Replace(coupons, []byte("500"), []byte("700"), 1)))
+	put(t, client, bucket, "rules/coupon/coupons.ts", string(bytes.Replace(coupons, []byte("500"), []byte("700"), 1)))
 
 	for _, key := range []string{"plugin.json", "rule.lua", "tiers.lua"} {
-		remove(t, bucket, "rules/loyalty/"+key)
+		remove(t, client, bucket, "rules/loyalty/"+key)
 	}
 
 	require.NoError(t, container.Reload(t.Context()))
