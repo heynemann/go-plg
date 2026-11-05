@@ -751,3 +751,10 @@ int plg_encode_value(lua_State *L, const plg_schema *s, uint32_t t, int idx, plg
   }
   return err;
 }
+
+int plg_protect(lua_State *L, lua_CFunction fn) {
+  int nargs = lua_gettop(L);
+  lua_pushcfunction(L, fn);
+  lua_insert(L, 1);
+  return lua_pcall(L, nargs, LUA_MULTRET, 0);
+}

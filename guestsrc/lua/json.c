@@ -330,19 +330,33 @@ static int json_decode(lua_State *L) {
 
 /* ---- encoding ---- */
 
-/* The text being built and the sorted object keys of every table being written; encoding runs no Lua code. */
-static plg_buf text;
-
 typedef struct key {
   const char *s;
   size_t n;
 } key;
 
-static plg_buf keys;
+/*
+** An encoding's buffers: the text being built and the sorted object keys of every table being written. Encoding
+** runs no Lua code itself, but its allocations may run finalizers, which may encode too: the outermost encoding
+** uses the shared buffers, kept from one to the next, and one started inside another gets buffers of its own.
+*/
+typedef struct encoder {
+  plg_buf text, keys;
+} encoder;
+
+static encoder shared;
+static encoder *enc = &shared; /* the encoding running */
+
+/*
+** The C stack address of the encoding using the shared buffers, or 0. The stack grows down, so an encoding started
+** in it runs below that address; one that failed leaves its address behind, and one starting at or above it
+** cannot have been started in it (see region in capi.c).
+*/
+static uintptr_t owner;
 
 static void put(lua_State *L, const char *s, size_t n) {
-  plg_buf_put(&text, s, n);
-  if (text.oom) luaL_error(L, "json.encode: not enough memory");
+  plg_buf_put(&enc->text, s, n);
+  if (enc->text.oom) luaL_error(L, "json.encode: not enough memory");
 }
 
 static void encode_string(lua_State *L, const char *s, size_t n) {
@@ -432,7 +446,7 @@ static void encode_array(lua_State *L, int idx, lua_Unsigned n, int depth) {
 
 /* encode_object writes the table at idx as an object of its count string keys, sorted. */
 static void encode_object(lua_State *L, int idx, size_t count, int depth) {
-  size_t first = keys.len / sizeof(key);
+  size_t first = enc->keys.len / sizeof(key);
   lua_pushnil(L);
   while (lua_next(L, idx) != 0) {
     if (lua_type(L, -2) != LUA_TSTRING)
@@ -440,15 +454,15 @@ static void encode_object(lua_State *L, int idx, size_t count, int depth) {
                  luaL_typename(L, -2));
     key k;
     k.s = lua_tolstring(L, -2, &k.n); /* the table keeps the key alive */
-    plg_buf_put(&keys, &k, sizeof k);
-    if (keys.oom) luaL_error(L, "json.encode: not enough memory");
+    plg_buf_put(&enc->keys, &k, sizeof k);
+    if (enc->keys.oom) luaL_error(L, "json.encode: not enough memory");
     lua_pop(L, 1);
   }
-  key *mine = (key *)keys.data + first;
+  key *mine = (key *)enc->keys.data + first;
   qsort(mine, count, sizeof(key), compare_keys);
   put(L, "{", 1);
   for (size_t i = 0; i < count; i++) {
-    mine = (key *)keys.data + first; /* nested objects may move the buffer */
+    mine = (key *)enc->keys.data + first; /* nested objects may move the buffer */
     if (i > 0) put(L, ",", 1);
     encode_string(L, mine[i].s, mine[i].n);
     put(L, ":", 1);
@@ -458,7 +472,7 @@ static void encode_object(lua_State *L, int idx, size_t count, int depth) {
     lua_pop(L, 1);
   }
   put(L, "}", 1);
-  keys.len = first * sizeof(key);
+  enc->keys.len = first * sizeof(key);
 }
 
 static void encode_table(lua_State *L, int idx, int depth) {
@@ -530,16 +544,39 @@ static void encode_value(lua_State *L, int idx, int depth) {
   }
 }
 
+/* encode encodes its argument in the running encoding's buffers. */
+static int encode(lua_State *L) {
+  enc->text.len = 0;
+  enc->text.oom = 0;
+  enc->keys.len = 0;
+  enc->keys.oom = 0;
+  encode_value(L, 1, 0);
+  lua_pushlstring(L, (const char *)enc->text.data, enc->text.len);
+  return 1;
+}
+
+/*
+** json_encode runs encode in the shared buffers, or, started inside another encoding, in buffers of its own, freed
+** when it ends, protected so that a Lua error frees them too and restores the outer one's before it is raised.
+*/
 static int json_encode(lua_State *L) {
   luaL_checkany(L, 1);
   lua_settop(L, 1);
-  text.len = 0;
-  text.oom = 0;
-  keys.len = 0;
-  keys.oom = 0;
-  encode_value(L, 1, 0);
-  lua_pushlstring(L, (const char *)text.data, text.len);
-  return 1;
+  char here;
+  uintptr_t at = (uintptr_t)&here;
+  if (owner == 0 || at >= owner) {
+    owner = at;
+    encode(L);
+    owner = 0;
+    return 1;
+  }
+  encoder mine = {0}, *outer = enc;
+  enc = &mine;
+  int status = plg_protect(L, encode);
+  enc = outer;
+  free(mine.text.data);
+  free(mine.keys.data);
+  return status == LUA_OK ? 1 : lua_error(L);
 }
 
 static int mark(lua_State *L, const char *mt) {

@@ -131,6 +131,12 @@ void plg_conv_fail(plg_conv *cv, const char *fmt, ...);
 /* Pushes "<prefix>: <path>: <message>" (the path without a leading dot, omitted when empty) and resets cv. */
 void plg_conv_push(lua_State *L, plg_conv *cv, const char *prefix);
 
+/*
+** plg_protect calls fn, a C function without upvalues (so pushing it allocates nothing), with the values on the
+** stack as its arguments, protected: it returns lua_pcall's status, with fn's results or its error on the stack.
+*/
+int plg_protect(lua_State *L, lua_CFunction fn);
+
 /* The guest's schema: the interface's methods (plg_call indexes), then the Host's (glue.c). */
 extern plg_schema plg_the_schema;
 extern uint32_t plg_iface_methods;

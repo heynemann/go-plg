@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,4 +424,125 @@ func BenchmarkHTTPRoundTripLua(b *testing.B) {
 
 func BenchmarkHTTPRoundTripLuaParallel(b *testing.B) {
 	benchHTTPParallel(b, luaLanguage())
+}
+
+// nestedHostCalls is a Hosted Lua plugin whose Relay(scenario [url]) runs one operation 300 times while __gc
+// finalizers, kept pending and run by an incremental collector stepping on every allocation, make other host
+// calls, http requests or json encodings meanwhile. It returns "nested=<finalizer runs inside the operation>
+// bad=<runs whose result differed from the one made with the collector stopped> first=<the first bad result>".
+//
+//nolint:dupword // Lua source, where nested blocks close with "end end"
+const nestedHostCalls = `
+local P = {}
+P.__index = P
+
+local inside, nested, armed, op, url = false, 0, false, nil, nil
+local mt = {}
+mt.__gc = function()
+  if not armed then return end
+  if inside then nested = nested + 1 end
+  if op == "json" then
+    json.encode({ nested = { 1, 2, 3 } })
+  elseif op == "http" then
+    http.request({ url = url })
+    host.Value()
+  else
+    host.Sum(7, { 1, 2 })
+    host.Value()
+  end
+  setmetatable({}, mt)
+end
+
+local long = {}
+for i = 1, 100 do long[string.rep("k", 48) .. i] = { i, string.rep("v", i) } end
+
+local function same(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+  for k, v in pairs(a) do
+    if not same(v, b[k]) then return false end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then return false end
+  end
+  return true
+end
+
+local ops = {
+  host = function() return host.Lookup("ada") end,
+  http = function()
+    local body
+    -- gsub calls back from C: the request cannot yield, so it is a blocking round trip.
+    string.gsub("x", "x", function() body = http.request({ url = url }).body end)
+    return { body = body, user = host.Lookup("ada") }
+  end,
+  json = function() return json.encode(long) end,
+}
+
+function P:Relay(cmd)
+  op, url = cmd:match("^(%S+) ?(.*)$")
+  local run = ops[op]
+  collectgarbage("stop")
+  local want = run()
+  for _ = 1, 20 do setmetatable({}, mt) end
+  armed, nested = true, 0
+  collectgarbage("restart")
+  collectgarbage("incremental", 0, 1000, 0)
+  local bad, first = 0, nil
+  for _ = 1, 300 do
+    inside = true
+    local ok, got = pcall(run)
+    inside = false
+    if not ok or not same(got, want) then
+      bad = bad + 1
+      first = first or tostring(got)
+    end
+  end
+  armed = false
+  collectgarbage("incremental", 200, 100, 13)
+  collectgarbage()
+  return string.format("nested=%d bad=%d first=%s", nested, bad, tostring(first))
+end
+
+function P:Describe() return {} end
+function P:Value() return "" end
+function P:Origin() return "" end
+function P:Total(base) return base end
+function P:Keys(keys) return keys end
+
+function Create() return setmetatable({}, P) end
+`
+
+// TestLuaNestedHostCallsKeepTheirOwnAnswers: a Host call, http request or json encoding made by a finalizer while
+// another one encodes its request or decodes its answer cannot overwrite that one's buffers: the outer operation
+// gets exactly its own result.
+func TestLuaNestedHostCallsKeepTheirOwnAnswers(t *testing.T) {
+	t.Parallel()
+
+	api := newAPIServer(t)
+	store := plg.NewMemoryStorage("mem")
+	require.NoError(t, store.Put(plg.Descriptor{Key: "p", Language: plg.LanguageLua, Entrypoint: "plugin.lua"},
+		fstest.MapFS{"plugin.lua": {Data: []byte(nestedHostCalls)}}))
+
+	policy := openPolicy(hostOf(t, api.URL))
+	policy.MaxRequestsPerCall = 1 << 16 // the finalizers' requests count too
+
+	ctr := newContainer(t)
+	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "nested", plg.WithStorage(store),
+		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit), plg.WithHost[testcontract.Host](newTestHost()),
+		plg.WithHTTP(policy)))
+
+	hosted, err := plg.Get[testcontract.Hosted](t.Context(), ctr, "nested/p")
+	require.NoError(t, err)
+
+	for _, scenario := range []string{"host", "http " + api.URL + "/v1", "json"} {
+		got, relayErr := hosted.Relay(t.Context(), scenario)
+		require.NoError(t, relayErr, scenario)
+
+		var nested, bad int
+
+		_, scanErr := fmt.Sscanf(got, "nested=%d bad=%d", &nested, &bad)
+		require.NoError(t, scanErr, got)
+		assert.Positive(t, nested, "%s: finalizers ran inside the operation: %s", scenario, got)
+		assert.Zero(t, bad, "%s: every run got its own result: %s", scenario, got)
+	}
 }

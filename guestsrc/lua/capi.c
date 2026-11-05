@@ -11,6 +11,7 @@
 **                           reason the host refused or failed it.
 */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lauxlib.h"
@@ -23,26 +24,82 @@ IMPORT("http_roundtrip") uint32_t plg_http_roundtrip(uint32_t ptr, uint32_t len)
 IMPORT("take_result") void plg_take_result(uint32_t ptr, uint32_t len);
 IMPORT("http_start") uint32_t plg_http_start(uint32_t call, uint32_t ptr, uint32_t len);
 
-/* The request being sent and the answer being read; neither runs Lua code while in use, so one each is enough. */
-static plg_buf request, answer;
-static plg_conv conv;
+/*
+** The scratch of a Host call or a blocking http request: the request being encoded, the answer being decoded and a
+** conversion failure. Lua code runs meanwhile (metamethods, and the finalizers any allocation may run), and may
+** make another Host call or request: every one runs in a region (below), and one started in another's gets a
+** scratch of its own, so the outer one's buffers stay as they were.
+*/
+typedef struct scratch {
+  plg_buf request, answer;
+  plg_conv conv;
+} scratch;
+
+static scratch shared;         /* the scratch of the outermost region, kept from one to the next */
+static scratch *scr = &shared; /* the scratch of the region running */
+
+/*
+** The C stack address of the region using the shared scratch, or 0. The stack grows down, so a region started in
+** it runs below that address. A region that failed leaves its address behind: one starting at or above it cannot
+** have been started in it, and takes the shared scratch over.
+*/
+static uintptr_t owner;
+
+/* A region's body: it returns its results' count, or -1 with an error on the stack's top for the region to raise. */
+typedef int (*body)(lua_State *L, uint32_t arg);
+
+/* The body and argument of the nested region starting, for run_nested. */
+static body nested_body;
+static uint32_t nested_arg;
 
 static uint32_t addr(const void *p) {
   return (uint32_t)(uintptr_t)p;
 }
 
-/* take copies the host's pending answer of n bytes into answer and returns a reader over it. */
+static int run_nested(lua_State *L) {
+  int n = nested_body(L, nested_arg);
+  return n < 0 ? lua_error(L) : n;
+}
+
+/*
+** region runs b(L, arg) and returns its results. The outermost region uses the shared scratch, at no cost; one
+** started inside another uses a fresh scratch, freed when it ends, and runs protected so that a Lua error frees it
+** too and restores the outer one's before it is raised again.
+*/
+static int region(lua_State *L, body b, uint32_t arg) {
+  char here;
+  uintptr_t at = (uintptr_t)&here;
+  if (owner == 0 || at >= owner) {
+    owner = at;
+    int n = b(L, arg);
+    owner = 0;
+    return n < 0 ? lua_error(L) : n;
+  }
+  scratch mine = {0}, *outer = scr;
+  scr = &mine;
+  nested_body = b;
+  nested_arg = arg;
+  int status = plg_protect(L, run_nested);
+  scr = outer;
+  free(mine.request.data);
+  free(mine.answer.data);
+  free(mine.conv.path.data);
+  return status == LUA_OK ? lua_gettop(L) : lua_error(L);
+}
+
+/* take copies the host's pending answer of n bytes into the scratch's answer and returns a reader over it. */
 static plg_reader take(lua_State *L, uint32_t n) {
-  answer.len = 0;
-  answer.oom = 0;
-  if (n == 0 || !plg_buf_reserve(&answer, n)) luaL_error(L, "not enough memory for the host's answer");
-  plg_take_result(addr(answer.data), n);
-  answer.len = n;
-  return (plg_reader){answer.data, answer.data + n};
+  plg_buf *answer = &scr->answer;
+  answer->len = 0;
+  answer->oom = 0;
+  if (n == 0 || !plg_buf_reserve(answer, n)) luaL_error(L, "not enough memory for the host's answer");
+  plg_take_result(addr(answer->data), n);
+  answer->len = n;
+  return (plg_reader){answer->data, answer->data + n};
 }
 
 static void check_request(lua_State *L) {
-  if (request.oom) luaL_error(L, "not enough memory for the request");
+  if (scr->request.oom) luaL_error(L, "not enough memory for the request");
 }
 
 const char *plg_push_results(lua_State *L, const plg_method *m, plg_reader *r, int *pushed) {
@@ -56,43 +113,52 @@ const char *plg_push_results(lua_State *L, const plg_method *m, plg_reader *r, i
   return r->p == r->end ? NULL : "trailing bytes";
 }
 
-static int host_method(lua_State *L) {
-  uint32_t index = (uint32_t)lua_tointeger(L, lua_upvalueindex(1));
+/* host_call makes the Host call of method index in a region. */
+static int host_call(lua_State *L, uint32_t index) {
   const plg_method *m = &plg_the_schema.methods[index];
   int nargs = lua_gettop(L);
   luaL_checkstack(L, 4, NULL);
-  request.len = 0;
-  request.oom = 0;
+  scr->request.len = 0;
+  scr->request.oom = 0;
   for (uint32_t k = 0; k < m->nparams; k++) {
     int idx = (int)k + 1;
     if (idx > nargs) {
       lua_pushnil(L);
       idx = lua_gettop(L);
     }
-    int err = plg_encode_value(L, &plg_the_schema, m->params[k], idx, &request, &conv, 0);
+    int err = plg_encode_value(L, &plg_the_schema, m->params[k], idx, &scr->request, &scr->conv, 0);
     check_request(L);
     if (err < 0) {
       char prefix[160];
       snprintf(prefix, sizeof prefix, "host.%s: parameter %u", m->name, (unsigned)k + 1);
-      plg_conv_push(L, &conv, prefix);
-      return lua_error(L);
+      plg_conv_push(L, &scr->conv, prefix);
+      return -1;
     }
   }
-  uint32_t n = plg_host_call(index - plg_iface_methods, addr(request.data), (uint32_t)request.len);
+  uint32_t n = plg_host_call(index - plg_iface_methods, addr(scr->request.data), (uint32_t)scr->request.len);
   plg_reader r = take(L, n);
   uint8_t status = *r.p++;
   if (status != PLG_OK) {
     const char *msg;
     size_t len;
-    if (!plg_read_str(&r, &msg, &len)) return luaL_error(L, "host.%s: malformed answer", m->name);
-    lua_pushlstring(L, msg, len);
-    return lua_error(L);
+    if (plg_read_str(&r, &msg, &len))
+      lua_pushlstring(L, msg, len);
+    else
+      lua_pushfstring(L, "host.%s: malformed answer", m->name);
+    return -1;
   }
   lua_settop(L, 0);
   int pushed;
   const char *err = plg_push_results(L, m, &r, &pushed);
-  if (err != NULL) return luaL_error(L, "host.%s: malformed answer: %s", m->name, err);
+  if (err != NULL) {
+    lua_pushfstring(L, "host.%s: malformed answer: %s", m->name, err);
+    return -1;
+  }
   return pushed;
+}
+
+static int host_method(lua_State *L) {
+  return region(L, host_call, (uint32_t)lua_tointeger(L, lua_upvalueindex(1)));
 }
 
 void plg_open_host(lua_State *L) {
@@ -108,8 +174,8 @@ void plg_open_host(lua_State *L) {
 
 /* ---- http ---- */
 
-static void put_text(const char *s, size_t n) {
-  plg_buf_str(&request, s, n);
+static void put_text(const char *text, size_t n) {
+  plg_buf_str(&scr->request, text, n);
 }
 
 /* put_headers appends the header pairs of the table at idx and returns their count. */
@@ -192,12 +258,8 @@ static int answered(lua_State *L, plg_reader *r) {
 
 static int roundtrip_answered(lua_State *L, int status, lua_KContext k);
 
-/*
-** roundtrip(method, url, headers, body) makes one request through the host: the prelude below has checked the
-** arguments' types (headers is a table or nil, body a string or nil). In a multiplexed step it yields until the
-** answer arrives, letting the instance serve other calls meanwhile; elsewhere it blocks.
-*/
-static int roundtrip(lua_State *L) {
+/* put_request encodes the request of roundtrip's arguments into the scratch's request and returns it. */
+static plg_buf *put_request(lua_State *L) {
   size_t mlen, ulen, blen = 0;
   const char *method = luaL_checklstring(L, 1, &mlen);
   const char *url = luaL_checklstring(L, 2, &ulen);
@@ -205,25 +267,43 @@ static int roundtrip(lua_State *L) {
   int headers = lua_istable(L, 3);
   lua_settop(L, 3);
 
-  request.len = 0;
-  request.oom = 0;
+  plg_buf *request = &scr->request;
+  request->len = 0;
+  request->oom = 0;
   put_text(method, mlen);
   put_text(url, ulen);
-  size_t at = request.len;
-  plg_buf_u64(&request, 0);
+  size_t at = request->len;
+  plg_buf_u64(request, 0);
   uint64_t pairs = headers ? put_headers(L, 3) : 0;
-  if (!request.oom)
-    for (int i = 0; i < 8; i++) request.data[at + (size_t)i] = (uint8_t)(pairs >> (8 * i));
-  plg_buf_put(&request, body, blen);
+  if (!request->oom)
+    for (int i = 0; i < 8; i++) request->data[at + (size_t)i] = (uint8_t)(pairs >> (8 * i));
+  plg_buf_put(request, body, blen);
   check_request(L);
+  return request;
+}
 
-  if (L == plg_call_thread && lua_isyieldable(L)) {
-    plg_wait_request = plg_http_start(plg_call_id, addr(request.data), (uint32_t)request.len);
-    lua_pushlightuserdata(L, &plg_yield_key);
-    return lua_yieldk(L, 1, 0, roundtrip_answered);
-  }
-  plg_reader r = take(L, plg_http_roundtrip(addr(request.data), (uint32_t)request.len));
+/* roundtrip_blocking makes roundtrip's request in a region, blocking until its answer. */
+static int roundtrip_blocking(lua_State *L, uint32_t arg) {
+  (void)arg;
+  plg_buf *request = put_request(L);
+  plg_reader r = take(L, plg_http_roundtrip(addr(request->data), (uint32_t)request->len));
   return answered(L, &r);
+}
+
+/*
+** roundtrip(method, url, headers, body) makes one request through the host: the prelude below has checked the
+** arguments' types (headers is a table or nil, body a string or nil). In a multiplexed step it yields until the
+** answer arrives, letting the instance serve other calls meanwhile; elsewhere it blocks, in a region. A yielding
+** request uses the shared scratch outside a region: no region can be running, since none spans a yield and one
+** running below would make the coroutine unyieldable, and encoding the request runs no Lua code; its answer
+** arrives in plg_answer.
+*/
+static int roundtrip(lua_State *L) {
+  if (L != plg_call_thread || !lua_isyieldable(L)) return region(L, roundtrip_blocking, 0);
+  plg_buf *request = put_request(L);
+  plg_wait_request = plg_http_start(plg_call_id, addr(request->data), (uint32_t)request->len);
+  lua_pushlightuserdata(L, &plg_yield_key);
+  return lua_yieldk(L, 1, 0, roundtrip_answered);
 }
 
 /* roundtrip_answered continues a roundtrip that yielded for its answer, which the resuming step put in plg_answer. */
