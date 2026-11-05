@@ -74,6 +74,8 @@ func (p *Planner) For(typ reflect.Type) (*Codec, error) {
 
 	root, err := p.plan(typ)
 	if err == nil {
+		p.sizeStructs()
+
 		err = p.checkSlices()
 	}
 
@@ -88,9 +90,43 @@ func (p *Planner) For(typ reflect.Type) (*Codec, error) {
 	return &Codec{typ: typ, root: root}, nil
 }
 
+// sizeStructs sets the minimum size of the structs planned by the current For call, once the plans are
+// complete: while planning, a struct reached again through a slice, map or pointer of its own fields (A{[]B},
+// B{A}) has no size yet.
+func (p *Planner) sizeStructs() {
+	pending := map[*node]bool{}
+
+	for _, t := range p.added {
+		if n := p.plans[t]; n.kind == KindStruct {
+			pending[n] = true
+		}
+	}
+
+	for _, t := range p.added {
+		sizeStruct(p.plans[t], pending)
+	}
+}
+
+// sizeStruct sets the minimum size of n, a pending struct, to the sum of its fields', sizing the pending
+// structs among them first. Pointers, slices and maps have fixed minimums, and a Go struct cannot contain
+// itself, so the recursion ends.
+func sizeStruct(n *node, pending map[*node]bool) int {
+	if !pending[n] {
+		return n.minSize
+	}
+
+	delete(pending, n)
+
+	for _, f := range n.fields {
+		n.minSize += sizeStruct(f.node, pending)
+	}
+
+	return n.minSize
+}
+
 // checkSlices rejects the slices planned by the current For call whose elements encode as nothing: a hostile
-// length prefix could then claim any number of them without the input bounding it. It runs once the plans are
-// complete, because a recursive struct's size is known only then.
+// length prefix could then claim any number of them without the input bounding it. It runs once the structs
+// are sized.
 func (p *Planner) checkSlices() error {
 	for _, t := range p.added {
 		n := p.plans[t]
@@ -236,6 +272,15 @@ func (p *Planner) fillStruct(n *node) error {
 	names := map[string]string{} // name -> Go name
 
 	for structField := range n.typ.Fields() {
+		// yaegi (v0.16) builds a struct holding a struct still being declared by value (Child{Parent} with
+		// Parent{[]Child}) around a placeholder of size 0 and swaps the field's type in afterwards, leaving the
+		// struct smaller than its fields: storing a value there would overwrite memory beyond it.
+		if structField.Offset+structField.Type.Size() > n.typ.Size() {
+			return fmt.Errorf("%w: %s: field %s does not fit in the struct as the Go interpreter laid it out "+
+				"(a struct holding, by value, a struct that holds it back through a slice or map)",
+				ErrUnsupported, n.typ, structField.Name)
+		}
+
 		if !structField.IsExported() {
 			return fmt.Errorf("%w: %s: unexported field %s", ErrUnsupported, n.typ, structField.Name)
 		}
@@ -262,7 +307,6 @@ func (p *Planner) fillStruct(n *node) error {
 		n.fields = append(n.fields, field{
 			node: elem, name: name, goName: structField.Name, index: structField.Index[0],
 		})
-		n.minSize += elem.minSize
 	}
 
 	return nil

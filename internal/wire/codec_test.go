@@ -254,6 +254,8 @@ type (
 		F    func()
 		Name string
 	}
+	// outerEmpty holds a struct that encodes as nothing, so it encodes as nothing too.
+	outerEmpty struct{ In empty }
 	// selfAndFunc is recursive and unsupported: planning it fails after its slice plan referred back to it.
 	selfAndFunc struct {
 		F    func()
@@ -282,6 +284,7 @@ func TestUnsupportedTypes(t *testing.T) {
 		{reflect.TypeFor[clashing](), `fields A and X are both named "X"`},
 		{reflect.TypeFor[[]empty](), "[]wire_test.empty: its elements encode as nothing"},
 		{reflect.TypeFor[[]hiddenOnly](), "[]wire_test.hiddenOnly: its elements encode as nothing"},
+		{reflect.TypeFor[[]outerEmpty](), "[]wire_test.outerEmpty: its elements encode as nothing"},
 		{reflect.TypeFor[withFunc](), "field wire_test.withFunc.F: wire: unsupported type: func()"},
 		{reflect.TypeFor[selfAndFunc](), "field wire_test.selfAndFunc.F"},
 	}

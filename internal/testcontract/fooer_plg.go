@@ -175,6 +175,22 @@ func (a *plgAliased) Double(p0 context.Context, p1 struct {
 	return a.WDouble(p0, p1)
 }
 
+// plgFamily implements Family for plg, which fills each W field with a call into a plugin.
+type plgFamily struct {
+	WAdopt  func(context.Context, Child) (Child, error)
+	WMirror func(context.Context, Parent) (Parent, error)
+}
+
+var _ Family = (*plgFamily)(nil)
+
+func (a *plgFamily) Adopt(p0 context.Context, p1 Child) (Child, error) {
+	return a.WAdopt(p0, p1)
+}
+
+func (a *plgFamily) Mirror(p0 context.Context, p1 Parent) (Parent, error) {
+	return a.WMirror(p0, p1)
+}
+
 // plgFooerFast implements Fooer for plg with the fast paths plg gen generated: typed calls, and codecs
 // specialized to the interface's types.
 type plgFooerFast struct {
@@ -1298,6 +1314,96 @@ func (c *plgAliasedDoubleCall) DecodeResults(r *plgimpl.Reader) error {
 	var err error
 
 	err = plgDecode18(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+// plgFamilyFast implements Family for plg with the fast paths plg gen generated: typed calls, and codecs
+// specialized to the interface's types.
+type plgFamilyFast struct {
+	inv plgimpl.Invoker
+}
+
+var _ Family = (*plgFamilyFast)(nil)
+
+func (a *plgFamilyFast) Adopt(p0 context.Context, p1 Child) (Child, error) {
+	c := plgFamilyAdoptCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 0, &c)
+	if err != nil {
+		c = plgFamilyAdoptCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgFamilyAdoptCall is one call of Family.Adopt: its arguments, then its results.
+type plgFamilyAdoptCall struct {
+	p1 Child
+	r0 Child
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFamilyAdoptCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeChild(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFamilyAdoptCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeChild(r, &c.r0, 0)
+	if err != nil {
+		return plgimpl.Result(err, 0)
+	}
+
+	return nil
+}
+
+func (a *plgFamilyFast) Mirror(p0 context.Context, p1 Parent) (Parent, error) {
+	c := plgFamilyMirrorCall{p1: p1}
+
+	err := a.inv.Invoke(p0, 1, &c)
+	if err != nil {
+		c = plgFamilyMirrorCall{}
+	}
+
+	return c.r0, err
+}
+
+// plgFamilyMirrorCall is one call of Family.Mirror: its arguments, then its results.
+type plgFamilyMirrorCall struct {
+	p1 Parent
+	r0 Parent
+}
+
+// AppendArgs implements plgimpl.Call.
+func (c *plgFamilyMirrorCall) AppendArgs(b []byte) ([]byte, error) {
+	var err error
+
+	b, err = plgEncodeParent(b, &c.p1, 0)
+	if err != nil {
+		return b, plgimpl.Param(err, 1)
+	}
+
+	return b, nil
+}
+
+// DecodeResults implements plgimpl.Call.
+func (c *plgFamilyMirrorCall) DecodeResults(r *plgimpl.Reader) error {
+	var err error
+
+	err = plgDecodeParent(r, &c.r0, 0)
 	if err != nil {
 		return plgimpl.Result(err, 0)
 	}
@@ -2550,6 +2656,101 @@ func plgDecode18(r *plgimpl.Reader, v *struct{ *Embedded }, depth int) error {
 	return nil
 }
 
+func plgEncode20(b []byte, v *[]Child, depth int) ([]byte, error) {
+	if *v == nil {
+		return plgimpl.AppendNil(b), nil
+	}
+
+	b, err := plgimpl.AppendLen(b, len(*v), depth)
+	if err != nil {
+		return b, err
+	}
+
+	for i := range *v {
+		b, err = plgEncodeChild(b, &(*v)[i], depth+1)
+		if err != nil {
+			return b, plgimpl.AtIndex(err, i)
+		}
+	}
+
+	return b, nil
+}
+
+func plgDecode20(r *plgimpl.Reader, v *[]Child, depth int) error {
+	n, err := plgimpl.ReadSliceLen(r, v, depth, 4)
+	if err != nil || n < 0 {
+		return err
+	}
+
+	s := make([]Child, n)
+	for i := range s {
+		err = plgDecodeChild(r, &s[i], depth+1)
+		if err != nil {
+			return plgimpl.AtIndex(err, i)
+		}
+	}
+
+	*v = s
+
+	return nil
+}
+
+func plgEncodeParent(b []byte, v *Parent, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgEncode20(b, &v.Children, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Children")
+	}
+
+	return b, nil
+}
+
+func plgDecodeParent(r *plgimpl.Reader, v *Parent, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	err = plgDecode20(r, &v.Children, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Children")
+	}
+
+	return nil
+}
+
+func plgEncodeChild(b []byte, v *Child, depth int) ([]byte, error) {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return b, err
+	}
+
+	b, err = plgEncodeParent(b, &v.Parent, depth+1)
+	if err != nil {
+		return b, plgimpl.AtField(err, "Parent")
+	}
+
+	return b, nil
+}
+
+func plgDecodeChild(r *plgimpl.Reader, v *Child, depth int) error {
+	err := plgimpl.Deeper(depth)
+	if err != nil {
+		return err
+	}
+
+	err = plgDecodeParent(r, &v.Parent, depth+1)
+	if err != nil {
+		return plgimpl.AtField(err, "Parent")
+	}
+
+	return nil
+}
+
 func init() {
 	plg.MustRegisterContract(plg.Contract{
 		Interface: reflect.TypeFor[Fooer](),
@@ -2578,5 +2779,12 @@ func init() {
 		Source:    plgFooerSource,
 		Fast:      func(inv plgimpl.Invoker) any { return &plgAliasedFast{inv: inv} },
 		Layout:    "566369ff06ea6bb452569b063ce205009a515241b949e04005fa96536ac6e8a9",
+	})
+	plg.MustRegisterContract(plg.Contract{
+		Interface: reflect.TypeFor[Family](),
+		Adapter:   reflect.TypeFor[plgFamily](),
+		Source:    plgFooerSource,
+		Fast:      func(inv plgimpl.Invoker) any { return &plgFamilyFast{inv: inv} },
+		Layout:    "7f69dc232d2267828241f8653a0e9ef944252d6de1c5461ffcbc5d96743df6cc",
 	})
 }

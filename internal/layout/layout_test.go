@@ -189,3 +189,38 @@ func TestKindNames(t *testing.T) {
 	assert.False(t, layout.Time.Composite())
 	assert.True(t, layout.Slice.Composite())
 }
+
+type (
+	// parent and child are mutually recursive: a child's minimum size is its parent's slice length prefix.
+	parent struct{ Children []child }
+	child  struct{ Parent parent }
+	// outer holds a struct that encodes as nothing, so it encodes as nothing too.
+	outer struct{ In empty }
+)
+
+// TestBuildSizesMutuallyRecursiveStructs: a struct reached again while it is planned gets its size once the
+// layout is complete, whichever of the two the layout reaches first, as the codec sizes it.
+func TestBuildSizesMutuallyRecursiveStructs(t *testing.T) {
+	t.Parallel()
+
+	for name, iface := range map[string]reflect.Type{
+		"parent first": reflect.TypeFor[interface {
+			M(ctx context.Context, p parent, c child, cs []child) error
+		}](),
+		"child first": reflect.TypeFor[interface {
+			M(ctx context.Context, c child, p parent, cs []child) error
+		}](),
+	} {
+		plan, err := layout.OfInterface(iface)
+		require.NoError(t, err, name)
+
+		for _, node := range plan.Methods[0].Params {
+			assert.Equal(t, 4, node.MinSize, "%s: %v", name, node.Type)
+		}
+
+		assert.Equal(t, 4, plan.Methods[0].Params[2].Elem.MinSize, name)
+	}
+
+	_, err := layout.OfInterface(reflect.TypeFor[echo[[]outer]]())
+	require.ErrorIs(t, err, layout.ErrUnsupported, "a struct of structs encoding as nothing encodes as nothing")
+}

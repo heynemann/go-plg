@@ -10,9 +10,9 @@ Inferred from reading the code: reproduce before fixing.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Contract tests registering and round-tripping the A/B shape through a Go plugin with both binders reproduces the bug (fails on the current code) and passes with the fix
-Wire and layout planners agree; types that really encode as nothing are still rejected
-- [ ] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket
+- [x] Contract tests registering and round-tripping the A/B shape through a Go plugin with both binders reproduces the bug (fails on the current code) and passes with the fix
+- [x] Wire and layout planners agree; types that really encode as nothing are still rejected
+- [x] Guest artifact rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] Meets [RULES.md](../../../RULES.md): `golangci-lint` clean, deterministic tests (no sleeps/retries), `make check` passes on the landed commit (and `make verify-guests` if guest sources changed), one commit titled exactly as this ticket

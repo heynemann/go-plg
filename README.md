@@ -229,7 +229,11 @@ rules with `plg.ErrInvalidInterface`:
   error last, both required. Variadic methods are allowed.
 - **Data only:** `bool`, integers, floats, `string`, `[]byte`, slices, maps with string keys, structs whose
   fields are all exported, pointers to structs, `time.Time`, and named types of these (recursive types included).
-  Functions, channels, interfaces, arrays, complex numbers and `uintptr` are refused.
+  Functions, channels, interfaces, arrays, complex numbers and `uintptr` are refused. One limit is Go plugins'
+  alone: the Go interpreter lays out wrongly a struct holding by value a struct that holds it back through a
+  slice or map (`Child{Parent Parent}` with `Parent{Children []Child}`) when it reaches the outer one first,
+  and the Go guest then refuses the plugin (`does not fit in the struct as the Go interpreter laid it out`)
+  rather than corrupt memory; a contract whose methods, sorted by name, reach `Child` first works.
 - **Embedded aliases:** an anonymous struct may embed an alias (`struct{ Embedded }` with `type Embedded =
   Counter`): the field keeps the alias's name, so Go plugins bind to exactly the contract's type. The Go
   dispatcher declares one alias per name, so all such fields embedding an alias named `Embedded`, in the

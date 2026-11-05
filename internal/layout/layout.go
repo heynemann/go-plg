@@ -146,6 +146,18 @@ func Build[T any](view View[T], methods []Signature[T]) (*Layout[T], error) {
 		layout.Methods = append(layout.Methods, meth)
 	}
 
+	pending := map[*Node[T]]bool{}
+
+	for _, node := range layout.Composites {
+		if node.Kind == Struct {
+			pending[node] = true
+		}
+	}
+
+	for _, node := range layout.Composites {
+		sizeStruct(node, pending)
+	}
+
 	for _, node := range layout.Composites {
 		if node.Kind == Slice && node.Elem.MinSize == 0 {
 			return nil, fmt.Errorf("%w: %v: its elements encode as nothing", ErrUnsupported, node.Type)
@@ -238,10 +250,27 @@ func (l *Layout[T]) planStruct(view View[T], node *Node[T], fields []RawField[T]
 		}
 
 		node.Fields = append(node.Fields, Field[T]{Node: elem, GoName: raw.Name})
-		node.MinSize += elem.MinSize
 	}
 
 	return nil
+}
+
+// sizeStruct sets the minimum size of node, a pending struct, to the sum of its fields', sizing the pending
+// structs among them first. It runs once the layout is complete: while planning, a struct reached again through
+// a slice, map or pointer of its own fields (A{[]B}, B{A}) has no size yet. Pointers, slices and maps have
+// fixed minimums, and a Go struct cannot contain itself, so the recursion ends.
+func sizeStruct[T any](node *Node[T], pending map[*Node[T]]bool) int {
+	if !pending[node] {
+		return node.MinSize
+	}
+
+	delete(pending, node)
+
+	for _, field := range node.Fields {
+		node.MinSize += sizeStruct(field.Node, pending)
+	}
+
+	return node.MinSize
 }
 
 // fieldName returns the name a struct field has for other guest languages, as internal/wire names it: its

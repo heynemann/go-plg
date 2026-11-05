@@ -3,6 +3,7 @@
 package plg_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -292,4 +293,44 @@ func BenchmarkCallGoStructParallel(b *testing.B) {
 			}
 		}
 	})
+}
+
+// TestMutuallyRecursiveStructsCrossAGoPlugin registers testcontract.Family, whose Child holds its Parent by
+// value and whose Parent holds its Children in a slice, with both binders, and round-trips a family through a
+// Go plugin. A Child's minimum encoding is its Parent's slice length prefix, known only once both are planned.
+func TestMutuallyRecursiveStructsCrossAGoPlugin(t *testing.T) {
+	t.Parallel()
+
+	require.NotNil(t, plg.FastAdapter(reflect.TypeFor[testcontract.Family](), nil),
+		"plg gen generated the fast paths of Family")
+
+	want := testcontract.Parent{Children: []testcontract.Child{
+		{Parent: testcontract.Parent{Children: []testcontract.Child{{}}}},
+		{Parent: testcontract.Parent{Children: []testcontract.Child{}}},
+	}}
+
+	for _, generic := range []bool{false, true} {
+		lang := golang()
+		lang.generic = generic
+
+		t.Run(lang.name(), func(t *testing.T) {
+			t.Parallel()
+
+			ctr := lang.binder(newContainer(t))
+			err := plg.Register[testcontract.Family](t.Context(), ctr, "family",
+				plg.WithStorage(lang.storage(t, "family", map[string]string{"ref": "family"})), plg.WithPool(1, 1))
+			require.NoError(t, err)
+
+			family, err := plg.Get[testcontract.Family](t.Context(), ctr, "family/ref")
+			require.NoError(t, err)
+
+			got, err := family.Mirror(t.Context(), want)
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+
+			adopted, err := family.Adopt(t.Context(), want.Children[0])
+			require.NoError(t, err)
+			assert.Equal(t, want.Children[0], adopted)
+		})
+	}
 }
