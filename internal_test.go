@@ -203,6 +203,50 @@ type pair interface {
 	M(ctx context.Context) (string, int8, error)
 }
 
+// TestIssueSeveritiesBlockAndLog checks what each severity does to a load: errors, and severities plg does not
+// know, block it (the error names every blocking issue, none of the others), warnings and infos do not; and the
+// level each is logged at.
+func TestIssueSeveritiesBlockAndLog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		severity Severity
+		level    slog.Level
+		blocks   bool
+	}{
+		{severity: SeverityError, level: slog.LevelError, blocks: true},
+		{severity: "fatal", level: slog.LevelError, blocks: true},
+		{severity: "", level: slog.LevelError, blocks: true},
+		{severity: SeverityWarning, level: slog.LevelWarn},
+		{severity: SeverityInfo, level: slog.LevelInfo},
+	}
+
+	for _, tc := range tests {
+		assert.Equal(t, tc.level, tc.severity.level(), "%q", tc.severity)
+
+		report := &Report{Issues: []Issue{
+			{Severity: SeverityWarning, Code: "w.code", Message: "a warning"},
+			{Severity: tc.severity, Code: "x.code", Message: "the issue"},
+			{Severity: SeverityInfo, Code: "i.code", Message: "an info"},
+		}}
+
+		err := report.blocking()
+		if !tc.blocks {
+			require.NoError(t, err, "%q", tc.severity)
+
+			continue
+		}
+
+		require.ErrorIs(t, err, ErrBlockingIssue, "%q", tc.severity)
+		assert.Equal(t, ErrBlockingIssue.Error()+": x.code: the issue", err.Error(), "%q", tc.severity)
+	}
+
+	report := &Report{Issues: []Issue{
+		{Severity: SeverityError, Code: "a", Message: "first"}, {Severity: "bad", Code: "b", Message: "second"},
+	}}
+	assert.Equal(t, ErrBlockingIssue.Error()+": a: first; b: second", report.blocking().Error())
+}
+
 // TestManifestMemoryLimitsMatchRegister checks that a plugin.yaml's memoryLimit parses exactly when Register
 // accepts it in a descriptor: from one wasm page to 4 GiB.
 func TestManifestMemoryLimitsMatchRegister(t *testing.T) {

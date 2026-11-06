@@ -19,6 +19,7 @@ type plugin struct {
 	iface    reflect.Type // the interface it was registered for
 	closeErr error        // closing the retired generation's instances failed; set before closed is closed
 	pool     *pool
+	report   *Report       // the load that produced it; set before it is published, read-only afterwards
 	idle     chan struct{} // closed once the generation is retired and no call is in flight
 	closed   chan struct{} // closed once a retired generation's instances are closed
 	key      string        // "<name>/<descriptor key>"

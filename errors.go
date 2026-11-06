@@ -58,6 +58,10 @@ var (
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not
 	// compile, or its Create failed.
 	ErrLoad = errors.New("plg: plugin failed to load")
+	// ErrBlockingIssue reports a plugin version whose load found an [Issue] of [SeverityError] (or of a severity
+	// plg does not know), such as missing ownership under [WithRequiredOwnership]; the message gives each such
+	// issue's code and message. It is wrapped in [ErrLoad].
+	ErrBlockingIssue = errors.New("plg: load blocked by an error issue")
 	// ErrGoStatement reports a Go plugin whose source contains go statements; the message names the file, line
 	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
 	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance

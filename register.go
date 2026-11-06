@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/internal/httpcap"
@@ -68,9 +70,10 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 type registration struct {
 	contr      *contract
 	cfg        *registerConfig
-	http       *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
-	host       *host           // the WithHost option's; nil without one
-	reloads    *reloader       // set once the registration is published
+	http       *httpcap.Client             // enforces the call's HTTP policy; shared by its plugins
+	host       *host                       // the WithHost option's; nil without one
+	reloads    *reloader                   // set once the registration is published
+	rejections *xsync.Map[string, *Report] // by key: a reload's rejected load, until a later load succeeds
 	name       string
 	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host's stubs
 	goPayload  []byte // the Go init payload, likewise
@@ -113,7 +116,9 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
-	reg := &registration{contr: contr, cfg: cfg, http: client, host: hst, name: name}
+	reg := &registration{
+		contr: contr, cfg: cfg, http: client, host: hst, name: name, rejections: xsync.NewMap[string, *Report](),
+	}
 	reg.dispatcher, reg.goPayload = contr.dispatcher, contr.payload
 
 	var hostMethods []*method
@@ -372,8 +377,11 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 
 	for i := range srcs {
 		key := reg.name + "/" + srcs[i].desc.Key
+		report := newReport(key, &srcs[i], time.Now())
 
-		plug, err := c.load(ctx, reg, key, &srcs[i])
+		plug, err := c.load(ctx, reg, key, &srcs[i], report)
+		c.finishReport(ctx, report, &srcs[i], err)
+
 		if err != nil {
 			c.countLoad(ctx, key, srcs[i].desc.Language, srcs[i].desc.owner(), err)
 			c.closeUnpublished(ctx, plugins)
@@ -384,6 +392,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 
 		plug.value = reg.contr.bind(c, key) //nolint:contextcheck // each adapter call takes the context it is passed
 		plug.reserved = worstCase(reg.cfg, &srcs[i])
+		plug.report = report
 		reserved -= plug.reserved
 		plugins = append(plugins, plug) // the Register's to close from now on
 
@@ -423,15 +432,17 @@ func (c *Container) reserveMemory(name string, cfg *registerConfig, srcs []sourc
 	return reserved, nil
 }
 
-// load opens a listed plugin and launches it. A panic on the host meanwhile (the plugin's fs.FS is the
-// storage's code) fails with a reported [PanicError] in [PhaseLoad].
-func (c *Container) load(ctx context.Context, reg *registration, key string, src *source) (*plugin, error) {
+// load opens a listed plugin and launches it, adding what it finds to report. A panic on the host meanwhile (the
+// plugin's fs.FS is the storage's code) fails with a reported [PanicError] in [PhaseLoad].
+func (c *Container) load(ctx context.Context, reg *registration, key string, src *source, report *Report) (
+	*plugin, error,
+) {
 	var plug *plugin
 
 	err := c.loadStep(ctx, key, src, func() error {
 		files, err := c.open(ctx, key, src)
 		if err == nil {
-			plug, err = c.launch(ctx, reg, key, src, files)
+			plug, err = c.launch(ctx, reg, key, src, files, report)
 		}
 
 		return err
@@ -486,19 +497,27 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 	return files, nil
 }
 
-// launch starts the minimum instances of an opened plugin's pool (running Create in each) and returns the
-// generation they serve. Its adapter and its memory reservation are the caller's to set. A panic once the
-// instances started closes them before going on, nothing else owning them yet (the logger is guarded, so its
+// launch checks an opened plugin, adding its issues to report, and starts the minimum instances of its pool
+// (running Create in each); it returns the generation they serve. An issue that blocks the load fails it before
+// any instance starts. Its adapter, its memory reservation and its report are the caller's to set. A panic once
+// the instances started closes them before going on, nothing else owning them yet (the logger is guarded, so its
 // handler's panic is not one).
-func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files *memfs.FS) (
-	*plugin, error,
-) {
+func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files *memfs.FS,
+	report *Report,
+) (*plugin, error) {
 	start := time.Now()
 	owner := newOwnerTags(src.desc.owner())
 
 	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
 			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
+	}
+
+	checkOwnership(report, src.desc.owner(), reg.cfg.ownership)
+
+	err := report.blocking()
+	if err != nil {
+		return nil, err
 	}
 
 	spec, err := src.loader.prepare(ctx, c, reg, src, files)

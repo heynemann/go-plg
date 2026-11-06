@@ -505,6 +505,29 @@ or handle, and at most `plg.MaxOwnerLabels` (32) labels with non-empty keys. The
 
 An owner change is a descriptor change: the next reload loads the plugin again even when its version is the same.
 
+### Required ownership and load reports
+
+Every load (at Register and on each reload) checks that the plugin names its owning team (`owner.team.name`) and a
+way to reach it (at least one of `owner.contact.oncall`, `owner.contact.channel`, `owner.contact.email`). A plugin
+lacking either still loads, with a `plg.ownership.missing` warning (`plg.CodeOwnershipMissing`) naming the missing
+fields. To make ownership a condition of going live:
+
+```go
+plg.Register[pricing.Rule](ctx, c, "pricing", plg.WithStorage(store), plg.WithRequiredOwnership())
+```
+
+With it the issue is an error that blocks the load like any load failure: Register fails with `plg.ErrLoad`
+wrapping `plg.ErrBlockingIssue`, the message naming the plugin and the missing fields, and a reload keeps serving
+the plugin's last good version (a new plugin stays absent).
+
+Each load attempt produces a `plg.Report{Key, Version, Owner, Issues, Err, At, Duration}`, whose
+`plg.Issue{Severity, Code, Message, Field}` values have a severity of `plg.SeverityError` (blocks the load; so does
+any severity plg does not know), `plg.SeverityWarning` or `plg.SeverityInfo`. plg keeps the report with the version
+it loaded, or, when a reload rejects an update or a new plugin, as that key's rejection until a later reload loads
+the plugin or finds it unchanged. Every issue is logged as a `plg: plugin issue` record at its severity's level
+(Error, Warn, Info) with the plugin's `key`, `version` and `owner` group and the issue's `severity`, `code`,
+`field` and `issue` (its message). The reports become readable through the inspection API (planned).
+
 ## Limits, pools and the memory budget
 
 Per Register:

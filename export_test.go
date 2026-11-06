@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
@@ -148,6 +149,34 @@ func Generation(c *Container, key string) any {
 // Version returns the version of the plugin c serves under key.
 func Version(c *Container, key string) string {
 	return c.catalogue.Load().plugins[key].desc.Version
+}
+
+// ServingReport returns the load report of the version c serves under key; false when it serves none.
+func ServingReport(c *Container, key string) (Report, bool) {
+	gen := c.catalogue.Load().plugins[key]
+	if gen == nil {
+		return Report{}, false
+	}
+
+	return *gen.report, true
+}
+
+// RejectedReport returns the report of the reload that last failed to load the plugin key, unless a later
+// reload loaded it or found it unchanged; false when there is none.
+func RejectedReport(c *Container, key string) (Report, bool) {
+	name, _, _ := strings.Cut(key, "/")
+
+	reg, ok := c.regs.Load(name)
+	if !ok {
+		return Report{}, false
+	}
+
+	report, ok := reg.rejections.Load(key)
+	if !ok {
+		return Report{}, false
+	}
+
+	return *report, true
 }
 
 // LoadedVersion opens the plugin desc of store and returns the version Register gives it when desc has none:

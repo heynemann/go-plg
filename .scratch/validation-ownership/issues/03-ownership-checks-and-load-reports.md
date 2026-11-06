@@ -6,9 +6,9 @@ A plugin without `team.name` and at least one of `contact.oncall`, `contact.chan
 
 **Blocked by:** 02 (Plugin ownership in plugin.yaml, shown in errors, logs and metrics)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests: warning issue without the option, blocked Register and kept-last-good reload with the option, complete ownership passes cleanly
-- [ ] The load report is retrievable for tests (export_test hook) until the inspection API exists, and its issues match the log records
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] Tests: warning issue without the option, blocked Register and kept-last-good reload with the option, complete ownership passes cleanly
+- [x] The load report is retrievable for tests (export_test hook) until the inspection API exists, and its issues match the log records
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

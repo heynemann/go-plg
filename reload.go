@@ -255,6 +255,8 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	for _, p := range problems {
 		key := reg.name + "/" + p.key
 		listed[key] = true
+		reg.rejections.Store(key, &Report{Key: key, At: time.Now(), Err: p.err})
+
 		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], p.err))
 	}
 
@@ -278,29 +280,48 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		}
 	}
 
+	reg.rejections.Range(func(key string, _ *Report) bool {
+		if !listed[key] {
+			reg.rejections.Delete(key)
+		}
+
+		return true
+	})
+
 	return errors.Join(append(errs, c.apply(ctx, reg, current, changes))...)
 }
 
 // reloadOne adds to changes the new generation of the listed plugin src when it is new or changed, and returns
-// the failure (logged) when it cannot be loaded; old is the generation served now, if any.
+// the failure (logged) when it cannot be loaded; old is the generation served now, if any. The load's report goes
+// with the new generation, or replaces the key's rejection when it fails; a load that succeeds, or finds src
+// unchanged, clears the key's rejection.
 func (c *Container) reloadOne(ctx context.Context, reg *registration, key string, src *source, old *plugin,
 	changes *reloadChanges,
 ) error {
-	gen, err := c.update(ctx, reg, key, src, old)
+	gen, report, err := c.update(ctx, reg, key, src, old)
 
 	switch {
 	case err != nil && ctx.Err() != nil: // the container is closing: not the plugin's failure
 		return err
 	case err != nil:
+		c.finishReport(ctx, report, src, err)
+		reg.rejections.Store(key, report)
 		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), err)
 
 		return c.rejected(ctx, key, src.desc.owner(), old, err)
 	case gen != old:
+		c.finishReport(ctx, report, src, nil)
+
+		gen.report = report
+
+		reg.rejections.Delete(key)
+
 		changes.loaded = append(changes.loaded, gen) // the round's to close until it publishes it
 
 		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), nil)
 
 	default: // unchanged
+		reg.rejections.Delete(key)
 	}
 
 	return nil
@@ -322,13 +343,16 @@ func (c *Container) generations(reg *registration) map[string]*plugin {
 
 // update returns the generation to serve under key for the listed plugin src: old, the one served now, when src
 // is the same plugin (same descriptor, version included), otherwise a new generation, within the container's
-// memory budget. Opening and launching run in [Container.loadStep], as Register's loads do.
+// memory budget. Unless src is unchanged, it also returns the report of the load, failed or not, still to be
+// finished. Opening and launching run in [Container.loadStep], as Register's loads do.
 func (c *Container) update(ctx context.Context, reg *registration, key string, src *source, old *plugin) (
-	*plugin, error,
+	*plugin, *Report, error,
 ) {
 	if old != nil && src.desc.Version != "" && sameDescriptor(&src.desc, &old.desc) {
-		return old, nil
+		return old, nil, nil
 	}
+
+	start := time.Now()
 
 	var files *memfs.FS
 
@@ -340,16 +364,18 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 		return openErr
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: storage %s: %w", ErrLoad, src.storeName, err)
+		return nil, newReport(key, src, start), fmt.Errorf("%w: storage %s: %w", ErrLoad, src.storeName, err)
 	}
 
 	if old != nil && sameDescriptor(&src.desc, &old.desc) {
-		return old, nil
+		return old, nil, nil
 	}
+
+	report := newReport(key, src, start)
 
 	worst := worstCase(reg.cfg, src)
 	if !c.budget.reserve(worst) {
-		return nil, fmt.Errorf("%w: it needs up to %d bytes, and %d of the %d-byte budget are reserved (a "+
+		return nil, report, fmt.Errorf("%w: it needs up to %d bytes, and %d of the %d-byte budget are reserved (a "+
 			"replaced version's reservation counts until it is closed)", ErrMemoryBudget, worst,
 			c.budget.reserved.Load(), c.budget.total)
 	}
@@ -359,14 +385,14 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 	err = c.loadStep(ctx, key, src, func() error {
 		var launchErr error
 
-		gen, launchErr = c.launch(ctx, reg, key, src, files)
+		gen, launchErr = c.launch(ctx, reg, key, src, files, report)
 
 		return launchErr
 	})
 	if err != nil {
 		c.budget.unreserve(worst)
 
-		return nil, fmt.Errorf("%w: storage %s: %w", ErrLoad, src.storeName, err)
+		return nil, report, fmt.Errorf("%w: storage %s: %w", ErrLoad, src.storeName, err)
 	}
 
 	gen.reserved = worst
@@ -377,7 +403,7 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 		gen.value = reg.contr.bind(c, key) //nolint:contextcheck // each adapter call takes the context it is passed
 	}
 
-	return gen, nil
+	return gen, report, nil
 }
 
 // rejected logs a plugin, listed as owned by owner, that a reload cannot load and returns the failure: a new

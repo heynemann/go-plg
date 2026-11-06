@@ -99,6 +99,7 @@ type registerConfig struct {
 	http          *HTTPPolicy     // nil: HTTP refused
 	httpRoots     *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
 	goGuest       *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
+	ownership     Severity        // of a missing-ownership issue: a warning, an error with WithRequiredOwnership
 	storages      []Storage
 	languages     []Language    // enabled languages; empty enables every language
 	hosts         []hostSpec    // WithHost options; at most one is valid
@@ -121,7 +122,7 @@ func (c *registerConfig) enabled(lang Language) bool {
 // registerOptions applies a Register call's options and checks them: at least one non-nil storage, valid pool
 // and memory options, whose defaults it fills in, and a poll interval that is not negative.
 func registerOptions(name string, opts []RegisterOption) (*registerConfig, error) {
-	cfg := &registerConfig{}
+	cfg := &registerConfig{ownership: SeverityWarning}
 
 	for _, opt := range opts {
 		opt(cfg)
@@ -227,6 +228,18 @@ func WithStorage(s Storage) RegisterOption {
 func WithPollInterval(interval time.Duration) RegisterOption {
 	return func(c *registerConfig) {
 		c.pollInterval = interval
+	}
+}
+
+// WithRequiredOwnership makes ownership a condition of loading the Register's plugins. Every load checks that a
+// plugin's plugin.yaml names its owning team (owner.team.name) and a way to reach it (one of owner.contact.oncall,
+// owner.contact.channel and owner.contact.email); without the option a plugin lacking either loads with a
+// [CodeOwnershipMissing] warning in its load [Report] and in the log. With it, that issue is an error that blocks
+// the load like any load failure: Register fails with [ErrLoad] wrapping [ErrBlockingIssue], naming the plugin
+// and the missing fields, and a reload keeps serving the plugin's last good version.
+func WithRequiredOwnership() RegisterOption {
+	return func(c *registerConfig) {
+		c.ownership = SeverityError
 	}
 }
 
