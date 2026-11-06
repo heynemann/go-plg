@@ -191,10 +191,10 @@ func checkValidationInput(contr *contract, typ reflect.Type) error {
 
 // validate runs the Validate of a loading plugin version in a throwaway instance started by launch, before the
 // version's pool warms, adding the issues it returns to report; it does nothing when the Register does not
-// validate. It fails when an issue blocks the load, the plugin cannot be validated (see [WithValidation]) or its
-// Create fails.
+// validate. extra is what the instance reserves beyond the reservations (see [Container.startCharged]). It
+// fails when an issue blocks the load, the plugin cannot be validated (see [WithValidation]) or its Create fails.
 func (c *Container) validate(ctx context.Context, reg *registration, src *source, files *memfs.FS,
-	launch *launcher, report *Report,
+	launch *launcher, extra uint64, report *Report,
 ) error {
 	val := reg.validation
 	if val == nil {
@@ -216,28 +216,35 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 		return report.blocking()
 	}
 
-	// The version's reservation covers its pool's maximum and no pool instance runs yet, so it has room for this
-	// one; a budget whose room is gone all the same fails rather than waits.
-	if !c.budget.acquire(src.limit) {
-		return fmt.Errorf("%w: the validation instance needs %d bytes, and %d of the %d-byte budget are in use",
-			ErrMemoryBudget, src.limit, c.budget.used.Load(), c.budget.total)
-	}
-
-	defer c.budget.release(src.limit)
-
-	marked := context.WithValue(ctx, validationKey{}, true)
-
-	inst, err := launch.start(marked)
-	if err != nil {
-		return err // the plugin's Create failed, as it would in its pool
-	}
-
-	issues, discard, err := c.callValidate(marked, val, launch, inst, args)
+	issues, err := c.validateInstance(ctx, val, launch, src.limit, extra, args)
 	if errors.Is(err, errNoValidate) {
 		err = fmt.Errorf("%w: %s", ErrValidation, goValidateMissing(files, src.desc.Entrypoint, val.want))
 	}
 
 	report.Issues = append(report.Issues, issues...)
+
+	if err != nil {
+		return err
+	}
+
+	return report.blocking()
+}
+
+// validateInstance runs Validate with the encoded input args in a throwaway instance started by launch under the
+// [IsValidation] context, charging limit to the budget without waiting and reserving extra bytes beyond the
+// reservations ([ErrMemoryBudget] when there is no room; see [Container.startCharged]), then closes it. It
+// returns the issues and the failure (errNoValidate as is, the caller maps it).
+func (c *Container) validateInstance(ctx context.Context, val *validation, launch *launcher, limit uint64,
+	extra uint64, args []byte,
+) ([]Issue, error) {
+	inst, release, err := c.startCharged(ctx, launch, limit, extra)
+	if err != nil {
+		return nil, err
+	}
+
+	defer release()
+
+	issues, discard, err := c.callValidate(validating(ctx), val, launch, inst, args)
 
 	closeTimeout := c.closeTimeout
 	if discard { // whatever failed may leave Close unable to end
@@ -246,11 +253,51 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 
 	c.closeValidation(ctx, launch, inst, closeTimeout)
 
-	if err != nil {
-		return err
+	return issues, err
+}
+
+// startCharged starts a throwaway instance by launch under the [IsValidation] context, running the plugin's
+// Create, after charging limit to the budget without waiting. extra is what it reserves beyond the
+// reservations: zero within a version's own reservation (at load), the limit for room no plugin reserved
+// (Check, on-demand validation). Without room it fails with [ErrMemoryBudget]; a failing Create fails it as it
+// would in the pool. release gives the charge and the reservation back once the instance is closed.
+//
+//nolint:ireturn // the instance launcher.start returns, the pool's instance interface
+func (c *Container) startCharged(ctx context.Context, launch *launcher, limit, extra uint64) (
+	instance, func(), error,
+) {
+	if !c.budget.reserve(extra) {
+		return nil, nil, fmt.Errorf("%w: the instance needs %d bytes beyond the reservations, and %d of the "+
+			"%d-byte budget are reserved", ErrMemoryBudget, extra, c.budget.reserved.Load(), c.budget.total)
 	}
 
-	return report.blocking()
+	// At load, the version's reservation covers its pool's maximum and no pool instance runs yet, so there is
+	// room for this one; a budget whose room is gone all the same fails rather than waits.
+	if !c.budget.acquire(limit) {
+		c.budget.unreserve(extra)
+
+		return nil, nil, fmt.Errorf("%w: the instance needs %d bytes, and %d of the %d-byte budget are in use",
+			ErrMemoryBudget, limit, c.budget.used.Load(), c.budget.total)
+	}
+
+	release := func() {
+		c.budget.release(limit)
+		c.budget.unreserve(extra)
+	}
+
+	inst, err := launch.start(validating(ctx))
+	if err != nil {
+		release()
+
+		return nil, nil, err // the plugin's Create failed, as it would in its pool
+	}
+
+	return inst, release, nil
+}
+
+// validating returns ctx marked for [IsValidation].
+func validating(ctx context.Context) context.Context {
+	return context.WithValue(ctx, validationKey{}, true)
 }
 
 // validationInput asks the WithValidation function for the input of the plugin info describes and encodes it.

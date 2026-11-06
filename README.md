@@ -585,6 +585,31 @@ The validation instance is charged to the memory budget within the plugin versio
 case still validates them. Lua and TypeScript plugins cannot validate yet: with `WithValidation` their loads fail
 with `plg.ErrValidation`.
 
+### Checking a candidate: `plg.Check`
+
+Before enabling a new plugin or version (say, in an admin endpoint that receives an upload), dry-run it against
+an existing registration:
+
+```go
+report, err := plg.Check(ctx, c, "pricing", &plg.Descriptor{
+	Key: "discounts", Language: plg.LanguageGo, Entrypoint: ".", Owner: &owner,
+}, uploadedFiles) // any fs.FS
+switch {
+case err != nil: // could not check: unknown name (ErrNotFound), ErrClosed, ErrMemoryBudget, ctx ended
+case report.Err != nil: // the candidate would not load; report.Err and report.Issues say why
+default: // it would load; report.Issues holds its warnings and info
+}
+```
+
+`Check` loads the candidate as a reload of that registration would (its contract, Host, HTTP policy, enabled
+languages, memory limits, ownership rules and validation); its files go through the same snapshot limits as a
+storage's, and a descriptor without a `Version` gets their content hash. It runs `Create` and, with
+`WithValidation`, `Validate` in one throwaway instance whose Host calls and HTTP requests see
+`plg.IsValidation(ctx)`, then closes it. Nothing is published: no catalogue entry, no report kept for the
+registration (the candidate's issues are logged like a load's). The instance's memory limit is charged to the
+budget as extra room, beyond every plugin's reservation, never waiting for it: a budget the reservations fill
+fails `Check` at once with `plg.ErrMemoryBudget`.
+
 ## Limits, pools and the memory budget
 
 Per Register:

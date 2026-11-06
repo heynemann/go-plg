@@ -499,6 +499,12 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
+	return snapshotPlugin(ctx, src, opened)
+}
+
+// snapshotPlugin copies a plugin's files into the snapshot it returns, under the snapshot limits (see [Storage]), and
+// resolves its version: a content hash of the snapshot when its descriptor gives none.
+func snapshotPlugin(ctx context.Context, src *source, opened fs.FS) (*memfs.FS, error) {
 	files, err := snapshotFiles(ctx, opened)
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
@@ -525,36 +531,18 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	report *Report,
 ) (*plugin, error) {
 	start := time.Now()
-	owner := newOwnerTags(src.desc.owner())
 
-	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
-			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
-	}
-
-	err := checkLoad(reg, src, report)
+	launch, meters, err := c.prepareLaunch(ctx, reg, key, src, files, report)
 	if err != nil {
 		return nil, err
 	}
 
-	spec, err := src.loader.prepare(ctx, c, reg, src, files)
+	err = c.validate(ctx, reg, src, files, launch, 0, report)
 	if err != nil {
 		return nil, err
 	}
 
-	mod, err := c.module(ctx, src.desc.Language, src.guest, src.limit)
-	if err != nil {
-		return nil, err
-	}
-
-	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
-	launch := c.newLauncher(reg, key, src, owner, spec, mod, meters)
-
-	err = c.validate(ctx, reg, src, files, launch, report)
-	if err != nil {
-		return nil, err
-	}
-
+	owner := launch.owner
 	instances := c.pluginPool(reg, key, src, owner, meters, launch.start, launch.opts.HTTP)
 
 	err = instances.warm(ctx)
@@ -577,6 +565,39 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
 
 	return gen, nil
+}
+
+// prepareLaunch checks an opened plugin, adding its issues to report, and prepares the launcher its instances
+// start from and the meters they are measured in; no instance starts yet. It fails when an issue blocks the
+// load, the plugin's language cannot validate under [WithValidation] or the plugin cannot be prepared.
+func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key string, src *source,
+	files *memfs.FS, report *Report,
+) (*launcher, *pluginMeters, error) {
+	owner := newOwnerTags(src.desc.owner())
+
+	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
+			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
+	}
+
+	err := checkLoad(reg, src, report)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	spec, err := src.loader.prepare(ctx, c, reg, src, files)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	mod, err := c.module(ctx, src.desc.Language, src.guest, src.limit)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
+
+	return c.newLauncher(reg, key, src, owner, spec, mod, meters), meters, nil
 }
 
 // checkLoad checks a plugin about to launch, adding the issues found to report: it fails when one blocks the
