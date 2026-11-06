@@ -74,11 +74,6 @@ func (h *waitingHost) Value(ctx context.Context) (string, error) {
 func TestClosingStopsCallsWaitingOnTheHost(t *testing.T) {
 	t.Parallel()
 
-	// A call the fix does not stop waits until this safety deadline, which then fails the test instead of
-	// hanging it.
-	safety, cancel := context.WithTimeout(t.Context(), time.Minute)
-	defer cancel()
-
 	// The server is released only at cleanup, before it closes, which waits for every request: until then each
 	// request waits until its client gives up.
 	srv := newGateServer(t)
@@ -145,6 +140,12 @@ func TestClosingStopsCallsWaitingOnTheHost(t *testing.T) {
 
 	err := ctr.Close(ended)
 	require.ErrorIs(t, err, context.Canceled, "Close gave up draining the calls")
+
+	// A call the fix does not stop waits until this safety deadline, which then fails the test instead of
+	// hanging it. It starts once Close returns: the loads above take over a minute on a busy CI runner under the
+	// race detector.
+	safety, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
 
 	for name, done := range waiting {
 		select {
