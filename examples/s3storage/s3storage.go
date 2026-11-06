@@ -193,7 +193,7 @@ var (
 // brings the directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of object paths
 // together, before anything is downloaded: Register would refuse the plugin's files, and a listing of S3 has no end
 // of its own.
-func (s *Storage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s *Storage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	dir := desc.Key
 	if dir == "" || dir == "." || dir == ".." || strings.Contains(dir, "/") {
 		return nil, fmt.Errorf("%w %q: %w", plg.ErrInvalidDescriptor, dir, errPluginKey)

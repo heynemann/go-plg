@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 func TestGuestFailuresFailRegisterAndAreRetried(t *testing.T) {
 	store := plg.NewMemoryStorage("mem")
 	files := fstest.MapFS{"plugin.go": {Data: []byte("package p\n")}}
-	require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
+	require.NoError(t, store.Put(&plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
 
 	ctr := plg.New()
 

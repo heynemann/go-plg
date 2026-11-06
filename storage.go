@@ -70,8 +70,9 @@ type Storage interface {
 	// List returns the plugins the storage holds.
 	List(ctx context.Context) ([]Descriptor, error)
 	// Open returns the plugin's source tree; the Descriptor's Entrypoint is a path inside it. Register copies
-	// the tree once, as described above, before using it.
-	Open(ctx context.Context, d Descriptor) (fs.FS, error)
+	// the tree once, as described above, before using it. d is a descriptor List returned, the one Register
+	// keeps: Open must not modify it.
+	Open(ctx context.Context, d *Descriptor) (fs.FS, error)
 }
 
 // The limits of a plugin's files, which Register copies into memory (see [Storage]): a regular file of more than
@@ -145,10 +146,10 @@ func (s *MemoryStorage) Name() string {
 	return s.name
 }
 
-// Put adds the plugin desc, or replaces the plugin with the same key. It copies files as Register does (see
-// [Storage]), failing on a symbolic link out of them or files over the limits (see [MaxPluginSize]), so later
-// changes to files are not seen.
-func (s *MemoryStorage) Put(desc Descriptor, files fs.FS) error {
+// Put adds the plugin desc, or replaces the plugin with the same key; it keeps a copy of *desc. It copies files
+// as Register does (see [Storage]), failing on a symbolic link out of them or files over the limits (see
+// [MaxPluginSize]), so later changes to files are not seen.
+func (s *MemoryStorage) Put(desc *Descriptor, files fs.FS) error {
 	if desc.Key == "" {
 		return fmt.Errorf("%w: memory storage %s: empty key", ErrInvalidDescriptor, s.name)
 	}
@@ -158,7 +159,7 @@ func (s *MemoryStorage) Put(desc Descriptor, files fs.FS) error {
 		return fmt.Errorf("plg: memory storage %s: plugin %s: %w", s.name, desc.Key, err)
 	}
 
-	s.plugins.Store(desc.Key, memoryPlugin{desc: desc, files: copied})
+	s.plugins.Store(desc.Key, memoryPlugin{desc: *desc, files: copied})
 
 	return nil
 }
@@ -181,7 +182,7 @@ func (s *MemoryStorage) List(context.Context) ([]Descriptor, error) {
 }
 
 // Open returns the files of the plugin with d's key, as they were when it was put.
-func (s *MemoryStorage) Open(_ context.Context, d Descriptor) (fs.FS, error) {
+func (s *MemoryStorage) Open(_ context.Context, d *Descriptor) (fs.FS, error) {
 	p, ok := s.plugins.Load(d.Key)
 	if !ok {
 		return nil, fmt.Errorf("plg: memory storage %s: plugin %s: %w", s.name, d.Key, fs.ErrNotExist)

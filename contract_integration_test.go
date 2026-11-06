@@ -107,7 +107,7 @@ func (l contractLanguage) storage(tb testing.TB, name string, cases map[string]s
 
 	for key, dir := range cases {
 		desc := plg.Descriptor{Key: key, Language: l.lang, Entrypoint: l.entry, Version: "v1"}
-		require.NoError(tb, store.Put(desc, l.files(dir)))
+		require.NoError(tb, store.Put(&desc, l.files(dir)))
 	}
 
 	return store

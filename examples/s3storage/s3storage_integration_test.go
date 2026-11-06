@@ -141,7 +141,7 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 		{Key: "loyalty", Language: plg.LanguageLua, Entrypoint: "rule.lua", Version: descs[2].Version},
 	}, descs, "sorted by key")
 
-	files, err := store.Open(t.Context(), descs[2])
+	files, err := store.Open(t.Context(), &descs[2])
 	require.NoError(t, err)
 	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "rule.lua", "tiers.lua"), "Open serves the plugin's files")
 
@@ -154,7 +154,7 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 		assert.Equal(t, string(want), string(got), name)
 	}
 
-	bulk, err := store.Open(t.Context(), descs[0])
+	bulk, err := store.Open(t.Context(), &descs[0])
 	require.NoError(t, err)
 
 	_, err = fs.Stat(bulk, "docs")
@@ -365,33 +365,33 @@ func TestStorageOpenFailures(t *testing.T) {
 
 	store := s3storage.New(client, bucket, s3storage.WithMaxPluginSize(100))
 
-	files, err := store.Open(t.Context(), plg.Descriptor{Key: "big"})
+	files, err := store.Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.NoError(t, err, "exactly at the limit")
 	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "main.lua"))
 
 	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(99)).
-		Open(t.Context(), plg.Descriptor{Key: "big"})
+		Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.ErrorContains(t, err, "too large", "one byte over the limit")
 
 	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(int64(101-len(manifest)))).
-		Open(t.Context(), plg.Descriptor{Key: "big"})
+		Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.ErrorContains(t, err, "too large", "main.lua fits, plugin.yaml no longer does")
 
-	_, err = s3storage.New(&oddKeysClient{Client: client}, bucket).Open(t.Context(), plg.Descriptor{Key: "odd"})
+	_, err = s3storage.New(&oddKeysClient{Client: client}, bucket).Open(t.Context(), &plg.Descriptor{Key: "odd"})
 	require.ErrorContains(t, err, `"a//main.lua"`, "an object key that is not a path")
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "none"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "none"})
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
 	for _, key := range []string{"", ".", "..", "big/main.lua"} {
-		_, err = store.Open(t.Context(), plg.Descriptor{Key: key})
+		_, err = store.Open(t.Context(), &plg.Descriptor{Key: key})
 		require.ErrorIs(t, err, plg.ErrInvalidDescriptor, "key %q", key)
 	}
 
 	_, err = s3storage.New(client, "no-such-bucket").List(t.Context())
 	require.ErrorContains(t, err, "s3://no-such-bucket/")
 
-	_, err = s3storage.New(client, "no-such-bucket").Open(t.Context(), plg.Descriptor{Key: "big"})
+	_, err = s3storage.New(client, "no-such-bucket").Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.ErrorContains(t, err, "s3://no-such-bucket/big/")
 }
 
@@ -428,7 +428,7 @@ func TestStorageReadsEveryPageOfAListing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, descs, 3)
 
-	files, err := store.Open(t.Context(), plg.Descriptor{Key: "coupon"})
+	files, err := store.Open(t.Context(), &plg.Descriptor{Key: "coupon"})
 	require.NoError(t, err)
 	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "rule.ts", "coupons.ts"))
 }
@@ -533,7 +533,7 @@ func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 					return err //nolint:wrapcheck // the storage's own error, which the test checks
 				},
 				"Open": func(store *s3storage.Storage) error {
-					_, err := store.Open(t.Context(), plg.Descriptor{Key: "many"})
+					_, err := store.Open(t.Context(), &plg.Descriptor{Key: "many"})
 
 					return err //nolint:wrapcheck // the storage's own error, which the test checks
 				},
@@ -565,7 +565,7 @@ func TestStorageDownloadFailures(t *testing.T) {
 	require.ErrorIs(t, err, errInjected)
 	require.ErrorContains(t, err, "plugin directory p")
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.ErrorIs(t, err, errInjected)
 }
 

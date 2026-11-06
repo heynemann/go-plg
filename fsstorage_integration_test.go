@@ -118,7 +118,7 @@ func TestRegisterHashesVersionlessPlugins(t *testing.T) {
 	// The same files in a memory storage, without a version: Register hashes them as it hashes the FS
 	// storage's.
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(t, store.Put(plg.Descriptor{Key: "multifile", Language: plg.LanguageGo, Entrypoint: "."},
+	require.NoError(t, store.Put(&plg.Descriptor{Key: "multifile", Language: plg.LanguageGo, Entrypoint: "."},
 		os.DirFS(filepath.Join(diskDir, "multifile"))))
 
 	var logs bytes.Buffer

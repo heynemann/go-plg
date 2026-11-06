@@ -84,7 +84,7 @@ func (s panickingStorage) List(context.Context) ([]plg.Descriptor, error) {
 	return nil, nil
 }
 
-func (panickingStorage) Open(context.Context, plg.Descriptor) (fs.FS, error) {
+func (panickingStorage) Open(context.Context, *plg.Descriptor) (fs.FS, error) {
 	return nil, errStorage
 }
 

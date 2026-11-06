@@ -129,7 +129,7 @@ func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 var errPluginKey = errors.New("a plugin key is a directory name")
 
 // Open returns a copy of the files of the plugin directory named by desc's key (see [FSStorage]).
-func (s *FSStorage) Open(ctx context.Context, desc Descriptor) (fs.FS, error) {
+func (s *FSStorage) Open(ctx context.Context, desc *Descriptor) (fs.FS, error) {
 	return s.copyPlugin(ctx, desc, openHooks{})
 }
 
@@ -174,7 +174,7 @@ func (s *FSStorage) listCalling(ctx context.Context, beforeOpen func(name string
 }
 
 // copyPlugin is Open; hooks are called as snapshotDir describes.
-func (s *FSStorage) copyPlugin(ctx context.Context, desc Descriptor, hooks openHooks) (fs.FS, error) {
+func (s *FSStorage) copyPlugin(ctx context.Context, desc *Descriptor, hooks openHooks) (fs.FS, error) {
 	key := desc.Key
 	if key == "." || strings.Contains(key, "/") || !fs.ValidPath(key) {
 		return nil, fmt.Errorf("%w %q: %w", ErrInvalidDescriptor, key, errPluginKey)

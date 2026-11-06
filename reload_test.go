@@ -82,12 +82,12 @@ func TestReloadSkipsNewPluginsItCannotLoad(t *testing.T) {
 		first:  {Key: "cobol", Language: "cobol", Entrypoint: "main.cbl"},
 		second: {Key: "noentry", Language: plg.LanguageGo},
 	} {
-		require.NoError(t, store.Put(desc, fstest.MapFS{"main.cbl": {}}))
+		require.NoError(t, store.Put(&desc, fstest.MapFS{"main.cbl": {}}))
 	}
 
 	for _, store := range []*plg.MemoryStorage{first, second} {
 		desc := plg.Descriptor{Key: "dup", Language: plg.LanguageGo, Entrypoint: "plugin.go"}
-		require.NoError(t, store.Put(desc, fstest.MapFS{"plugin.go": {}}))
+		require.NoError(t, store.Put(&desc, fstest.MapFS{"plugin.go": {}}))
 	}
 
 	err := plg.ReloadInterface(t.Context(), ctr, "ping")
@@ -279,7 +279,7 @@ func TestCountingSkippedPluginsContainsAPanickingMeterProvider(t *testing.T) {
 
 	store := plg.NewMemoryStorage("scripts")
 	lua := plg.Descriptor{Key: "l", Language: plg.LanguageLua, Entrypoint: "main.lua"}
-	require.NoError(t, store.Put(lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
+	require.NoError(t, store.Put(&lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
 
 	var err error
 

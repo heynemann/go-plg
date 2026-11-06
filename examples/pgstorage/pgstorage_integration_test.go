@@ -233,7 +233,7 @@ func testManifestMigration(t *testing.T, pool *pgxpool.Pool) {
 	require.NoError(t, store.SetEnabled(t.Context(), "off", true))
 	assert.Len(t, list(t, store), 4, "a disabled plugin got its plugin.yaml too")
 
-	files, err := store.Open(t.Context(), plg.Descriptor{Key: "plain"})
+	files, err := store.Open(t.Context(), &plg.Descriptor{Key: "plain"})
 	require.NoError(t, err)
 	require.NoError(t, fstest.TestFS(files, "main.lua", "plugin.yaml"), "the plugin's files are kept")
 }
@@ -411,7 +411,7 @@ func TestStorageOpen(t *testing.T) {
 	disabled.Enabled = false
 	require.NoError(t, store.Put(t.Context(), disabled, want))
 
-	got, err := store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	got, err := store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.NoError(t, err, "a disabled plugin still opens: a version being served may be disabled meanwhile")
 	require.NoError(t, fstest.TestFS(got, "main.lua", "lib/x.lua", "README"))
 
@@ -421,13 +421,13 @@ func TestStorageOpen(t *testing.T) {
 		assert.Equal(t, file.Data, data, name)
 	}
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "none"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "none"})
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
 	_, err = database.Exec(t.Context(), `INSERT INTO plg_plugin_files VALUES ($1, 'p', 'a//b.lua', '')`, registration)
 	require.NoError(t, err)
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.ErrorContains(t, err, `"a//b.lua"`, "a path an fs.FS cannot hold")
 }
 
@@ -495,7 +495,7 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 	require.Len(t, descs, 1)
 	assert.Equal(t, uint64(4<<30), descs[0].MemoryLimit, "a failed Put changes nothing")
 
-	got, err := store.Open(t.Context(), descs[0])
+	got, err := store.Open(t.Context(), &descs[0])
 	require.NoError(t, err)
 
 	data, err := fs.ReadFile(got, "main.lua")
@@ -508,7 +508,7 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 	require.NoError(t, store.Delete(t.Context(), "p"))
 	assert.Empty(t, list(t, store))
 
-	_, err = store.Open(t.Context(), descs[0])
+	_, err = store.Open(t.Context(), &descs[0])
 	require.ErrorIs(t, err, fs.ErrNotExist, "its files went with it")
 
 	// Manifests written with plain SQL are checked by List: the plugin is named, and an oversized manifest's
@@ -640,12 +640,12 @@ func TestStorageOpenRefusesOversizedPluginsBeforeReadingThem(t *testing.T) {
 	for _, key := range []string{"file", "total", "entries", "paths"} {
 		received.Store(0)
 
-		_, err := store.Open(t.Context(), plg.Descriptor{Key: key})
+		_, err := store.Open(t.Context(), &plg.Descriptor{Key: key})
 		require.ErrorIs(t, err, plg.ErrPluginTooLarge, key)
 		assert.Less(t, received.Load(), int64(1<<10), "%s: no content was transferred", key)
 	}
 
-	got, err := store.Open(t.Context(), plg.Descriptor{Key: "fits"})
+	got, err := store.Open(t.Context(), &plg.Descriptor{Key: "fits"})
 	require.NoError(t, err, "the limits themselves are allowed")
 
 	data, err := fs.ReadFile(got, "f0")
@@ -724,7 +724,7 @@ func TestStorageReportsDatabaseFailures(t *testing.T) {
 	_, err := store.List(t.Context())
 	require.ErrorContains(t, err, "pgstorage: listing r", "no tables yet")
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.ErrorContains(t, err, "pgstorage: opening r/p")
 
 	require.ErrorContains(t, store.SetEnabled(t.Context(), "p", true), "pgstorage: r/p")

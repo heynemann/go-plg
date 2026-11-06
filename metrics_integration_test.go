@@ -164,7 +164,7 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	// "m": two Go plugins with one instance each, and a Lua plugin the Register leaves out.
 	store := goStorage(t, "m", map[string]string{"ref": "fooer", "crash": "fooer"})
 	lua := plg.Descriptor{Key: "lua", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "v1"}
-	require.NoError(t, store.Put(lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
+	require.NoError(t, store.Put(&lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
 	require.NoError(t, plg.Register[testcontract.Fooer](ctx, ctr, "m", plg.WithStorage(store), plg.WithPool(1, 1),
 		plg.WithGolangPlugins()))
 
@@ -228,7 +228,7 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 
 	// Reloads: m/ref's update fails to load and keeps its last good version; the Lua plugin is skipped again.
 	update := plg.Descriptor{Key: "ref", Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v2"}
-	require.NoError(t, store.Put(update, pluginFiles("createfails")))
+	require.NoError(t, store.Put(&update, pluginFiles("createfails")))
 	require.Error(t, plg.ReloadInterface(ctx, ctr, "m"))
 
 	got := reader.collect(t)

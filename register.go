@@ -463,7 +463,7 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 	err := c.storageCall(ctx, key, "Open", func() error {
 		var openErr error
 
-		opened, openErr = src.storage.Open(ctx, src.desc)
+		opened, openErr = src.storage.Open(ctx, &src.desc)
 
 		return openErr //nolint:wrapcheck // wrapped below
 	})

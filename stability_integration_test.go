@@ -280,7 +280,7 @@ func printingStorage(t *testing.T, statements map[string]string) *plg.MemoryStor
 	for key, statement := range statements {
 		desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v1"}
 		source := strings.ReplaceAll(printingPlugin, "{{PRINT}}", statement)
-		require.NoError(t, store.Put(desc, fstest.MapFS{"plugin.go": {Data: []byte(source)}}))
+		require.NoError(t, store.Put(&desc, fstest.MapFS{"plugin.go": {Data: []byte(source)}}))
 	}
 
 	return store
@@ -525,7 +525,7 @@ type openPanics struct {
 	files fs.FS // returned by Open; nil makes Open panic
 }
 
-func (s openPanics) Open(context.Context, plg.Descriptor) (fs.FS, error) {
+func (s openPanics) Open(context.Context, *plg.Descriptor) (fs.FS, error) {
 	if s.files == nil {
 		panic("open bug")
 	}

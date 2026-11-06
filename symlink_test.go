@@ -92,7 +92,7 @@ func TestPluginFilesNeverFollowSymlinks(t *testing.T) {
 			store := plg.NewMemoryStorage("mem")
 			desc := plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "."}
 
-			err := store.Put(desc, tc.files)
+			err := store.Put(&desc, tc.files)
 			if tc.want != "" {
 				require.ErrorContains(t, err, "plg: memory storage mem: plugin k: copying the plugin's files: "+tc.want)
 
@@ -101,7 +101,7 @@ func TestPluginFilesNeverFollowSymlinks(t *testing.T) {
 
 			require.NoError(t, err)
 
-			files, err := store.Open(t.Context(), desc)
+			files, err := store.Open(t.Context(), &desc)
 			require.NoError(t, err)
 			assert.Equal(t, []string{"a.go"}, fileNames(t, files), "links inside the files are skipped")
 		})
@@ -132,17 +132,17 @@ func TestFSStorageReadsThroughARoot(t *testing.T) {
 
 	store := plg.NewFSStorage(dir)
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.ErrorContains(t, err, "plugin directory p: copying the plugin's files: out: symbolic link out of the "+
 		"plugin's files")
 
-	_, err = store.Open(t.Context(), plg.Descriptor{Key: "q"})
+	_, err = store.Open(t.Context(), &plg.Descriptor{Key: "q"})
 	require.ErrorContains(t, err, "plugin directory q: a plugin key is a directory name",
 		"a link to a plugin directory is not one, as List does not list it")
 
 	require.NoError(t, os.Remove(filepath.Join(dir, "p", "out")))
 
-	files, err := store.Open(t.Context(), plg.Descriptor{Key: "p"})
+	files, err := store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a.go"}, fileNames(t, files), "the link inside the directory is skipped")
 }
@@ -248,7 +248,7 @@ func (tc *swapCase) run(t *testing.T) {
 		swapping = plg.WalkSwapping
 	}
 
-	files, err := swapping(t.Context(), plg.NewFSStorage(root), plg.Descriptor{Key: "p"}, func(name string) {
+	files, err := swapping(t.Context(), plg.NewFSStorage(root), &plg.Descriptor{Key: "p"}, func(name string) {
 		if !swapped && (tc.entry == "." || name == tc.entry || strings.HasPrefix(name, tc.entry+"/")) {
 			swapped = true
 

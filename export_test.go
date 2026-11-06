@@ -152,7 +152,7 @@ func Version(c *Container, key string) string {
 
 // LoadedVersion opens the plugin desc of store and returns the version Register gives it when desc has none:
 // the content hash of the snapshot it loads.
-func LoadedVersion(ctx context.Context, store Storage, desc Descriptor) (string, error) {
+func LoadedVersion(ctx context.Context, store Storage, desc *Descriptor) (string, error) {
 	files, err := store.Open(ctx, desc)
 	if err != nil {
 		return "", fmt.Errorf("opening: %w", err)
@@ -168,13 +168,13 @@ func LoadedVersion(ctx context.Context, store Storage, desc Descriptor) (string,
 
 // OpenSwapping opens the plugin directory desc names as s.Open does, calling beforeOpen with the
 // plugin-relative name of each directory and file right before the copy opens it, once the walk listed them.
-func OpenSwapping(ctx context.Context, s *FSStorage, desc Descriptor, beforeOpen func(name string)) (fs.FS, error) {
+func OpenSwapping(ctx context.Context, s *FSStorage, desc *Descriptor, beforeOpen func(name string)) (fs.FS, error) {
 	return s.copyPlugin(ctx, desc, openHooks{beforeCopy: beforeOpen})
 }
 
 // WalkSwapping opens the plugin directory desc names as s.Open does, calling beforeOpen with the plugin-relative
 // name of each directory right before the walk of its files opens it, once its parent's walk listed it.
-func WalkSwapping(ctx context.Context, s *FSStorage, desc Descriptor, beforeOpen func(name string)) (fs.FS, error) {
+func WalkSwapping(ctx context.Context, s *FSStorage, desc *Descriptor, beforeOpen func(name string)) (fs.FS, error) {
 	return s.copyPlugin(ctx, desc, openHooks{beforeWalk: beforeOpen})
 }
 

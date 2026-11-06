@@ -168,7 +168,7 @@ func TestDescriptorMemoryLimitOnlyLowersTheRegisterLimit(t *testing.T) {
 			Version:     "v1",
 			MemoryLimit: tc.asked,
 		}
-		require.NoError(t, store.Put(desc, pluginFiles("hog")))
+		require.NoError(t, store.Put(&desc, pluginFiles("hog")))
 
 		opts := slices.Concat(tc.opts, []plg.RegisterOption{plg.WithPool(1, 1), plg.WithStorage(store)})
 		require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, tc.name, opts...))
@@ -287,7 +287,7 @@ type openClosingStorage struct {
 	ctr *plg.Container
 }
 
-func (s openClosingStorage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s openClosingStorage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	err := s.ctr.Close(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("closing: %w", err)

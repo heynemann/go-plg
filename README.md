@@ -404,9 +404,9 @@ other languages are then skipped (logged and counted), not errors. Without any o
 
 ```go
 type Storage interface {
-	Name() string                                          // for logs and errors
-	List(ctx context.Context) ([]plg.Descriptor, error)    // the plugins, each with a Key, Language, Entrypoint, Version, MemoryLimit
-	Open(ctx context.Context, d plg.Descriptor) (fs.FS, error) // a plugin's files
+	Name() string                                           // for logs and errors
+	List(ctx context.Context) ([]plg.Descriptor, error)     // the plugins, each with a Key, Language, Entrypoint, Version, MemoryLimit, Owner
+	Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error) // a plugin's files; d is one List returned, not to be modified
 }
 ```
 

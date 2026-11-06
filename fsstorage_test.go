@@ -75,7 +75,7 @@ func TestFSStorageListsPluginDirectories(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, embedded, "an embed.FS of the same tree lists the same plugins")
 
-	files, err := store.Open(t.Context(), descs[2])
+	files, err := store.Open(t.Context(), &descs[2])
 	require.NoError(t, err)
 
 	src, err := fs.ReadFile(files, "plugin.go")
@@ -395,7 +395,7 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 	_, err := missing.List(t.Context())
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
-	_, err = missing.Open(t.Context(), plg.Descriptor{Key: "p"})
+	_, err = missing.Open(t.Context(), &plg.Descriptor{Key: "p"})
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -431,7 +431,7 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, descs, 1)
 
-			_, err = store.Open(t.Context(), descs[0])
+			_, err = store.Open(t.Context(), &descs[0])
 			require.ErrorIs(t, err, errStorage)
 			require.ErrorContains(t, err, "plugin directory p")
 		})
@@ -608,7 +608,7 @@ func TestFSStorageOpen(t *testing.T) {
 		t.Run(tc.key, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := store.Open(t.Context(), plg.Descriptor{Key: tc.key})
+			_, err := store.Open(t.Context(), &plg.Descriptor{Key: tc.key})
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
@@ -616,7 +616,7 @@ func TestFSStorageOpen(t *testing.T) {
 	t.Run("a file", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := store.Open(t.Context(), plg.Descriptor{Key: "README.md"})
+		_, err := store.Open(t.Context(), &plg.Descriptor{Key: "README.md"})
 		require.ErrorContains(t, err, "plugin directory README.md: a plugin key is a directory name")
 	})
 
@@ -628,7 +628,7 @@ func TestFSStorageOpen(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "p"), 0o600))
 
-		_, err := plg.NewFSStorage(dir).Open(t.Context(), plg.Descriptor{Key: "p"})
+		_, err := plg.NewFSStorage(dir).Open(t.Context(), &plg.Descriptor{Key: "p"})
 		require.ErrorContains(t, err, "plugin directory p: a plugin key is a directory name")
 	})
 
@@ -637,11 +637,11 @@ func TestFSStorageOpen(t *testing.T) {
 
 		tree := plg.NewFSStorageFromFS("tree", fstest.MapFS{"f": {}, "l": link("p"), "p/a.go": {}})
 
-		_, err := tree.Open(t.Context(), plg.Descriptor{Key: "missing"})
+		_, err := tree.Open(t.Context(), &plg.Descriptor{Key: "missing"})
 		require.ErrorIs(t, err, fs.ErrNotExist)
 
 		for _, key := range []string{"f", "l"} {
-			_, err = tree.Open(t.Context(), plg.Descriptor{Key: key})
+			_, err = tree.Open(t.Context(), &plg.Descriptor{Key: key})
 			require.ErrorContains(t, err, "plugin directory "+key+": a plugin key is a directory name")
 		}
 	})
@@ -658,7 +658,7 @@ func versionOf(t *testing.T, files fs.FS) string {
 	require.Len(t, descs, 1)
 	require.Empty(t, descs[0].Version)
 
-	version, err := plg.LoadedVersion(t.Context(), store, descs[0])
+	version, err := plg.LoadedVersion(t.Context(), store, &descs[0])
 	require.NoError(t, err)
 	require.Regexp(t, isContentHash, version)
 

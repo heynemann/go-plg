@@ -389,7 +389,7 @@ func TestEntrypoints(t *testing.T) {
 
 			store := plg.NewMemoryStorage("mem")
 			desc := plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: tc.entrypoint}
-			require.NoError(t, store.Put(desc, files))
+			require.NoError(t, store.Put(&desc, files))
 
 			name := "entry" + strconv.Itoa(i)
 

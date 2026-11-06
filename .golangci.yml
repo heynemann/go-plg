@@ -119,10 +119,6 @@ linters:
       enable-all: true
       disabled-checks:
         - whyNoLint # nolintlint already requires explanations
-      settings:
-        hugeParam:
-          # plg.Descriptor is 80 bytes and part of the Storage interface by value (Open, a storage's List).
-          sizeThreshold: 88
     revive:
       enable-all-rules: true
       rules:

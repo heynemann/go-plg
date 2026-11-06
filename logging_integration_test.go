@@ -73,7 +73,7 @@ func putLua(t *testing.T, store *plg.MemoryStorage, key, version, entry, source 
 	}
 
 	desc := plg.Descriptor{Key: key, Language: plg.LanguageLua, Entrypoint: entry, Version: version}
-	require.NoError(t, store.Put(desc, files))
+	require.NoError(t, store.Put(&desc, files))
 }
 
 // handlerPanics returns the PanicErrors of the logger's handler among panics, by key, failing on any other.
@@ -173,7 +173,7 @@ type gateOneOpen struct {
 	gated   string
 }
 
-func (s *gateOneOpen) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s *gateOneOpen) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	if desc.Key == s.gated {
 		close(s.entered)
 

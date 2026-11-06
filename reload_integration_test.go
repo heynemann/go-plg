@@ -125,7 +125,7 @@ func putVersioned(tb testing.TB, store *plg.MemoryStorage, key, version string) 
 	tb.Helper()
 
 	desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: version}
-	require.NoError(tb, store.Put(desc, fstest.MapFS{"plugin.go": {Data: []byte(versioned(version, ""))}}))
+	require.NoError(tb, store.Put(&desc, fstest.MapFS{"plugin.go": {Data: []byte(versioned(version, ""))}}))
 }
 
 // eventServer is the test API of the versioned plugin. It records "wait-start:<version>", "wait-end:<version>"
@@ -734,7 +734,7 @@ func (s *gatedStorage) List(ctx context.Context) ([]plg.Descriptor, error) {
 	return s.MemoryStorage.List(ctx) //nolint:wrapcheck // the memory storage's own error, unchanged
 }
 
-func (s *gatedStorage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s *gatedStorage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	if s.gateOpen.Load() {
 		s.entered <- "open"
 

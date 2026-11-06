@@ -197,7 +197,7 @@ var errFilePath = errors.New("file path is not a valid path inside the plugin")
 // none, if a path in the table is not a valid fs.FS path, and with [plg.ErrPluginTooLarge] when the files are
 // over plg's limits ([plg.MaxPluginSize]): their sizes are checked in the database, in the snapshot the files
 // are then read from, so an oversized plugin's content never leaves it.
-func (s *Storage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s *Storage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	var files fstest.MapFS
 
 	err := pgx.BeginFunc(ctx, s.db, func(txn pgx.Tx) error {

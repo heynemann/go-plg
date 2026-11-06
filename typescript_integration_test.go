@@ -40,7 +40,7 @@ func tsSource(tb testing.TB, files fstest.MapFS) *plg.MemoryStorage {
 	tb.Helper()
 
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(tb, store.Put(plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
+	require.NoError(tb, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
 		files))
 
 	return store
@@ -460,7 +460,7 @@ func TestTypeScriptPluginsDefaultTo64MiB(t *testing.T) {
 
 	ctr := loggedContainer(t, &logs)
 	store := tsSource(t, tsPlugin(fooerMembers("")))
-	require.NoError(t, store.Put(plg.Descriptor{Key: "go", Language: plg.LanguageGo, Entrypoint: "plugin.go"},
+	require.NoError(t, store.Put(&plg.Descriptor{Key: "go", Language: plg.LanguageGo, Entrypoint: "plugin.go"},
 		pluginFiles("fooer")))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "mixed", plg.WithStorage(store),
 		plg.WithPool(1, 1)))

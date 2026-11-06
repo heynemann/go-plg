@@ -131,7 +131,7 @@ func (s *failingStorage) List(ctx context.Context) ([]plg.Descriptor, error) {
 	return descs, nil
 }
 
-func (s *failingStorage) Open(ctx context.Context, desc plg.Descriptor) (fs.FS, error) {
+func (s *failingStorage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	if s.failOpen {
 		return nil, errStorage
 	}
@@ -154,7 +154,7 @@ type listStorage struct {
 func (s listStorage) Name() string                                   { return s.name }
 func (s listStorage) List(context.Context) ([]plg.Descriptor, error) { return s.descs, nil }
 
-func (s listStorage) Open(context.Context, plg.Descriptor) (fs.FS, error) {
+func (s listStorage) Open(context.Context, *plg.Descriptor) (fs.FS, error) {
 	if s.files == nil {
 		return nil, errStorage
 	}
@@ -178,7 +178,7 @@ func (s closingStorage) List(ctx context.Context) ([]plg.Descriptor, error) {
 	return nil, nil
 }
 
-func (closingStorage) Open(context.Context, plg.Descriptor) (fs.FS, error) {
+func (closingStorage) Open(context.Context, *plg.Descriptor) (fs.FS, error) {
 	return nil, errStorage
 }
 
@@ -226,7 +226,7 @@ func goPluginStorage(t *testing.T) *plg.MemoryStorage {
 
 	store := plg.NewMemoryStorage("go")
 	files := fstest.MapFS{"plugin.go": {Data: []byte("package p\n")}}
-	require.NoError(t, store.Put(plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
+	require.NoError(t, store.Put(&plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
 
 	return store
 }
@@ -935,8 +935,8 @@ func TestMemoryStorage(t *testing.T) {
 	second := plg.Descriptor{Key: "b", Language: plg.LanguageGo, Entrypoint: "p/plugin.go", Version: "1"}
 	first := plg.Descriptor{Key: "a", Language: plg.LanguageGo, Entrypoint: "p", Version: "1"}
 
-	require.NoError(t, store.Put(second, files))
-	require.NoError(t, store.Put(first, files))
+	require.NoError(t, store.Put(&second, files))
+	require.NoError(t, store.Put(&first, files))
 
 	files["p/plugin.go"] = &fstest.MapFile{Data: []byte("v2")}
 
@@ -944,7 +944,7 @@ func TestMemoryStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []plg.Descriptor{first, second}, descs, "sorted by key")
 
-	opened, err := store.Open(ctx, first)
+	opened, err := store.Open(ctx, &first)
 	require.NoError(t, err)
 
 	data, err := fs.ReadFile(opened, "p/plugin.go")
@@ -952,19 +952,19 @@ func TestMemoryStorage(t *testing.T) {
 	assert.Equal(t, "v1", string(data), "Put copied the files")
 
 	second.Version = "2"
-	require.NoError(t, store.Put(second, files))
+	require.NoError(t, store.Put(&second, files))
 	store.Delete("a")
 
 	descs, err = store.List(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, []plg.Descriptor{second}, descs, "Put replaced b, Delete removed a")
 
-	_, err = store.Open(ctx, first)
+	_, err = store.Open(ctx, &first)
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
-	err = store.Put(plg.Descriptor{Language: plg.LanguageGo}, files)
+	err = store.Put(&plg.Descriptor{Language: plg.LanguageGo}, files)
 	require.ErrorIs(t, err, plg.ErrInvalidDescriptor)
 
-	err = store.Put(plg.Descriptor{Key: "broken"}, brokenFS{})
+	err = store.Put(&plg.Descriptor{Key: "broken"}, brokenFS{})
 	require.ErrorIs(t, err, errStorage)
 }

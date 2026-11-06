@@ -221,7 +221,7 @@ func TestCreateMustMatchWithHost(t *testing.T) {
 	wrongParam := strings.Replace(hostedSource(t), "Create(host testcontract.Host)",
 		"Create(host testcontract.Hosted)", 1)
 	store := plg.NewMemoryStorage("wrongparam")
-	require.NoError(t, store.Put(plg.Descriptor{Key: "ref", Language: plg.LanguageGo, Entrypoint: "."},
+	require.NoError(t, store.Put(&plg.Descriptor{Key: "ref", Language: plg.LanguageGo, Entrypoint: "."},
 		fstest.MapFS{"plugin.go": {Data: []byte(wrongParam)}}))
 
 	err = plg.Register[testcontract.Hosted](t.Context(), ctr, "wrongparam", plg.WithStorage(store), impl)

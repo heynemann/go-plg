@@ -116,7 +116,7 @@ func TestPluginFilesOverTheLimitsAreNeverRead(t *testing.T) {
 			var err error
 
 			allocated := allocatedBy(func() {
-				_, err = store.Open(t.Context(), plg.Descriptor{Key: "p"})
+				_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 			})
 			t.Logf("allocated %d bytes: %v", allocated, err)
 			require.ErrorIs(t, err, plg.ErrPluginTooLarge)
@@ -129,7 +129,7 @@ func TestPluginFilesOverTheLimitsAreNeverRead(t *testing.T) {
 	t.Run("files at the limits", func(t *testing.T) {
 		sizes := map[string]int64{"d/1.bin": most, "d/2.bin": most, "d/3.bin": most, "d/4.bin": most}
 
-		files, err := plg.NewFSStorage(sparseRoot(t, sizes)).Open(t.Context(), plg.Descriptor{Key: "p"})
+		files, err := plg.NewFSStorage(sparseRoot(t, sizes)).Open(t.Context(), &plg.Descriptor{Key: "p"})
 		require.NoError(t, err)
 
 		for name, size := range sizes {
@@ -170,7 +170,7 @@ func TestGrowingPluginFilesStopAtTheLimits(t *testing.T) {
 				grownTo: 2 * most,
 			}
 
-			err := plg.NewMemoryStorage("mem").Put(plg.Descriptor{Key: "p"}, files)
+			err := plg.NewMemoryStorage("mem").Put(&plg.Descriptor{Key: "p"}, files)
 			require.ErrorIs(t, err, plg.ErrPluginTooLarge)
 			require.ErrorContains(t, err, "plugin p")
 			require.ErrorContains(t, err, "a.txt")
@@ -193,11 +193,11 @@ func TestCancellingStopsTheCopyOfPluginFiles(t *testing.T) {
 	ended, end := context.WithCancel(t.Context())
 	end()
 
-	_, err := store.Open(ended, plg.Descriptor{Key: "p"})
+	_, err := store.Open(ended, &plg.Descriptor{Key: "p"})
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, files.reads, "an ended context reads nothing")
 
-	_, err = store.Open(ctx, plg.Descriptor{Key: "p"})
+	_, err = store.Open(ctx, &plg.Descriptor{Key: "p"})
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorContains(t, err, "plugin directory p")
 	assert.Equal(t, 3, files.reads, "no read after the cancellation")
@@ -299,7 +299,7 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 			)
 
 			copied := allocatedBy(func() {
-				files, err = atLimit.Open(t.Context(), plg.Descriptor{Key: "p"})
+				files, err = atLimit.Open(t.Context(), &plg.Descriptor{Key: "p"})
 			})
 
 			require.NoError(t, err, "at the limits")
@@ -309,7 +309,7 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 			assert.Len(t, top, tc.copied)
 
 			stopped := allocatedBy(func() {
-				_, err = over.Open(t.Context(), plg.Descriptor{Key: "p"})
+				_, err = over.Open(t.Context(), &plg.Descriptor{Key: "p"})
 			})
 			t.Logf(
 				"copying the plugin at the limits allocated %d bytes, failing over them %d: %v",
@@ -474,7 +474,7 @@ func TestPluginListingsStopAtTheLimits(t *testing.T) {
 				files = wholeFS{tc.files}
 			}
 
-			err := plg.NewMemoryStorage("mem").Put(plg.Descriptor{Key: "p"}, files)
+			err := plg.NewMemoryStorage("mem").Put(&plg.Descriptor{Key: "p"}, files)
 			require.ErrorIs(t, err, plg.ErrPluginTooLarge)
 			require.ErrorContains(t, err, "plugin p")
 
