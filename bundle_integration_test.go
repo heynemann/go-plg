@@ -52,9 +52,15 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 	t.Parallel()
 
 	ctr := newContainer(t)
-	plg.SetBundleLimits(ctr, 2*time.Second, plg.BundleMemoryLimit)
 
+	// The plugins meant to load do so under the default limits: a small plugin bundles in about 40 ms, but in more
+	// than 2 s on a busy CI runner under the race detector. Only the plugins that never bundle in time run under
+	// the short one.
 	first := tsFooer(t, ctr, `Foo: (s: string) => s`)
+	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => "v1 " + s`)))
+	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))
+
+	plg.SetBundleLimits(ctr, 2*time.Second, plg.BundleMemoryLimit)
 
 	for _, tc := range []struct {
 		files fstest.MapFS
@@ -70,8 +76,6 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 	}
 
 	// A reload of such a plugin fails the same way, and the version before it serves on.
-	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => "v1 " + s`)))
-	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))
 	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
 		exportStarLayers(24)))
 

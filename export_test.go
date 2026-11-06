@@ -188,8 +188,8 @@ func EventsStopped(c *Container) <-chan struct{} {
 	return c.events.done
 }
 
-// SetBundleLimits replaces the base of a bundling's time limit and the bundler's memory limit. Call it before the
-// container loads any TypeScript plugin.
+// SetBundleLimits replaces the base of a bundling's time limit and the bundler's memory limit. Call it while no
+// load or reload of the container runs: they read the limits without synchronization.
 func SetBundleLimits(c *Container, timeBase time.Duration, memory uint64) {
 	c.bundleTimeBase, c.bundleMemory = timeBase, memory
 }
