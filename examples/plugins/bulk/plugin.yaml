@@ -1,2 +1,10 @@
 language: go
 entrypoint: .
+owner:
+  maintainers:
+    - {name: Ana Lima, email: ana@example.com, handle: "@ana"}
+  team: {name: wholesale, department: sales}
+  org: commerce
+  company: Example Shop
+  contact: {oncall: wholesale-oncall, channel: "#wholesale", email: wholesale@example.com}
+  links: {repository: https://git.example.com/pricing/bulk, runbook: https://git.example.com/pricing/bulk/runbook.md}

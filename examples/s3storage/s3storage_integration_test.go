@@ -110,6 +110,20 @@ func upload(t *testing.T, client *s3.Client, bucket, prefix string, fsys fs.FS) 
 	require.NoError(t, err)
 }
 
+// ownerOf returns the owner the embedded plugin dir's plugin.yaml names.
+func ownerOf(t *testing.T, dir string) *plg.Owner {
+	t.Helper()
+
+	manifest, err := fs.ReadFile(plugins.FS, dir+"/plugin.yaml")
+	require.NoError(t, err)
+
+	desc, err := plg.ParseManifest(manifest)
+	require.NoError(t, err)
+	require.NotNil(t, desc.Owner, "every example rule names its owner")
+
+	return desc.Owner
+}
+
 const isListingVersion = `^s3:[0-9a-f]{64}$`
 
 func TestStorageListsPluginDirectories(t *testing.T) {
@@ -136,9 +150,15 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 	}
 
 	assert.Equal(t, []plg.Descriptor{
-		{Key: "bulk", Language: plg.LanguageGo, Entrypoint: ".", Version: descs[0].Version},
-		{Key: "coupon", Language: plg.LanguageTypeScript, Entrypoint: "rule.ts", Version: descs[1].Version},
-		{Key: "loyalty", Language: plg.LanguageLua, Entrypoint: "rule.lua", Version: descs[2].Version},
+		{Key: "bulk", Language: plg.LanguageGo, Entrypoint: ".", Version: descs[0].Version, Owner: ownerOf(t, "bulk")},
+		{
+			Key: "coupon", Language: plg.LanguageTypeScript, Entrypoint: "rule.ts", Version: descs[1].Version,
+			Owner: ownerOf(t, "coupon"),
+		},
+		{
+			Key: "loyalty", Language: plg.LanguageLua, Entrypoint: "rule.lua", Version: descs[2].Version,
+			Owner: ownerOf(t, "loyalty"),
+		},
 	}, descs, "sorted by key")
 
 	files, err := store.Open(t.Context(), &descs[2])

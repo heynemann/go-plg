@@ -1,6 +1,7 @@
 package bulk_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/heynemann/go-plg/examples/plugins/bulk"
 	"github.com/heynemann/go-plg/examples/pricing"
+	"github.com/heynemann/go-plg/plugin"
 )
 
 func TestMain(m *testing.M) {
@@ -49,4 +51,26 @@ func TestBulkDiscount(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestBulkValidate(t *testing.T) {
+	t.Parallel()
+
+	rule, err := bulk.Create(nil)
+	require.NoError(t, err)
+
+	validator, ok := rule.(interface {
+		Validate(ctx context.Context, limits pricing.Limits) ([]plugin.Issue, error)
+	})
+	require.True(t, ok, "the rule validates itself")
+
+	issues, err := validator.Validate(t.Context(), pricing.Limits{MaxPercent: 10})
+	require.NoError(t, err)
+	assert.Empty(t, issues, "10% is within a 10% limit")
+
+	issues, err = validator.Validate(t.Context(), pricing.Limits{MaxPercent: 5})
+	require.NoError(t, err)
+	assert.Equal(t, []plugin.Issue{{
+		Severity: plugin.Error, Code: "bulk.percent", Message: "grants 10% off, over the 5% limit", Field: "percent",
+	}}, issues)
 }

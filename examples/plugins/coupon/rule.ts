@@ -14,6 +14,18 @@ interface Order {
   items: Item[] | null;
 }
 
+interface Limits {
+  maxPercent: number;
+  maxCents: number;
+}
+
+interface Issue {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  field: string;
+}
+
 interface Discount {
   cents: number;
   reason: string;
@@ -29,6 +41,19 @@ class Rule {
     }
     const subtotal = (order.items ?? []).reduce((sum, item) => sum + item.quantity * item.unitCents, 0);
     return { cents: Math.min(coupons[order.coupon], subtotal), reason: `coupon ${order.coupon}` };
+  }
+
+  // Validate tells plg whether every coupon fits the service's limits (plg.WithValidation): plg calls it in a
+  // throwaway instance before the rule goes live, and an "error" issue keeps it from loading.
+  Validate(limits: Limits): Issue[] {
+    return Object.entries(coupons)
+      .filter(([, cents]) => cents > limits.maxCents)
+      .map(([code, cents]) => ({
+        severity: "error" as const,
+        code: "coupon.cents",
+        message: `${code} takes ${cents} cents off, over the ${limits.maxCents} cents limit`,
+        field: `coupons.${code}`,
+      }));
   }
 }
 

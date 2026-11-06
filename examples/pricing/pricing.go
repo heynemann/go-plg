@@ -40,6 +40,15 @@ type Customers interface {
 	Tier(ctx context.Context, customer string) (string, error)
 }
 
+// Limits is what the service lets a rule grant, the input of each rule's Validate (plg.WithValidation): plg
+// calls it before a rule goes live, and a rule that could grant more is rejected with an error issue.
+type Limits struct {
+	// MaxPercent is the largest percentage off a rule may grant.
+	MaxPercent int64 `json:"maxPercent"`
+	// MaxCents is the largest fixed amount off a rule may grant.
+	MaxCents int64 `json:"maxCents"`
+}
+
 // Subtotal returns the order's price before any discount. Go rules call it, so it runs interpreted inside the
 // guest, and the service calls the same code natively.
 func Subtotal(order Order) int64 {

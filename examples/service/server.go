@@ -32,17 +32,32 @@ const (
 	shutdownTimeout = 10 * time.Second
 	readTimeout     = 10 * time.Second
 	maxBodyBytes    = 1 << 20
+	// maxPercent and maxCents are what every rule may grant (pricing.Limits): each rule's Validate checks itself
+	// against them before it goes live.
+	maxPercent = 10
+	maxCents   = 1000
 )
 
 // serve registers the rules of cfg.storage and serves the quote API on listener until ctx ends, then shuts down:
 // it stops accepting requests, lets those in flight finish and closes the rules' instances.
 func serve(ctx context.Context, listener net.Listener, cfg config) error {
 	//nolint:contextcheck // plg.New takes no context: it only builds the container (and its metric instruments)
-	container := plg.New(plg.WithLogger(cfg.logger), plg.WithMemoryBudget(memoryBudget))
+	container := plg.New(
+		plg.WithLogger(cfg.logger),
+		plg.WithMemoryBudget(memoryBudget),
+		plg.WithOnEvent(logEvent(cfg.logger)),
+	)
 
 	err := plg.Register[pricing.Rule](ctx, container, registration,
 		plg.WithStorage(cfg.storage),
 		plg.WithHost[pricing.Customers](customers{"ada": "gold", "bob": "silver"}),
+		// Every rule validates itself against the service's limits before it goes live, at startup and on each
+		// reload: a rule that could grant more is rejected (startup fails; a reload keeps its last good version).
+		plg.WithValidation(func(context.Context, plg.PluginInfo) (pricing.Limits, error) {
+			return pricing.Limits{MaxPercent: maxPercent, MaxCents: maxCents}, nil
+		}),
+		// Every rule names its owning team and a way to reach it in its plugin.yaml, or it does not go live.
+		plg.WithRequiredOwnership(),
 		// Every instance starts here, before serving: starting one runs the rule's Create (a Go rule's source is
 		// interpreted then), which takes far longer than a call and, on a slow or busy machine, longer than
 		// ruleTimeout. With the pool at its maximum from the start, a request takes an idle instance or waits for
@@ -56,7 +71,7 @@ func serve(ctx context.Context, listener net.Listener, cfg config) error {
 	}
 
 	srv := &http.Server{
-		Handler:           handler(container, cfg.logger),
+		Handler:           handler(container, cfg),
 		ReadHeaderTimeout: readTimeout,
 		ReadTimeout:       readTimeout,
 		ErrorLog:          slog.NewLogLogger(cfg.logger.Handler(), slog.LevelWarn),
@@ -114,8 +129,10 @@ type ruleResult struct {
 	Cents  int64  `json:"cents"`
 }
 
-// handler serves POST /quote: the order in the body, priced by every rule of container.
-func handler(container *plg.Container, logger *slog.Logger) http.Handler {
+// handler serves POST /quote: the order in the body, priced by every rule of container; and, with an admin token,
+// the admin endpoints (see mountAdmin).
+func handler(container *plg.Container, cfg config) http.Handler {
+	logger := cfg.logger
 	strictJSON := sonic.Config{DisallowUnknownFields: true, ValidateString: true}.Froze()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /quote", func(writer http.ResponseWriter, req *http.Request) {
@@ -139,6 +156,10 @@ func handler(container *plg.Container, logger *slog.Logger) http.Handler {
 			logger.DebugContext(req.Context(), "writing a quote failed", slog.Any("error", err))
 		}
 	})
+
+	if cfg.adminToken != "" {
+		mountAdmin(mux, container, cfg)
+	}
 
 	return mux
 }

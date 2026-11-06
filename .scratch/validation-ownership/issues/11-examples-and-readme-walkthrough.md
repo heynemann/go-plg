@@ -4,9 +4,9 @@
 
 **Blocked by:** 05 (Validate in Lua and TypeScript plugins), 07 (plg.Check dry run), 08 (Lifecycle events: WithOnEvent), 10 (plg.AdminHandler read-only JSON)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The examples module's tests exercise validation, a rejected plugin, an event, the admin handler and Check end to end
-- [ ] The README quick start still passes its extraction test
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] The examples module's tests exercise validation, a rejected plugin, an event, the admin handler and Check end to end
+- [x] The README quick start still passes its extraction test
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

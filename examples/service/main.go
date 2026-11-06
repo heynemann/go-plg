@@ -9,6 +9,15 @@
 // By default it serves the rules embedded from examples/plugins. With -plugins <dir> it serves a directory of
 // plugins in the same layout instead and, with -poll <interval>, follows it: rules added, changed or removed
 // there are served without a restart. SIGINT or SIGTERM stops it cleanly.
+//
+// Every rule validates itself against the service's limits (pricing.Limits, plg.WithValidation) and names its
+// owning team and contact in its plugin.yaml (plg.WithRequiredOwnership) before it goes live; a rule that fails
+// either is rejected. Every plugin lifecycle event is logged with the team to tell (plg.WithOnEvent). With
+// -admin-token (or $PRICING_ADMIN_TOKEN), requests bearing it get the admin endpoints:
+//
+//	curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/plg/plugins     # plg.AdminHandler
+//	curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/check/new-rule \
+//	  --data-binary @rule.zip                                                     # plg.Check of a zipped rule
 package main
 
 import (

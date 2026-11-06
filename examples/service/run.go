@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 
 	"github.com/heynemann/go-plg"
@@ -28,6 +29,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	addr := flags.String("addr", "localhost:8080", "address to listen on")
 	dir := flags.String("plugins", "", "directory of plugins to serve instead of the embedded ones")
 	poll := flags.Duration("poll", 0, "how often to reload -plugins (0: never)")
+	adminToken := flags.String("admin-token", os.Getenv("PRICING_ADMIN_TOKEN"),
+		"bearer token of the /admin endpoints (default $PRICING_ADMIN_TOKEN; empty: no admin endpoints)")
 
 	err := flags.Parse(args)
 	if err != nil {
@@ -40,7 +43,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
-	err = listenAndServe(ctx, *addr, config{storage: storageFor(*dir), poll: *poll, logger: logger})
+	err = listenAndServe(ctx, *addr, config{
+		storage: storageFor(*dir), poll: *poll, logger: logger, adminToken: *adminToken,
+	})
 	if err != nil {
 		logger.ErrorContext(ctx, "service failed", slog.Any("error", err))
 
@@ -74,5 +79,7 @@ func listenAndServe(ctx context.Context, addr string, cfg config) error {
 type config struct {
 	storage plg.Storage
 	logger  *slog.Logger
-	poll    time.Duration
+	// adminToken is the bearer token the admin endpoints require; empty, they are not served.
+	adminToken string
+	poll       time.Duration
 }

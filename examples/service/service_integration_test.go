@@ -3,9 +3,12 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -286,9 +289,18 @@ func TestServiceFailures(t *testing.T) {
 	broken := copyPlugins(t)
 	require.NoError(t, os.WriteFile(filepath.Join(broken, "bulk", "bulk.go"), []byte("package bulk\n"), 0o600))
 
+	overLimit := copyPlugins(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(overLimit, "loyalty", "tiers.lua"), []byte("return { gold = 50, silver = 2 }\n"), 0o600))
+
+	unowned := copyPlugins(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(unowned, "coupon", "plugin.yaml"), []byte("language: typescript\nentrypoint: rule.ts\n"), 0o600))
+
 	tests := map[string]struct {
 		log  string
 		args []string
+		more []string // further lines the log holds
 		want int
 	}{
 		"unknown flag": {args: []string{"-nope"}, want: exitUsage, log: "flag provided but not defined"},
@@ -304,6 +316,22 @@ func TestServiceFailures(t *testing.T) {
 			want: exitFailed,
 			log:  "pricing/bulk",
 		},
+		// The Lua rule's own Validate finds its gold tier over the service's limits: the error issue blocks the
+		// load, and the event sink logs the rejection with the team to tell (Close delivers queued events).
+		"a rule over the limits": {
+			args: []string{"-addr", "127.0.0.1:0", "-plugins", overLimit},
+			want: exitFailed,
+			log:  `level=WARN msg="plugin event" kind=rejected key=pricing/loyalty`,
+			more: []string{
+				"team=loyalty oncall=loyalty-oncall channel=#loyalty",
+				"loyalty.percent: gold grants 50% off, over the 10% limit",
+			},
+		},
+		"a rule without an owner": {
+			args: []string{"-addr", "127.0.0.1:0", "-plugins", unowned},
+			want: exitFailed,
+			log:  "plg.ownership.missing",
+		},
 	}
 
 	for name, tc := range tests {
@@ -314,6 +342,10 @@ func TestServiceFailures(t *testing.T) {
 
 			assert.Equal(t, tc.want, run(t.Context(), tc.args, &log))
 			assert.Contains(t, log.String(), tc.log)
+
+			for _, want := range tc.more {
+				assert.Contains(t, log.String(), want)
+			}
 		})
 	}
 }
@@ -366,4 +398,312 @@ func TestServiceProgram(t *testing.T) {
 	}
 
 	require.NoError(t, cmd.Wait(), "a clean shutdown exits 0")
+}
+
+// adminAnswer is the service's answer to an admin request.
+type adminAnswer struct {
+	body   []byte
+	status int
+}
+
+// decode decodes the answer's JSON body into v.
+func (a adminAnswer) decode(t *testing.T, v any) {
+	t.Helper()
+
+	require.NoError(t, sonic.Unmarshal(a.body, v), string(a.body))
+}
+
+// adminDo sends the request to the service with the bearer token (none when empty).
+func adminDo(t *testing.T, method, target, token string, body io.Reader) adminAnswer {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), method, target, body)
+	require.NoError(t, err)
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+	require.NoError(t, err)
+
+	data, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	return adminAnswer{status: resp.StatusCode, body: data}
+}
+
+const adminToken = "s3cret"
+
+// adminPlugin is what the test reads of plg.AdminHandler's <plugin>.
+type adminPlugin struct {
+	Load     *adminReport `json:"load"`
+	Key      string       `json:"key"`
+	Status   string       `json:"status"`
+	Language string       `json:"language"`
+	Owner    adminOwner   `json:"owner"`
+}
+
+type adminReport struct {
+	Error  *string `json:"error"`
+	Issues []issue `json:"issues"`
+}
+
+type adminOwner struct {
+	Team    adminTeam    `json:"team"`
+	Contact adminContact `json:"contact"`
+}
+
+type adminTeam struct {
+	Name string `json:"name"`
+}
+
+type adminContact struct {
+	Oncall string `json:"oncall"`
+}
+
+// The admin handler shows every rule live, validated, with the team to talk to; only with the token.
+func TestServiceAdminShowsWhoOwnsEachRule(t *testing.T) {
+	t.Parallel()
+
+	url := start(t, "-admin-token", adminToken)
+	list := url + "/admin/plg/plugins"
+
+	assert.Equal(t, http.StatusUnauthorized, adminDo(t, http.MethodGet, list, "", http.NoBody).status, "no token")
+	assert.Equal(t, http.StatusUnauthorized, adminDo(t, http.MethodGet, list, "wrong", http.NoBody).status,
+		"a wrong token")
+
+	got := adminDo(t, http.MethodGet, list, adminToken, http.NoBody)
+	require.Equal(t, http.StatusOK, got.status)
+
+	var answer struct {
+		Plugins []adminPlugin `json:"plugins"`
+	}
+
+	got.decode(t, &answer)
+
+	owners := map[string]string{}
+
+	for _, state := range answer.Plugins {
+		assert.Equal(t, "serving", state.Status, state.Key)
+		require.NotNil(t, state.Load, state.Key)
+		assert.Nil(t, state.Load.Error, "validated and loaded")
+		assert.Empty(t, state.Load.Issues, "no ownership warning: every rule names its team and contact")
+
+		owners[state.Key] = state.Owner.Team.Name + " " + state.Owner.Contact.Oncall
+	}
+
+	assert.Equal(t, map[string]string{
+		"pricing/bulk":    "wholesale wholesale-oncall",
+		"pricing/coupon":  "promotions promotions-oncall",
+		"pricing/loyalty": "loyalty loyalty-oncall",
+	}, owners)
+
+	got = adminDo(t, http.MethodGet, list+"/pricing/loyalty", adminToken, http.NoBody)
+	require.Equal(t, http.StatusOK, got.status)
+
+	var one adminPlugin
+
+	got.decode(t, &one)
+	assert.Equal(t, "lua", one.Language)
+}
+
+func TestServiceAdminEndpointsNeedAToken(t *testing.T) {
+	t.Parallel()
+
+	url := start(t)
+
+	got := adminDo(t, http.MethodGet, url+"/admin/plg/plugins", adminToken, http.NoBody)
+	assert.Equal(t, http.StatusNotFound, got.status, "without -admin-token, no admin endpoints")
+}
+
+// zipOfCoupon archives the embedded coupon rule.
+func zipOfCoupon(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	archive := zip.NewWriter(&buf)
+	sub, err := fs.Sub(plugins.FS, "coupon")
+	require.NoError(t, err)
+	require.NoError(t, archive.AddFS(sub))
+	require.NoError(t, archive.Close())
+
+	return &buf
+}
+
+// POST /admin/check dry-runs an uploaded rule with plg.Check: the same validation and ownership rules as a load,
+// and nothing published.
+func TestServiceChecksACandidateRule(t *testing.T) {
+	t.Parallel()
+
+	url := start(t, "-admin-token", adminToken)
+
+	check := func(t *testing.T, key string, body io.Reader, status int) checkAnswer {
+		t.Helper()
+
+		got := adminDo(t, http.MethodPost, url+"/admin/check/"+key, adminToken, body)
+		require.Equal(t, status, got.status, string(got.body))
+
+		var answer checkAnswer
+
+		got.decode(t, &answer)
+
+		return answer
+	}
+
+	t.Run("a rule that would load", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "coupon2", zipOfCoupon(t), http.StatusOK)
+		assert.True(t, got.Loads)
+		assert.Equal(t, "pricing/coupon2", got.Key)
+		assert.Empty(t, got.Error)
+		assert.Empty(t, got.Issues)
+		assert.NotEmpty(t, got.Version, "the content hash")
+	})
+
+	t.Run("a rule its own Validate rejects", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "loyalty2", zipOfLoyalty(t, "return { gold = 5, platinum = 25 }\n"), http.StatusOK)
+		assert.False(t, got.Loads)
+		assert.Contains(t, got.Error, "platinum grants 25% off, over the 10% limit")
+		assert.Equal(t, []issue{{
+			Severity: "error", Code: "loyalty.percent", Field: "tiers.platinum",
+			Message: "platinum grants 25% off, over the 10% limit",
+		}}, got.Issues)
+	})
+
+	t.Run("a rule without an owner", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "unowned", zipOfFiles(t, map[string]string{
+			"plugin.yaml": "language: lua\nentrypoint: rule.lua\n",
+			"rule.lua": "function Create() return { Discount = function() return {} end, " +
+				"Validate = function() end } end\n",
+		}), http.StatusOK)
+		assert.False(t, got.Loads)
+		require.Len(t, got.Issues, 1)
+		assert.Equal(t, plg.CodeOwnershipMissing, got.Issues[0].Code)
+	})
+
+	t.Run("not a zip archive", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "junk", strings.NewReader("junk"), http.StatusBadRequest)
+		assert.Contains(t, got.Error, "zip")
+	})
+
+	t.Run("an invalid plugin.yaml", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "bad", zipOfFiles(t, map[string]string{"plugin.yaml": "language: cobol\n"}),
+			http.StatusBadRequest)
+		assert.Contains(t, got.Error, "plugin.yaml")
+	})
+
+	t.Run("no plugin.yaml", func(t *testing.T) {
+		t.Parallel()
+
+		got := check(t, "none", zipOfFiles(t, map[string]string{"rule.lua": ""}), http.StatusBadRequest)
+		assert.Contains(t, got.Error, "plugin.yaml")
+	})
+
+	t.Run("without the token", func(t *testing.T) {
+		t.Parallel()
+
+		got := adminDo(t, http.MethodPost, url+"/admin/check/x", "", zipOfCoupon(t))
+		assert.Equal(t, http.StatusUnauthorized, got.status)
+	})
+}
+
+// zipOfLoyalty archives the loyalty rule with tiers as its tiers.lua.
+func zipOfLoyalty(t *testing.T, tiers string) *bytes.Buffer {
+	t.Helper()
+
+	files := map[string]string{"tiers.lua": tiers}
+
+	for _, name := range []string{"plugin.yaml", "rule.lua"} {
+		data, err := fs.ReadFile(plugins.FS, "loyalty/"+name)
+		require.NoError(t, err)
+
+		files[name] = string(data)
+	}
+
+	return zipOfFiles(t, files)
+}
+
+// zipOfFiles archives files, by name.
+func zipOfFiles(t *testing.T, files map[string]string) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	archive := zip.NewWriter(&buf)
+
+	for name, content := range files {
+		w, err := archive.Create(name)
+		require.NoError(t, err)
+
+		_, err = io.WriteString(w, content)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, archive.Close())
+
+	return &buf
+}
+
+// A Check publishes nothing: after checking a candidate, the admin handler still lists the three rules only.
+func TestServiceCheckPublishesNothing(t *testing.T) {
+	t.Parallel()
+
+	url := start(t, "-admin-token", adminToken)
+
+	got := adminDo(t, http.MethodPost, url+"/admin/check/coupon2", adminToken, zipOfCoupon(t))
+	require.Equal(t, http.StatusOK, got.status)
+
+	got = adminDo(t, http.MethodGet, url+"/admin/plg/plugins", adminToken, http.NoBody)
+	require.Equal(t, http.StatusOK, got.status)
+
+	var answer struct {
+		Plugins []adminPlugin `json:"plugins"`
+	}
+
+	got.decode(t, &answer)
+	assert.Len(t, answer.Plugins, 3)
+
+	got = adminDo(t, http.MethodGet, url+"/admin/plg/plugins/pricing/coupon2", adminToken, http.NoBody)
+	assert.Equal(t, http.StatusNotFound, got.status)
+}
+
+func TestCheckOnAClosedContainerCannotCheck(t *testing.T) {
+	t.Parallel()
+
+	container := plg.New()
+	require.NoError(t, container.Close(t.Context()))
+
+	got := check(t.Context(), container, "coupon", zipOfCoupon(t))
+	assert.Equal(t, http.StatusServiceUnavailable, got.status)
+	assert.Contains(t, got.Error, plg.ErrClosed.Error())
+	assert.False(t, got.Loads)
+}
+
+// The event sink logs a panic at Warn with the team to tell.
+func TestLogEventOfAPanic(t *testing.T) {
+	t.Parallel()
+
+	var log strings.Builder
+
+	logEvent(slog.New(slog.NewTextHandler(&log, nil)))(t.Context(), plg.Event{
+		Kind:  plg.EventPanicked,
+		Key:   "pricing/bulk",
+		Panic: &plg.PanicError{Key: "pricing/bulk", Value: "boom"},
+		Owner: plg.Owner{Team: plg.Team{Name: "wholesale"}, Contact: plg.Contact{Channel: "#wholesale"}},
+	})
+
+	assert.Contains(t, log.String(), `level=WARN msg="plugin event" kind=panicked key=pricing/bulk version="" `+
+		`team=wholesale oncall="" channel=#wholesale error=`)
 }

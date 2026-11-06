@@ -1031,6 +1031,78 @@ A `<plugin>` (here, one serving its last good version beside an update its valid
   `plg.Language`, `plg.Severity` and `plg.Phase`.
 - Key order and whitespace are not part of the format.
 
+## Putting it together: fit to serve, and who to talk to
+
+The [pricing service example](examples/service) wires every piece above for its three rules (Go, Lua and
+TypeScript), so plugin authors, users and administrators each have one place to look.
+
+**Plugin authors** declare who owns the rule in its `plugin.yaml` and make it check itself against the service's
+limits:
+
+```yaml
+# examples/plugins/loyalty/plugin.yaml
+language: lua
+entrypoint: rule.lua
+owner:
+  maintainers:
+    - {name: Bo Chen, email: bo@example.com, handle: "@bo"}
+  team: {name: loyalty, department: marketing}
+  contact: {oncall: loyalty-oncall, channel: "#loyalty", email: loyalty@example.com}
+```
+
+```lua
+-- examples/plugins/loyalty/rule.lua: limits is a pricing.Limits, keyed by its JSON names
+function Rule:Validate(limits)
+  local issues = {}
+  for tier, off in pairs(percent) do
+    if off > limits.maxPercent then
+      issues[#issues + 1] = { severity = "error", code = "loyalty.percent", field = "tiers." .. tier,
+        message = tier .. " grants " .. off .. "% off, over the " .. limits.maxPercent .. "% limit" }
+    end
+  end
+  return issues
+end
+```
+
+The Go rule (`bulk`) returns `[]plugin.Issue` from `Validate(ctx, pricing.Limits)`, and the TypeScript one
+(`coupon`) an array of issues.
+
+**The service** makes both conditions of going live, sends every lifecycle event to its log with the owning team,
+and serves the admin endpoints behind its own token:
+
+```go
+c := plg.New(plg.WithLogger(logger), plg.WithOnEvent(logEvent(logger)))
+
+plg.Register[pricing.Rule](ctx, c, "pricing", plg.WithStorage(store),
+	plg.WithHost[pricing.Customers](customers),
+	plg.WithValidation(func(context.Context, plg.PluginInfo) (pricing.Limits, error) {
+		return pricing.Limits{MaxPercent: 10, MaxCents: 1000}, nil
+	}),
+	plg.WithRequiredOwnership(),
+)
+
+mux.Handle("/admin/plg/", requireToken(token, http.StripPrefix("/admin/plg", plg.AdminHandler(c))))
+mux.Handle("POST /admin/check/{key}", requireToken(token, checkHandler)) // plg.Check of an uploaded zip
+```
+
+A rule over the limits, or without a team and a contact, never serves: at startup Register fails (the service
+exits, its log naming the issue: `loyalty.percent: gold grants 50% off, over the 10% limit`); on a reload the last
+good version serves on. Either way the event sink logs
+`level=WARN msg="plugin event" kind=rejected key=pricing/loyalty … team=loyalty oncall=loyalty-oncall channel=#loyalty error=…`.
+
+**Administrators** see every rule, its status, its reports and who owns it, and dry-run a candidate before
+enabling it:
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/plg/plugins/pricing/loyalty
+(cd new-rule && zip -r - .) | curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:8080/admin/check/new-rule --data-binary @-
+# {"error":"…","key":"pricing/new-rule","version":"…","issues":[…],"loads":false}
+```
+
+The check runs the candidate's `Create` and `Validate` under the same rules as a load and publishes nothing.
+The service's integration tests (`examples/service`) exercise each of these end to end.
+
 ## Deployment: `plg warm` and `plg build-guest`
 
 Guests are compiled to machine code at startup and cached on disk (default `$PLG_CACHE_DIR`, else
@@ -1126,11 +1198,15 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
 
 [`examples/`](examples) is a separate Go module, so plg's own `go.mod` never gains aws-sdk, pgx or testcontainers:
 
-- [`examples/pricing`](examples/pricing): a contract (`Rule`, the `Customers` host) and its generated adapter.
+- [`examples/pricing`](examples/pricing): a contract (`Rule`, the `Customers` host, the `Limits` validation
+  input) and its generated adapter.
 - [`examples/plugins`](examples/plugins): three rules, in Go (`bulk`), Lua (`loyalty`, calls the host) and
-  TypeScript (`coupon`, throws on an unknown code).
+  TypeScript (`coupon`, throws on an unknown code), each naming its owning team in its `plugin.yaml` and
+  validating itself against the service's limits.
 - [`examples/service`](examples/service): an HTTP pricing service serving those rules, with a host, a memory
-  budget, every rule instance started before serving, per-call deadlines, optional polling of a plugin directory,
+  budget, every rule instance started before serving, per-call deadlines, validation and required ownership, a
+  lifecycle event log, the admin handler and a `plg.Check` upload endpoint behind a token
+  ([walkthrough](#putting-it-together-fit-to-serve-and-who-to-talk-to)), optional polling of a plugin directory,
   and a clean shutdown: `cd examples && go run ./service`.
 - [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, tested against MinIO.
 - [`examples/pgstorage`](examples/pgstorage): a `plg.Storage` over PostgreSQL listing only enabled plugins, with

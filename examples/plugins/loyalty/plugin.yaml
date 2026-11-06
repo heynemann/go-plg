@@ -1,2 +1,10 @@
 language: lua
 entrypoint: rule.lua
+owner:
+  maintainers:
+    - {name: Bo Chen, email: bo@example.com, handle: "@bo"}
+  team: {name: loyalty, department: marketing}
+  org: commerce
+  company: Example Shop
+  contact: {oncall: loyalty-oncall, channel: "#loyalty", email: loyalty@example.com}
+  links: {repository: https://git.example.com/pricing/loyalty, runbook: https://git.example.com/pricing/loyalty/runbook.md}
