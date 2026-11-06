@@ -165,9 +165,9 @@ func TestConcurrentCallsShareOneInstance(t *testing.T) {
 			assert.Equal(t, fmt.Sprintf("200||call-%d", i), got.out, "each call gets its own answer")
 		}
 
-		stats := plg.Stats(ctr, "mux/fetch")
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: calls}, stats, "one instance served them all")
-		assert.Less(t, plg.InstanceMemory(ctr, "mux/fetch"), uint64(8<<20), "the memory of one instance")
+		stats := countsOf(t, ctr, "mux/fetch")
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: calls}, stats, "one instance served them all")
+		assert.Less(t, inspect(t, ctr, "mux/fetch").Pool.Memory, uint64(8<<20), "the memory of one instance")
 	})
 }
 
@@ -204,7 +204,7 @@ func TestConcurrentCallsKeepTheirOwnDeadlines(t *testing.T) {
 
 		got = <-callLater(t.Context(), plug, "GET "+srv.URL)
 		require.NoError(t, got.err)
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "deadline/fetch"), "the same instance")
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 4}, countsOf(t, ctr, "deadline/fetch"), "the same instance")
 	})
 }
 
@@ -290,7 +290,7 @@ func TestAMultiplexedCallReturnsAtItsDeadlineWhileAnotherCallRuns(t *testing.T) 
 		got = <-callLater(t.Context(), plug, "GET "+srv.URL)
 		require.NoError(t, got.err)
 		assert.Equal(t, "200||ok", got.out)
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "busy/fetch"), "the same instance")
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 4}, countsOf(t, ctr, "busy/fetch"), "the same instance")
 		assert.Empty(t, ctr.RecentPanics(), "the late answer reached nobody")
 	})
 }
@@ -545,7 +545,7 @@ func TestAbandonedCallsAreReclaimedWithoutARequestToResumeThem(t *testing.T) {
 		got = <-busy
 		require.NoError(t, got.err, "the busy call goes on")
 		assert.Equal(t, "200||ok", got.out)
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 3}, plg.Stats(ctr, key), "the same instance")
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 3}, countsOf(t, ctr, key), "the same instance")
 		assert.Empty(t, ctr.RecentPanics())
 	})
 }
@@ -694,7 +694,7 @@ func TestTypeScriptCallAwaitingNothingFails(t *testing.T) {
 	require.ErrorAs(t, got.err, &failed)
 	require.ErrorContains(t, got.err, "the returned promise never settles",
 		"once no request is left that could settle it")
-	assert.Equal(t, plg.PoolStats{Size: 1, Idle: 4}, plg.Stats(ctr, "hang/fetch"), "the instance serves on")
+	assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 4}, countsOf(t, ctr, "hang/fetch"), "the instance serves on")
 }
 
 func TestLuaCallsYieldOnlyForTheirRequests(t *testing.T) {
@@ -725,8 +725,8 @@ func TestGoPluginsServeOneCallPerInstance(t *testing.T) {
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "lua",
 		append(opts, plg.WithStorage(luaLanguage().storage(t, "lua", map[string]string{"ref": "fooer"})))...))
 
-	assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, "go/ref"))
-	assert.Equal(t, plg.PoolStats{Size: 1, Idle: 8}, plg.Stats(ctr, "lua/ref"))
+	assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1}, countsOf(t, ctr, "go/ref"))
+	assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 8}, countsOf(t, ctr, "lua/ref"))
 }
 
 // The FLOOD of TestMultiplexedRefusalsAreNotCopied: floodRequests POSTs of floodBytes each.
@@ -904,7 +904,7 @@ func benchLatency(b *testing.B, lang contractLanguage, opts ...plg.RegisterOptio
 
 	b.ReportMetric(float64(b.N)/elapsed.Seconds(), "calls/s")
 	b.ReportMetric(float64(peak()-baseline)/mib, "live-MiB")
-	b.ReportMetric(float64(plg.InstanceMemory(ctr, "web/fetch"))/mib, "wasm-MiB")
+	b.ReportMetric(float64(inspect(b, ctr, "web/fetch").Pool.Memory)/mib, "wasm-MiB")
 }
 
 // sampleHeap measures the live heap (after a collection) every 50 ms until the benchmark ends; the returned

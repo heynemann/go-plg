@@ -47,10 +47,11 @@ const (
 // memory, stack overflow, a runtime abort), was stopped at its context's deadline or broke the guest ABI.
 // The instance involved is discarded; the host and the plugin's other instances keep running.
 //
-// Every PanicError is logged at Error level, passed to the [WithOnPanic] function and kept in the container's
-// [Container.RecentPanics]. The same value is shared by all of them and by the error returned, so treat it as
-// read-only. Extract it with [errors.As]. It wraps [ErrCall] in [PhaseCall], and Value when Value is an error,
-// so errors.Is(err, context.DeadlineExceeded) reports a call stopped at its deadline.
+// Every PanicError is logged at Error level, passed to the [WithOnPanic] function, kept in the container's
+// [Container.RecentPanics] and counted toward the plugin its Key names ([PluginState.Panics]). The same value is
+// shared by all of them and by the error returned, so treat it as read-only. Extract it with [errors.As]. It wraps
+// [ErrCall] in [PhaseCall], and Value when Value is an error, so errors.Is(err, context.DeadlineExceeded) reports
+// a call stopped at its deadline.
 type PanicError struct {
 	// Value is the recovered value, or the guest's panic message or trap.
 	Value any
@@ -127,6 +128,9 @@ type panicReporter struct {
 	onPanic func(context.Context, *PanicError)
 	meters  *instruments // nil counts nothing
 	events  *eventQueue  // the WithOnEvent queue; nil emits nothing
+	// tally counts each PanicError kept in the history toward the plugin it names ([Info]); nil counts nothing.
+	// Set once, before the reporter is shared.
+	tally   func(*PanicError)
 	history panicHistory
 	// unguarded makes the guarded loggers log straight to logger, without the callback boundary, so that tests
 	// can prove that a panic escaping where plg logs leaves nothing behind.
@@ -158,7 +162,7 @@ func (r *panicReporter) recovered(ctx context.Context, failure *PanicError, valu
 // too.
 func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	failure.Time = time.Now()
-	r.history.record(failure)
+	r.keep(ctx, failure)
 
 	if r.meters != nil {
 		r.callback(ctx, failure.Key, failure.Language, meterMethod, func() { r.meters.countPanic(ctx, failure) })
@@ -181,14 +185,14 @@ func (r *panicReporter) callback(ctx context.Context, key string, lang Language,
 	defer func() {
 		if v := recover(); v != nil {
 			failed := callbackFailure(key, lang, method, v)
-			r.history.record(failed)
+			r.keep(ctx, failed)
 
 			if method != meterMethod && r.meters != nil {
-				r.quietly(failed, meterMethod, func() { r.meters.countPanic(ctx, failed) })
+				r.quietly(ctx, failed, meterMethod, func() { r.meters.countPanic(ctx, failed) })
 			}
 
 			if method != logMethod {
-				r.quietly(failed, logMethod, func() { r.log(ctx, failed) })
+				r.quietly(ctx, failed, logMethod, func() { r.log(ctx, failed) })
 			}
 		}
 	}()
@@ -197,14 +201,23 @@ func (r *panicReporter) callback(ctx context.Context, key string, lang Language,
 }
 
 // quietly runs fn, the user's code (named method) reporting failed: a panic in it is only recorded.
-func (r *panicReporter) quietly(failed *PanicError, method string, fn func()) {
+func (r *panicReporter) quietly(ctx context.Context, failed *PanicError, method string, fn func()) {
 	defer func() {
 		if v := recover(); v != nil {
-			r.history.record(callbackFailure(failed.Key, failed.Language, method, v))
+			r.keep(ctx, callbackFailure(failed.Key, failed.Language, method, v))
 		}
 	}()
 
 	fn()
+}
+
+// keep records failure in the history and, unless [Check] reported it, counts it toward the plugin it names.
+func (r *panicReporter) keep(ctx context.Context, failure *PanicError) {
+	r.history.record(failure)
+
+	if r.tally != nil && ctx.Value(checkKey{}) == nil {
+		r.tally(failure)
+	}
 }
 
 // guardedLogger returns the user's logger with its handler behind the callback boundary, for records about the

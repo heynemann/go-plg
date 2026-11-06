@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"reflect"
-	"strings"
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
@@ -95,19 +94,6 @@ func CallRaw(ctx context.Context, c *Container, key string, method uint32, args 
 	return held.inst.Call(ctx, method, args) //nolint:wrapcheck // the test reads the engine's own error
 }
 
-// PoolStats describes a plugin's pool.
-type PoolStats struct {
-	Size    int    // instances alive or starting
-	Idle    int    // instances waiting for a call
-	Refills uint64 // instances started by the refiller
-	Grows   uint64 // instances started by callers
-}
-
-// Stats returns the pool of the plugin with the given key.
-func Stats(c *Container, key string) PoolStats {
-	return c.catalogue.Load().plugins[key].pool.stats()
-}
-
 // MemoryInUse returns the memory limits of every instance alive in the container, added up.
 func MemoryInUse(c *Container) uint64 {
 	return c.budget.used.Load()
@@ -130,12 +116,6 @@ func Instances(c *Container) int {
 	return open
 }
 
-// InstanceMemory returns the linear memory of the live instances of the plugin with the given key, as last
-// sampled by its pool.
-func InstanceMemory(c *Container, key string) uint64 {
-	return uint64(c.catalogue.Load().plugins[key].pool.memory.Load()) //nolint:gosec // G115: never negative
-}
-
 // Generation identifies the version of the plugin c serves under key; nil when there is none.
 func Generation(c *Container, key string) any {
 	gen, ok := c.catalogue.Load().plugins[key]
@@ -144,55 +124,6 @@ func Generation(c *Container, key string) any {
 	}
 
 	return gen
-}
-
-// Version returns the version of the plugin c serves under key.
-func Version(c *Container, key string) string {
-	return c.catalogue.Load().plugins[key].desc.Version
-}
-
-// ServingReport returns the load report of the version c serves under key; false when it serves none.
-func ServingReport(c *Container, key string) (Report, bool) {
-	gen := c.catalogue.Load().plugins[key]
-	if gen == nil {
-		return Report{}, false
-	}
-
-	return *gen.report, true
-}
-
-// RejectedReport returns the report of the reload that last failed to load the plugin key, unless a later
-// reload loaded it or found it unchanged; false when there is none.
-func RejectedReport(c *Container, key string) (Report, bool) {
-	name, _, _ := strings.Cut(key, "/")
-
-	reg, ok := c.regs.Load(name)
-	if !ok {
-		return Report{}, false
-	}
-
-	report, ok := reg.rejections.Load(key)
-	if !ok {
-		return Report{}, false
-	}
-
-	return *report, true
-}
-
-// ValidatedReport returns the report of the latest on-demand validation of the version c serves under key, which
-// is degraded when that report has an Err; false when it serves none or none ran.
-func ValidatedReport(c *Container, key string) (Report, bool) {
-	gen := c.catalogue.Load().plugins[key]
-	if gen == nil {
-		return Report{}, false
-	}
-
-	latest := gen.validated.Load()
-	if latest == nil {
-		return Report{}, false
-	}
-
-	return *latest, true
 }
 
 // LoadedVersion opens the plugin desc of store and returns the version Register gives it when desc has none:
@@ -332,15 +263,6 @@ func onMux(ctx context.Context, c *Container, key string, operation func(m *muxI
 	<-done
 
 	return nil
-}
-
-func (p *pool) stats() PoolStats {
-	return PoolStats{
-		Size:    int(p.size.Load()),
-		Idle:    len(p.idle),
-		Refills: p.refills.Load(),
-		Grows:   p.grows.Load(),
-	}
 }
 
 // HostHandler returns the host_call handler Register gives the instances of the Go plugin key when it registers

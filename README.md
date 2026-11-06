@@ -528,7 +528,8 @@ any severity plg does not know), `plg.SeverityWarning` or `plg.SeverityInfo`. pl
 it loaded, or, when a reload rejects an update or a new plugin, as that key's rejection until a later reload loads
 the plugin or finds it unchanged. Every issue is logged as a `plg: plugin issue` record at its severity's level
 (Error, Warn, Info) with the plugin's `key`, `version` and `owner` group and the issue's `severity`, `code`,
-`field` and `issue` (its message). The reports become readable through the inspection API (planned).
+`field` and `issue` (its message). `plg.Info` and `plg.Plugins` return the reports
+([inspecting plugins](#inspecting-plugins-plginfo-and-plgplugins)).
 
 ## Validation
 
@@ -641,10 +642,11 @@ plg.WithOnDemandValidationPolicy(plg.Degrade)   // the default: keep serving, ma
 plg.WithOnDemandValidationPolicy(plg.Unpublish) // remove it: Get fails with ErrNotFound, calls in flight finish there
 ```
 
-An unpublished version drains like one a reload removes, and the failed report becomes the key's rejection; the
-next reload loads and validates the plugin again and, if that passes, publishes it again. Every validation (at
-load, on demand and by `plg.Check`) is counted in the `plg.plugin.validations` metric by trigger and outcome
-(`passed`, `failed`, `unavailable`), and its issues in `plg.plugin.validation.issues` by severity.
+An unpublished version drains like one a reload removes, and the failed report becomes the key's rejection
+(`plg.Info` shows it `retired`); the next reload loads and validates the plugin again and, if that passes,
+publishes it again. Every validation (at load, on demand and by `plg.Check`) is counted in the
+`plg.plugin.validations` metric by trigger and outcome (`passed`, `failed`, `unavailable`), and its issues in
+`plg.plugin.validation.issues` by severity.
 
 ### Checking a candidate: `plg.Check`
 
@@ -904,12 +906,46 @@ c := plg.New(plg.WithOnEvent(func(ctx context.Context, e plg.Event) {
 | `EventSkipped` | a listed plugin's language is not enabled, at Register and each reload | |
 
 Every event carries the plugin's `Key`, `Version`, `Language`, `Storage` and `Owner` (empty where not known: a
-listing problem knows only the key). Delivery never slows anything down: one goroutine per container calls the
+plugin rejected before its files were read has only its descriptor's version, if any, and an owner a listing
+problem found invalid is left out). Delivery never slows anything down: one goroutine per container calls the
 function, in order, from a queue of 1024 events; an event that finds the queue full is dropped, counted in
 `plg.events.dropped` and logged at Warn. A panic in the function is contained like every callback's (a
 `PanicError` in phase `callback`, kept in `RecentPanics`) and delivery goes on. `Close` delivers what is queued
 (the versions it retires included) for as long as its ctx allows, ends the function's ctx with its own, and
 stops. `plg.Check` emits nothing.
+
+### Inspecting plugins: `plg.Info` and `plg.Plugins`
+
+Admin tools and health pages can see every plugin the registrations' storages list, whether it loaded or not:
+
+```go
+for _, p := range plg.Plugins(c) { // every registration's plugins, in key order
+	log.Printf("%s %s v%s team=%s panics=%d", p.Key, p.Status, p.Version, p.Owner.Team.Name, p.Panics)
+}
+
+p, err := plg.Info(c, "pricing/discounts") // ErrNotFound for a key the storages do not list, ErrClosed
+```
+
+| Status | Meaning |
+|---|---|
+| `serving` | the version the storages list serves; its latest on-demand validation, if any, passed |
+| `degraded` | the version served failed its latest on-demand validation (`plg.Degrade`) and serves on |
+| `serving_last_good` | the storages list a version (or descriptor) a reload could not load; the last good version serves on |
+| `rejected` | no version serves: what the storages list failed to load, or listing it did (an invalid descriptor, a key listed twice) |
+| `retired` | an on-demand validation unpublished it (`plg.Unpublish`), until a reload loads it again |
+| `skipped` | its language is not enabled for its registration |
+
+A `plg.PluginState` holds the plugin's `Key`, `Registration`, `Storage`, `Language` and `Owner`; the `Version`
+served, when its load ended (`LoadedAt`) and that load's `Report` (`Load`); the `Report` of its latest on-demand
+validation (`Validation`); the `Report` of what keeps the listing from being served (`Rejection`: the failed load
+or listing, or the validation that unpublished it) and its version (`RejectedVersion`); the `PanicError`s reported
+under the key since the storages listed it (`Panics`, a `plg.Check`'s excepted) with the newest (`LastPanic`); and
+its pool (`plg.PoolStats`: bounds, instances, those in use, calls in flight, idle call slots, waiting calls,
+refills, grows, memory limit and memory). A degraded version beside a rejected update shows `degraded`, with both
+reports. A plugin is known once its first load settled, until the storages stop listing it; a failed Register
+keeps nothing. Both read what the container keeps, never waiting for a load or a call and running no plugin code;
+`Get` and `All` are unchanged (still no allocation). The reports and `PanicError`s are the container's own: treat
+them as read-only.
 
 ## Deployment: `plg warm` and `plg build-guest`
 

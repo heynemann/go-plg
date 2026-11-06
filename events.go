@@ -54,17 +54,17 @@ type Event struct {
 	// Key is the plugin's key, "<name>/<descriptor key>"; for a panic where no plugin is involved, what
 	// [PanicError.Key] says.
 	Key string
-	// Version is the plugin version, resolved; empty when it is not known yet (a plugin skipped, or rejected
-	// before its files were read, without a version in its descriptor) or no version is involved (a listing
-	// problem, a panic in a storage or a poll).
+	// Version is the plugin version, resolved; empty when it is not known yet (a plugin skipped, rejected by a
+	// listing problem or before its files were read, without a version in its descriptor) or no version is
+	// involved (a panic in a storage or a poll).
 	Version string
-	// Language is the plugin's language; empty when no plugin is involved, or its descriptor is invalid.
+	// Language is the plugin's language; empty when no plugin is involved, or its descriptor names none.
 	Language Language
-	// Storage is the name of the storage the plugin was listed by; empty when no plugin version is involved, or
-	// a listing problem rejected it.
+	// Storage is the name of the storage the plugin was listed by (for a key listed twice, the second); empty when
+	// no plugin is involved.
 	Storage string
-	// Owner is the plugin's owner, as its descriptor names it; zero when it has none or it is not known (a
-	// listing problem, a failure in your own code).
+	// Owner is the plugin's owner, as its descriptor names it; zero when it has none, when the owner is what a
+	// listing problem found invalid, or when no plugin is involved (a failure in your own code).
 	Owner Owner
 }
 
@@ -222,13 +222,16 @@ func (q *eventQueue) source(ctx context.Context, kind EventKind, key string, src
 	})
 }
 
-// problem emits the [EventRejected] event of a listed plugin that cannot be loaded, report saying why.
-func (q *eventQueue) problem(ctx context.Context, report *Report) {
+// problem emits the [EventRejected] event of rej, the rejection of a listed plugin that cannot be loaded.
+func (q *eventQueue) problem(ctx context.Context, rej *rejection) {
 	if q == nil {
 		return
 	}
 
-	q.emit(ctx, &Event{At: report.At, Report: report, Kind: EventRejected, Key: report.Key})
+	q.emit(ctx, &Event{
+		At: rej.report.At, Report: rej.report, Kind: EventRejected, Key: rej.report.Key, Version: rej.report.Version,
+		Language: rej.language, Storage: rej.storage, Owner: *rej.owner,
+	})
 }
 
 // panicked emits the [EventPanicked] event of a reported failure, unless [Check] reported it.

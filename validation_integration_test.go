@@ -205,9 +205,7 @@ func validationGoesLive(t *testing.T, ctr *plg.Container, lang contractLanguage)
 
 	require.NoError(t, registerValidator(t, ctr, lang, "valid", "p", newTestHost(), testcontract.Check{Mode: "valid"}))
 
-	report, ok := plg.ServingReport(ctr, "valid/p")
-	require.True(t, ok)
-	assert.Empty(t, report.Issues)
+	assert.Empty(t, inspect(t, ctr, "valid/p").Load.Issues)
 
 	fooer := getFooer(t, ctr, "valid/p")
 	validated, err := fooer.Foo(t.Context(), "validated")
@@ -222,12 +220,10 @@ func validationGoesLive(t *testing.T, ctr *plg.Container, lang contractLanguage)
 
 	require.NoError(t, registerValidator(t, ctr, lang, "warn", "p", newTestHost(), testcontract.Check{Mode: "warn"}))
 
-	report, ok = plg.ServingReport(ctr, "warn/p")
-	require.True(t, ok)
 	assert.Equal(t, []plg.Issue{
 		{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
 		{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
-	}, report.Issues)
+	}, inspect(t, ctr, "warn/p").Load.Issues)
 }
 
 // validationBlocks registers the validator plugin with each behaviour that must fail its load.
@@ -345,12 +341,10 @@ func TestScriptValidationFollowsTheLanguage(t *testing.T) {
 			require.NoError(t, registerValidator(t, ctr, lang, "async", "p", newTestHost(),
 				testcontract.Check{Mode: "async"}))
 
-			report, ok := plg.ServingReport(ctr, "async/p")
-			require.True(t, ok)
 			assert.Equal(t, []plg.Issue{
 				{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
 				{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
-			}, report.Issues, "the issues the async Validate's Promise settled with")
+			}, inspect(t, ctr, "async/p").Load.Issues, "the issues the async Validate's Promise settled with")
 		})
 	}
 }
@@ -485,15 +479,13 @@ func TestValidationWorksWithinTheVersionsReservation(t *testing.T) {
 		assert.Equal(t, uint64(hostileLimit), host.charged.Load(), "the validation instance was charged")
 		assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "and released before the pool's instance started")
 
-		report, ok := plg.ServingReport(ctr, "exact/p")
-		require.True(t, ok)
 		assert.Equal(t, []plg.Issue{
 			{
 				Severity: plg.SeverityInfo,
 				Code:     "validator.host",
 				Message:  "create=validating register validate=validating register",
 			},
-		}, report.Issues, "Create and Validate of the validation instance saw IsValidation")
+		}, inspect(t, ctr, "exact/p").Load.Issues, "Create and Validate of the validation instance saw IsValidation")
 
 		origin, err := getFooer(t, ctr, "exact/p").Foo(t.Context(), "origin")
 		require.NoError(t, err)
@@ -522,8 +514,7 @@ func TestValidationRequestsAreLoggedAsSuch(t *testing.T) {
 			testcontract.Check{Mode: "http", URL: api.URL + "/v1/check"},
 			plg.WithHTTP(openPolicy(hostOf(t, api.URL)))))
 
-		report, ok := plg.ServingReport(ctr, "web/p")
-		require.True(t, ok)
+		report := inspect(t, ctr, "web/p").Load
 		require.Len(t, report.Issues, 1)
 		assert.Equal(t, "200 GET /v1/check  "+hostOf(t, api.URL)+" 0", report.Issues[0].Message)
 		assert.Equal(t, int64(1), api.hits.Load())
@@ -593,11 +584,14 @@ func TestValidationKeepsTheLastGoodVersion(t *testing.T) {
 
 		err := plg.ReloadInterface(t.Context(), ctr, "kept")
 		require.ErrorIs(t, err, plg.ErrBlockingIssue)
-		assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
+
+		kept := inspect(t, ctr, "kept/p")
+		assert.Equal(t, "1", kept.Version)
+		assert.Equal(t, plg.StatusServingLastGood, kept.Status)
 		assert.Equal(t, 2, count(), "the last good version's instance serves on")
 
-		rejected, ok := plg.RejectedReport(ctr, "kept/p")
-		require.True(t, ok)
+		rejected := kept.Rejection
+		require.NotNil(t, rejected)
 		assert.Equal(t, "2", rejected.Version)
 		require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
 		assert.Equal(t, []plg.Issue{
@@ -607,19 +601,17 @@ func TestValidationKeepsTheLastGoodVersion(t *testing.T) {
 
 		putValidator(t, store, lang, "p", "3")
 		require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "kept"), plg.ErrValidation)
-		assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
+		assert.Equal(t, "1", inspect(t, ctr, "kept/p").Version)
 		assert.Equal(t, 3, count())
 
 		putValidator(t, store, lang, "p", "4")
 		require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "kept"))
-		assert.Equal(t, "4", plg.Version(ctr, "kept/p"))
+
+		served := inspect(t, ctr, "kept/p")
+		assert.Equal(t, "4", served.Version)
 		assert.Equal(t, 1, count(), "version 4 serves from a fresh instance")
-
-		served, ok := plg.ServingReport(ctr, "kept/p")
-		require.True(t, ok)
-		assert.Len(t, served.Issues, 2)
-
-		_, ok = plg.RejectedReport(ctr, "kept/p")
-		assert.False(t, ok)
+		assert.Len(t, served.Load.Issues, 2)
+		assert.Nil(t, served.Rejection)
+		assert.Equal(t, plg.StatusServing, served.Status)
 	})
 }

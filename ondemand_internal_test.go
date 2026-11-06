@@ -12,7 +12,7 @@ import (
 // validatedGeneration returns a generation, served by no catalogue, of a registration validating under policy.
 func validatedGeneration(policy ValidationPolicy) *plugin {
 	gen := testGeneration()
-	gen.reg = &registration{validation: &validation{policy: policy}, rejections: xsync.NewMap[string, *Report]()}
+	gen.reg = &registration{validation: &validation{policy: policy}, keys: xsync.NewMap[string, *listedPlugin]()}
 	gen.launch = &launcher{owner: noOwner, key: gen.key}
 
 	return gen
@@ -49,12 +49,13 @@ func TestOnDemandUnpublishLeavesAReplacedVersion(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(t.Context())) })
 
 	gen := validatedGeneration(Unpublish)
+	entry := gen.reg.entry(gen.key) // its storages still list it
 	failed := &Report{At: time.Now(), Err: ErrBlockingIssue}
 
 	assert.False(t, ctr.validated(t.Context(), gen, failed))
 	assert.Same(t, failed, gen.validated.Load())
 	assert.False(t, gen.retiring.Load())
-	assert.Zero(t, gen.reg.rejections.Size())
+	assert.Nil(t, entry.rejection.Load())
 	assert.Zero(t, ctr.retired.Size())
 }
 

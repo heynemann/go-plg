@@ -1016,7 +1016,7 @@ Fail(msg: string) { const hoard = []; for (;;) { hoard.push(new Array(1 << 16).f
 	out, err := plug.Foo(ctx, "next")
 	require.NoError(t, err, "a new instance serves the next call")
 	assert.Equal(t, "next", out)
-	assert.Equal(t, 1, plg.Stats(ctr, "ts/p").Size, "the broken instance's place is back")
+	assert.Equal(t, 1, inspect(t, ctr, "ts/p").Pool.Instances, "the broken instance's place is back")
 	assert.Equal(t, uint64(16<<20), plg.MemoryInUse(ctr), "and its budget charge")
 
 	require.ErrorIs(t, ctr.Close(t.Context()), context.DeadlineExceeded, "a healthy instance's Close is bounded")

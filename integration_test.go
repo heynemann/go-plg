@@ -84,6 +84,32 @@ func getFooer(tb testing.TB, ctr *plg.Container, key string) testcontract.Fooer 
 	return fooer
 }
 
+// inspect returns what plg.Info says of the plugin with the given key.
+func inspect(tb testing.TB, ctr *plg.Container, key string) plg.PluginState {
+	tb.Helper()
+
+	state, err := plg.Info(ctr, key)
+	require.NoError(tb, err)
+
+	return state
+}
+
+// poolCounts are the counts of a plugin's pool the tests follow: its instances, the calls they could take now,
+// and the instances started since it warmed.
+type poolCounts struct {
+	Instances, IdleSlots int
+	Refills, Grows       uint64
+}
+
+// countsOf returns the counts of the pool serving the plugin with the given key.
+func countsOf(tb testing.TB, ctr *plg.Container, key string) poolCounts {
+	tb.Helper()
+
+	pool := inspect(tb, ctr, key).Pool
+
+	return poolCounts{Instances: pool.Instances, IdleSlots: pool.IdleSlots, Refills: pool.Refills, Grows: pool.Grows}
+}
+
 // fooerContainer returns a container with the "fooer" name registered for the given Go plugins.
 func fooerContainer(tb testing.TB, dirs map[string]string, opts ...plg.RegisterOption) *plg.Container {
 	tb.Helper()

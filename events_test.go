@@ -79,8 +79,8 @@ func putSkipped(t *testing.T, store *plg.MemoryStorage, key, version string, own
 
 // TestOnEventReportsSkippedAndListingProblems follows the events of plugins that never load: a key listed by two
 // storages is rejected at Register (which fails) and at a reload (which keeps the rest), with its listing problem
-// as the report's Err and nothing known of the plugin; a plugin in a language the Register leaves out is skipped
-// at Register and at every reload, with its descriptor's version, language, storage and owner.
+// as the report's Err and what the second storage lists of it; a plugin in a language the Register leaves out is
+// skipped at Register and at every reload, with its descriptor's version, language, storage and owner.
 func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +100,7 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	require.ErrorIs(t, err, plg.ErrDuplicateKey)
 
 	rejected := nextEvent(t, events)
-	assertEvent(t, &rejected, plg.EventRejected, "dups/dup", "", "", "", &plg.Owner{})
+	assertEvent(t, &rejected, plg.EventRejected, "dups/dup", "1", plg.LanguageTypeScript, "second", &owner)
 	require.NotNil(t, rejected.Report)
 	assert.Equal(t, "dups/dup", rejected.Report.Key)
 	require.ErrorIs(t, rejected.Report.Err, plg.ErrDuplicateKey)
@@ -125,7 +125,7 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	assertEvent(t, &skipped, plg.EventSkipped, "ok/skipped", "3", plg.LanguageTypeScript, "first", &owner)
 
 	rejected = nextEvent(t, events)
-	assertEvent(t, &rejected, plg.EventRejected, "ok/dup", "", "", "", &plg.Owner{})
+	assertEvent(t, &rejected, plg.EventRejected, "ok/dup", "1", plg.LanguageTypeScript, "second", &owner)
 	require.NotNil(t, rejected.Report)
 	require.ErrorIs(t, rejected.Report.Err, plg.ErrDuplicateKey)
 

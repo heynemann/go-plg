@@ -52,7 +52,7 @@ type Container struct {
 	observation  metric.Registration                 // the callback observing the pools' gauges
 	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
 	modules      *xsync.Map[moduleKey, *compiledGuest]
-	names        *xsync.Map[string, bool]          // registered (or registering) names
+	names        *xsync.Map[string, *registration] // registered (or registering) registrations, by name
 	regs         *xsync.Map[string, *registration] // published registrations, by name
 	retired      *xsync.Map[*plugin, context.CancelFunc]
 	catalogue    atomic.Pointer[snapshot]
@@ -81,7 +81,7 @@ func New(opts ...Option) *Container {
 		), // instrument gives it the meters
 		runtimes:     xsync.NewMap[uint64, *engine.Runtime](),
 		modules:      xsync.NewMap[moduleKey, *compiledGuest](),
-		names:        xsync.NewMap[string, bool](),
+		names:        xsync.NewMap[string, *registration](),
 		regs:         xsync.NewMap[string, *registration](),
 		retired:      xsync.NewMap[*plugin, context.CancelFunc](),
 		budget:       memoryBudget{total: cfg.memoryBudget},
@@ -93,6 +93,7 @@ func New(opts ...Option) *Container {
 	ctr.catalogue.Store(&snapshot{})
 
 	ctr.logger = ctr.panics.guardedLogger("", "")
+	ctr.panics.tally = ctr.countPanic
 	ctr.instrument(&cfg)
 
 	// After the instruments: a panic in the logger's handler on the engine's warning is counted in them.

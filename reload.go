@@ -240,7 +240,7 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 func (c *Container) refresh(ctx context.Context, reg *registration, changes *reloadChanges) error {
 	current := c.generations(reg)
 
-	srcs, problems, err := c.relistPlugins(ctx, reg.name, reg.cfg)
+	found, err := c.relistPlugins(ctx, reg.name, reg.cfg)
 	if err != nil {
 		err = fmt.Errorf("plg: reloading %s: %w", reg.name, err)
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload failed", slog.String("name", reg.name),
@@ -250,17 +250,25 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		return err
 	}
 
-	listed := make(map[string]bool, len(srcs)+len(problems))
+	srcs, problems := found.srcs, found.problems
+	// listed holds every key listed: true for those to serve, false for those skipped, whose version goes.
+	listed := make(map[string]bool, len(srcs)+len(problems)+len(found.skipped))
 	errs := make([]error, 0, len(problems)+1)
 
-	for _, p := range problems {
-		key := reg.name + "/" + p.key
+	for i := range problems {
+		key := reg.name + "/" + problems[i].desc.Key
 		listed[key] = true
-		report := &Report{Key: key, At: time.Now(), Err: p.err}
-		reg.rejections.Store(key, report)
-		c.events.problem(ctx, report)
+		rej := problemRejection(key, &problems[i])
+		reg.entry(key).rejection.Store(rej)
+		c.events.problem(ctx, rej)
 
-		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], p.err))
+		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], problems[i].err))
+	}
+
+	for i := range found.skipped {
+		key := reg.name + "/" + found.skipped[i].desc.Key
+		listed[key] = false
+		reg.entry(key).rejection.Store(skipRejection(&found.skipped[i]))
 	}
 
 	for i := range srcs {
@@ -283,12 +291,10 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		}
 	}
 
-	reg.rejections.Range(func(key string, _ *Report) bool {
-		if !listed[key] {
-			reg.rejections.Delete(key)
-		}
+	reg.keys.DeleteMatching(func(key string, _ *listedPlugin) (bool, bool) {
+		_, still := listed[key]
 
-		return true
+		return !still, false
 	})
 
 	return errors.Join(append(errs, c.apply(ctx, reg, current, changes))...)
@@ -296,11 +302,12 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 
 // reloadOne adds to changes the new generation of the listed plugin src when it is new or changed, and returns
 // the failure (logged) when it cannot be loaded; old is the generation served now, if any. The load's report goes
-// with the new generation, or replaces the key's rejection when it fails; a load that succeeds, or finds src
-// unchanged, clears the key's rejection.
+// with the new generation, or becomes the key's rejection when it fails; a load that succeeds clears the key's
+// rejection once its generation is published, and finding src unchanged clears it at once.
 func (c *Container) reloadOne(ctx context.Context, reg *registration, key string, src *source, old *plugin,
 	changes *reloadChanges,
 ) error {
+	entry := reg.entry(key) // before the load, which may report panics under key
 	gen, report, err := c.update(ctx, reg, key, src, old)
 
 	switch {
@@ -308,7 +315,7 @@ func (c *Container) reloadOne(ctx context.Context, reg *registration, key string
 		return err
 	case err != nil:
 		c.finishReport(ctx, report, src, err)
-		reg.rejections.Store(key, report)
+		entry.rejection.Store(loadRejection(src, report))
 		c.events.source(ctx, EventRejected, key, src, report)
 		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), err)
 
@@ -317,15 +324,12 @@ func (c *Container) reloadOne(ctx context.Context, reg *registration, key string
 		c.finishReport(ctx, report, src, nil)
 
 		gen.report = report
-
-		reg.rejections.Delete(key)
-
 		changes.loaded = append(changes.loaded, gen) // the round's to close until it publishes it
 
 		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), nil)
 
 	default: // unchanged
-		reg.rejections.Delete(key)
+		entry.served(old)
 	}
 
 	return nil
@@ -450,6 +454,7 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 	changes.loaded = nil // published: the round no longer closes them
 
 	for _, gen := range loaded {
+		reg.entry(gen.key).served(gen)
 		c.events.generation(ctx, EventLoaded, gen, gen.report)
 
 		if old := current[gen.key]; old != nil {

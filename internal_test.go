@@ -21,6 +21,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -500,6 +501,24 @@ func warmPool(tb testing.TB, spawner *fakeSpawner, cfg *poolConfig) *pool {
 	return instances
 }
 
+// poolCounts are the counts of a pool's [PoolStats] that the pool tests follow: those of instances and refills.
+type poolCounts struct {
+	Instances, IdleSlots int
+	Refills, Grows       uint64
+}
+
+// counts returns the counts of p's stats the pool tests follow.
+func counts(p *pool) poolCounts {
+	stats := p.stats()
+
+	return poolCounts{
+		Instances: stats.Instances,
+		IdleSlots: stats.IdleSlots,
+		Refills:   stats.Refills,
+		Grows:     stats.Grows,
+	}
+}
+
 // startPool warms a pool built by newTestPool in a synctest bubble, then waits for its refiller to find the pool
 // at its minimum and wait for a signal. Otherwise the refiller's first look at the pool races the test's first
 // callers: seeing one waiting, it could start the instance the test expects that caller to start.
@@ -549,14 +568,16 @@ func TestPoolGrowsToItsMaximumThenWaits(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		spawner, budget := &fakeSpawner{}, &memoryBudget{}
+		spawner.memory.Store(64 << 10)
+
 		instances := startPool(t, spawner, &poolConfig{budget: budget, minSize: 1, maxSize: 3})
 
 		held := acquireN(t, instances, 3)
 		assert.Equal(t, []uint64{1, 2, 3}, []uint64{held[0].id, held[1].id, held[2].id})
 		assert.Equal(
 			t,
-			PoolStats{Size: 3, Grows: 2},
-			instances.stats(),
+			poolCounts{Instances: 3, Grows: 2},
+			counts(instances),
 			"callers started the instances past the minimum",
 		)
 		assert.Equal(t, uint64(3*testLimit), budget.used.Load())
@@ -570,6 +591,10 @@ func TestPoolGrowsToItsMaximumThenWaits(t *testing.T) {
 		got := acquireLater(t, instances)
 
 		synctest.Wait()
+		assert.Equal(t, PoolStats{
+			Min: 1, Max: 3, Instances: 3, InUse: 3, CallsInFlight: 3, Waiting: 1, Grows: 2,
+			MemoryLimit: testLimit, Memory: 3 * (64 << 10),
+		}, instances.stats(), "every instance serves a call, and a caller waits")
 		instances.release(t.Context(), held[1])
 		assert.Same(t, held[1], <-got, "a waiting caller gets the next instance given back")
 
@@ -595,7 +620,7 @@ func TestPoolCallerStartFailureGivesThePlaceBack(t *testing.T) {
 
 		_, err := instances.acquire(t.Context())
 		require.ErrorIs(t, err, errFake, "the caller's Create failed")
-		assert.Equal(t, PoolStats{Size: 1}, instances.stats())
+		assert.Equal(t, poolCounts{Instances: 1}, counts(instances))
 		assert.Equal(t, uint64(testLimit), budget.used.Load())
 
 		next := acquireN(t, instances, 1)[0]
@@ -619,7 +644,7 @@ func TestPoolRefillsToItsMinimumInTheBackground(t *testing.T) {
 		}
 
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 3, Idle: 3, Refills: 2}, instances.stats(),
+		assert.Equal(t, poolCounts{Instances: 3, IdleSlots: 3, Refills: 2}, counts(instances),
 			"the refiller replaced both discarded instances; no caller started one")
 
 		require.NoError(t, instances.close(t.Context()))
@@ -690,7 +715,7 @@ func TestPoolRefillBacksOffExponentially(t *testing.T) {
 			assert.Equal(t, gaps[i], attr(&record, "retry_in").Duration())
 		}
 
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 1}, counts(instances))
 
 		spawner.failures.Store(1)
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
@@ -719,7 +744,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded, "under its maximum, but the budget is spent: callers wait")
 
 		synctest.Wait()
-		assert.Equal(t, 2, instances.stats().Size)
+		assert.Equal(t, 2, instances.stats().Instances)
 		assert.Equal(t, uint64(2*testLimit), budget.used.Load())
 
 		records := rec.drain()
@@ -892,7 +917,7 @@ func TestPoolCloseGivesUpWaitingWhenItsContextEnds(t *testing.T) {
 
 		instances.release(t.Context(), held)
 		assert.Equal(t, int32(1), spawner.closed.Load(), "given back, it is closed at once")
-		assert.Equal(t, PoolStats{}, instances.stats())
+		assert.Equal(t, poolCounts{}, counts(instances))
 	})
 }
 
@@ -917,7 +942,7 @@ func TestPoolNeverStartsAnInstanceAfterItClosed(t *testing.T) {
 		synctest.Wait()
 		assert.Zero(t, spawner.started.Load(), "no instance started after close")
 		assert.Zero(t, spawner.closed.Load())
-		assert.Equal(t, PoolStats{}, instances.stats())
+		assert.Equal(t, poolCounts{}, counts(instances))
 		assert.Zero(t, budget.used.Load())
 	})
 }
@@ -1003,7 +1028,7 @@ func TestPoolCloseStopsARefillerStartingAnInstance(t *testing.T) {
 		synctest.Wait()
 
 		require.NoError(t, instances.close(t.Context()))
-		assert.Equal(t, PoolStats{}, instances.stats())
+		assert.Equal(t, poolCounts{}, counts(instances))
 	})
 }
 
@@ -1181,7 +1206,7 @@ func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
 		failure := requirePanicError(t, cold.warm(t.Context()), PhaseLoad)
 		assert.Equal(t, "spawn bug", failure.Value)
 		assert.Contains(t, string(failure.Stack), "(*fakeSpawner).spawn", "the stack where it panicked")
-		assert.Equal(t, PoolStats{}, cold.stats(), "the place was given back")
+		assert.Equal(t, poolCounts{}, counts(cold), "the place was given back")
 		<-spawner.attempts
 
 		instances := startPool(t, spawner, &poolConfig{panics: reporter, minSize: 1, maxSize: 2})
@@ -1195,7 +1220,7 @@ func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
 		requirePanicError(t, err, PhaseCall)
 		<-spawner.attempts
 		synctest.Wait()
-		assert.Equal(t, 1, instances.stats().Size, "the caller's place was given back")
+		assert.Equal(t, 1, instances.stats().Instances, "the caller's place was given back")
 
 		spawner.panics.Store(1)
 		instances.discard(t.Context(), held) // the refiller replaces it: a panic, then a success
@@ -1204,7 +1229,7 @@ func TestPoolRecoversPanicsStartingInstances(t *testing.T) {
 		assert.Equal(t, refillBackoffFirst, second.Sub(first), "the panic was a failure: the refiller backed off")
 
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 1}, counts(instances))
 
 		recent := reporter.history.recent()
 		require.Len(t, recent, 3)
@@ -1243,7 +1268,7 @@ func TestRefillerSurvivesAPanickingLogger(t *testing.T) {
 		assert.Equal(t, refillBackoffFirst, second.Sub(first), "the failure backed off, once")
 
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the refiller went on")
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 1}, counts(instances), "the refiller went on")
 
 		recent := reporter.history.recent()
 		require.Len(t, recent, 1, "the logger's panic, contained")
@@ -1425,11 +1450,16 @@ func TestPoolReportsPanicsClosingInstances(t *testing.T) {
 		require.Len(t, records, 2)
 		assert.Equal(t, "plg: plugin failure", records[0].Message)
 		assert.Equal(t, "plg: closing a discarded instance failed", records[1].Message)
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the place was given back")
+		assert.Equal(
+			t,
+			poolCounts{Instances: 1, IdleSlots: 1, Refills: 1},
+			counts(instances),
+			"the place was given back",
+		)
 
 		err := instances.close(t.Context())
 		requirePanicError(t, err, PhaseClose)
-		assert.Zero(t, instances.stats().Size, "every place given back")
+		assert.Zero(t, instances.stats().Instances, "every place given back")
 	})
 }
 
@@ -1502,7 +1532,7 @@ func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0]) // the refiller's count of it panics
 		synctest.Wait()
 
-		require.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the instance is idle")
+		require.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 1}, counts(instances), "the instance is idle")
 		assert.Equal(t, uint64(testLimit), budget.used.Load(), "one instance charged")
 
 		recent := reporter.history.recent()
@@ -1510,7 +1540,7 @@ func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
 		requireMeterPanic(t, recent[0])
 
 		require.NoError(t, instances.close(t.Context()))
-		assert.Equal(t, PoolStats{Refills: 1}, instances.stats(), "every place given back")
+		assert.Equal(t, poolCounts{Refills: 1}, counts(instances), "every place given back")
 		assert.Zero(t, budget.used.Load())
 	})
 }
@@ -1542,7 +1572,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		instances.discard(t.Context(), held) // counting the refill panics
 		<-spawner.attempts
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats())
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 1}, counts(instances))
 
 		spawner.panics.Store(1) // the refill panics: counting that panic, then the failure, panic too
 		instances.discard(t.Context(), acquireN(t, instances, 1)[0])
@@ -1550,7 +1580,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		failed, retried := <-spawner.attempts, <-spawner.attempts
 		assert.Equal(t, refillBackoffFirst, retried.Sub(failed), "the refiller backed off once")
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 2}, instances.stats())
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1, Refills: 2}, counts(instances))
 		assert.Equal(t, uint64(testLimit), budget.used.Load(), "one instance charged")
 
 		assert.NotPanics(t, func() { instances.called(t.Context(), 0, time.Millisecond, nil) })
@@ -1567,7 +1597,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		}
 
 		require.NoError(t, instances.close(t.Context()))
-		assert.Equal(t, PoolStats{Refills: 2}, instances.stats(), "every place given back")
+		assert.Equal(t, poolCounts{Refills: 2}, counts(instances), "every place given back")
 		assert.Zero(t, budget.used.Load())
 	})
 }
@@ -1598,7 +1628,12 @@ func TestPoolContainsAPanickingLogger(t *testing.T) {
 
 		assert.NotPanics(t, func() { instances.discard(t.Context(), acquireN(t, instances, 1)[0]) })
 		synctest.Wait()
-		assert.Equal(t, PoolStats{Size: 1, Idle: 1, Refills: 1}, instances.stats(), "the place was given back")
+		assert.Equal(
+			t,
+			poolCounts{Instances: 1, IdleSlots: 1, Refills: 1},
+			counts(instances),
+			"the place was given back",
+		)
 		assert.Equal(t, uint64(testLimit), budget.used.Load())
 
 		held := acquireN(t, instances, 1)[0]
@@ -1607,7 +1642,7 @@ func TestPoolContainsAPanickingLogger(t *testing.T) {
 		require.ErrorIs(t, instances.close(ended), context.Canceled, "close gave up waiting for the held instance")
 
 		assert.NotPanics(t, func() { instances.release(t.Context(), held) }, "given back, it closes at once")
-		assert.Equal(t, PoolStats{Refills: 1}, instances.stats())
+		assert.Equal(t, poolCounts{Refills: 1}, counts(instances))
 		assert.Zero(t, budget.used.Load())
 
 		recent := reporter.history.recent()
@@ -3030,7 +3065,7 @@ func TestMuxInterleavesCallsOnOneInstance(t *testing.T) {
 
 	guest, web := newScriptedGuest(), newFakeWeb()
 	instances := muxPool(t, guest, 3, web.serve, nil)
-	assert.Equal(t, PoolStats{Size: 1, Idle: 3}, instances.stats(), "one instance, three lanes")
+	assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 3}, counts(instances), "one instance, three lanes")
 	assert.Equal(t, int64(scriptedMemory), instances.memory.Load(), "an instance's memory is counted once")
 
 	held := acquireN(t, instances, 3)
@@ -4178,7 +4213,166 @@ func TestPoolClosesAnInstanceAcquiredAfterItsCloseGaveUp(t *testing.T) {
 	_, err := instances.acquire(t.Context())
 	require.ErrorIs(t, err, ErrClosed)
 	assert.Equal(t, int32(1), spawner.closed.Load())
-	assert.Equal(t, PoolStats{}, instances.stats())
+	assert.Equal(t, poolCounts{}, counts(instances))
+}
+
+// servedGeneration returns a generation, published by no catalogue, served by a warm pool of one fake instance
+// and loaded as report says.
+func servedGeneration(t *testing.T, report *Report) *plugin {
+	t.Helper()
+
+	gen := testGeneration()
+	gen.pool = warmPool(t, &fakeSpawner{}, &poolConfig{minSize: 1, maxSize: 1})
+	gen.report, gen.storage = report, "store"
+
+	t.Cleanup(func() { assert.NoError(t, gen.pool.close(context.Background())) })
+
+	return gen
+}
+
+// TestStateOfWeighsTheRejectionAgainstTheVersionServed describes a listed plugin whose listing a load rejected,
+// an on-demand validation retired or its Register skipped, with and without a version served: beside a version,
+// only a failed load counts (serving_last_good), a retirement being a race's leftover and a skip a change not
+// published yet; a failed on-demand validation of the version outweighs them all. With neither a version nor a
+// rejection, nothing is known.
+func TestStateOfWeighsTheRejectionAgainstTheVersionServed(t *testing.T) {
+	t.Parallel()
+
+	reg := &registration{name: "test", keys: xsync.NewMap[string, *listedPlugin]()}
+	loaded := &Report{Key: "test/k", At: time.Unix(10, 0), Duration: time.Second}
+	failed := &Report{Key: "test/k", Version: "2", Err: ErrBlockingIssue}
+	tests := []struct {
+		rej       *rejection
+		validated *Report // the version's latest on-demand validation, with a version served
+		rejection *Report // the PluginState's
+		name      string
+		want      Status // with no version served, then with one
+		served    Status
+	}{
+		{name: "none", served: StatusServing},
+		{
+			name: "rejected", rej: &rejection{report: failed, status: StatusRejected}, rejection: failed,
+			want: StatusRejected, served: StatusServingLastGood,
+		},
+		{
+			name: "retired", rej: &rejection{report: failed, status: StatusRetired}, rejection: failed,
+			want: StatusRetired, served: StatusServing,
+		},
+		{name: "skipped", rej: &rejection{status: StatusSkipped}, want: StatusSkipped, served: StatusServing},
+		{
+			name: "degraded", rej: &rejection{report: failed, status: StatusRejected}, rejection: failed,
+			validated: &Report{Err: ErrValidation}, want: StatusRejected, served: StatusDegraded,
+		},
+	}
+
+	for _, tc := range tests {
+		entry := &listedPlugin{}
+
+		if tc.rej != nil {
+			tc.rej.owner = &noOwner.owner
+			entry.rejection.Store(tc.rej)
+		}
+
+		state, known := stateOf(reg, "test/k", nil, entry)
+		assert.Equal(t, tc.rej != nil, known, tc.name)
+		assert.Equal(t, tc.want, state.Status, tc.name)
+		assert.Equal(t, tc.rejection, state.Rejection, tc.name)
+		assert.Nil(t, state.Load, tc.name)
+
+		gen := servedGeneration(t, loaded)
+		gen.validated.Store(tc.validated)
+
+		state, known = stateOf(reg, "test/k", gen, entry)
+		assert.True(t, known, tc.name)
+		assert.Equal(t, tc.served, state.Status, tc.name)
+		assert.Same(t, loaded, state.Load, tc.name)
+		assert.Equal(t, time.Unix(11, 0), state.LoadedAt, "%s: when its load ended", tc.name)
+
+		if tc.served == StatusServingLastGood || tc.served == StatusDegraded {
+			assert.Same(t, failed, state.Rejection, tc.name)
+			assert.Equal(t, "2", state.RejectedVersion, tc.name)
+		} else {
+			assert.Nil(t, state.Rejection, "%s: beside the version served it does not count", tc.name)
+			assert.Empty(t, state.RejectedVersion, tc.name)
+		}
+	}
+}
+
+// TestReloadClearsARejectionUnlessItRetiredTheVersionKept clears the rejection of a listing the reload found
+// served, as it stands, unless an on-demand validation retired that very version after the reload found it
+// served: then no version serves, and the retirement stays.
+func TestReloadClearsARejectionUnlessItRetiredTheVersionKept(t *testing.T) {
+	t.Parallel()
+
+	kept, other := testGeneration(), testGeneration()
+
+	for _, tc := range []struct {
+		rej  *rejection
+		name string
+		kept bool
+	}{
+		{name: "rejected", rej: &rejection{status: StatusRejected}},
+		{name: "skipped", rej: &rejection{status: StatusSkipped}},
+		{name: "another version retired", rej: &rejection{status: StatusRetired, retired: other}},
+		{name: "the version kept retired", rej: &rejection{status: StatusRetired, retired: kept}, kept: true},
+	} {
+		entry := &listedPlugin{}
+		entry.rejection.Store(tc.rej)
+		entry.served(kept)
+
+		if tc.kept {
+			assert.Same(t, tc.rej, entry.rejection.Load(), tc.name)
+		} else {
+			assert.Nil(t, entry.rejection.Load(), tc.name)
+		}
+	}
+
+	entry := &listedPlugin{}
+	entry.served(kept)
+	assert.Nil(t, entry.rejection.Load(), "no rejection stays none")
+}
+
+// TestPanicsCountTowardTheListedKeyTheyName reports PanicErrors under a key its registration lists, the
+// registration's name, a key it does not list, another registration's key and no key, through the reporter's
+// report and its callback boundary, in a container keeping no history: only the listed key's count grows, its
+// newest PanicError is kept whatever order they arrive in, no record is made for the others, and a Check's
+// PanicError under the listed key is not counted.
+func TestPanicsCountTowardTheListedKeyTheyName(t *testing.T) {
+	t.Parallel()
+
+	ctr := New(WithPanicHistory(0))
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	reg := &registration{name: "reg", keys: xsync.NewMap[string, *listedPlugin]()}
+	ctr.names.Store("reg", reg)
+
+	listed := reg.entry("reg/p")
+
+	for _, key := range []string{"reg/p", "reg", "reg/unlisted", "other/p", ""} {
+		ctr.panics.report(t.Context(), &PanicError{Key: key, Phase: PhaseCall})
+	}
+
+	reported := listed.lastPanic.Load()
+	require.NotNil(t, reported)
+	assert.Equal(t, "reg/p", reported.Key)
+	assert.Equal(t, uint64(1), listed.panics.Load())
+	assert.Equal(t, 1, reg.keys.Size(), "a key no listing names gets no record")
+	assert.Empty(t, ctr.RecentPanics(), "counted, though the history keeps nothing")
+
+	ctr.panics.callback(t.Context(), "reg/p", LanguageGo, "Host.Lookup", func() { panic("host bug") })
+
+	newest := listed.lastPanic.Load()
+	assert.Equal(t, PhaseCallback, newest.Phase, "the callback's failure is the newest")
+	assert.Equal(t, uint64(2), listed.panics.Load())
+
+	listed.panicked(&PanicError{Key: "reg/p", Time: reported.Time.Add(-time.Hour)})
+	assert.Same(t, newest, listed.lastPanic.Load(), "an older PanicError arriving late is counted, not kept")
+	assert.Equal(t, uint64(3), listed.panics.Load())
+
+	ctr.panics.report(context.WithValue(t.Context(), checkKey{}, true), &PanicError{Key: "reg/p", Phase: PhaseLoad})
+	assert.Equal(t, uint64(3), listed.panics.Load(), "a Check's PanicError is not the plugin's")
+	assert.Same(t, newest, listed.lastPanic.Load())
 }
 
 // TestEventsAfterCloseAreNotQueued emits an event once Close stopped delivering, as a Validate or a panic report
@@ -4190,7 +4384,7 @@ func TestEventsAfterCloseAreNotQueued(t *testing.T) {
 	require.NoError(t, ctr.Close(t.Context()))
 
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall, Value: "late"})
-	ctr.events.problem(t.Context(), &Report{Key: "n/k", At: time.Now(), Err: ErrDuplicateKey})
+	ctr.events.problem(t.Context(), problemRejection("n/k", &problem{err: ErrDuplicateKey, desc: Descriptor{Key: "k"}}))
 
 	assert.Empty(t, ctr.events.queue)
 	assert.Len(t, ctr.RecentPanics(), 1, "the panic itself was still reported")

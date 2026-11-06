@@ -534,7 +534,7 @@ func TestReloadHonoursTheMemoryBudget(t *testing.T) {
 	err := plg.ReloadInterface(t.Context(), ctr, "budget")
 	require.ErrorIs(t, err, plg.ErrMemoryBudget)
 	require.ErrorContains(t, err, "budget/b")
-	assert.Equal(t, "v2", plg.Version(ctr, "budget/a"), "the update fit beside the version it replaces")
+	assert.Equal(t, "v2", inspect(t, ctr, "budget/a").Version, "the update fit beside the version it replaces")
 
 	_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, "budget/b")
 	require.ErrorIs(t, err, plg.ErrNotFound, "the new plugin did not fit")
@@ -546,7 +546,7 @@ func TestReloadHonoursTheMemoryBudget(t *testing.T) {
 	putVersioned(t, store, "a", "v3")
 	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "budget"), plg.ErrMemoryBudget,
 		"the budget is full: no update fits")
-	assert.Equal(t, "v2", plg.Version(ctr, "budget/a"), "the last good version keeps serving")
+	assert.Equal(t, "v2", inspect(t, ctr, "budget/a").Version, "the last good version keeps serving")
 	assert.Equal(t, uint64(2*128*mib), plg.MemoryReserved(ctr))
 }
 
@@ -564,13 +564,13 @@ func TestReloadKeepsThePreviousVersionOfADuplicateKey(t *testing.T) {
 
 	putVersioned(t, second, "k", "v2")
 	require.ErrorIs(t, ctr.Reload(t.Context()), plg.ErrDuplicateKey)
-	assert.Equal(t, "v1", plg.Version(ctr, "dup/k"))
+	assert.Equal(t, "v1", inspect(t, ctr, "dup/k").Version)
 	assert.Contains(t, logs.String(), `"msg":"plg: reload kept the last good version of a plugin","key":"dup/k",`+
 		`"version":"v1"`)
 
 	first.Delete("k")
 	require.NoError(t, ctr.Reload(t.Context()))
-	assert.Equal(t, "v2", plg.Version(ctr, "dup/k"))
+	assert.Equal(t, "v2", inspect(t, ctr, "dup/k").Version)
 }
 
 func TestReloadInterfaceReloadsOnlyItsRegistration(t *testing.T) {
@@ -587,11 +587,11 @@ func TestReloadInterfaceReloadsOnlyItsRegistration(t *testing.T) {
 	}
 
 	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "one"))
-	assert.Equal(t, "v2", plg.Version(ctr, "one/k"))
-	assert.Equal(t, "v1", plg.Version(ctr, "two/k"))
+	assert.Equal(t, "v2", inspect(t, ctr, "one/k").Version)
+	assert.Equal(t, "v1", inspect(t, ctr, "two/k").Version)
 
 	require.NoError(t, ctr.Reload(t.Context()))
-	assert.Equal(t, "v2", plg.Version(ctr, "two/k"))
+	assert.Equal(t, "v2", inspect(t, ctr, "two/k").Version)
 }
 
 // TestAHangingCloseCannotHoldARetiredVersion removes a plugin whose Close never returns: closing its version is

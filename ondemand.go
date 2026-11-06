@@ -223,7 +223,8 @@ func (c *Container) validated(ctx context.Context, gen *plugin, report *Report) 
 
 // unpublish removes gen, whose on-demand validation failed with report, from the catalogue and retires it,
 // unless the catalogue no longer serves it (a reload replaced or removed it, or the container closed). The report
-// becomes the key's rejection, until a reload loads the plugin again. It reports whether it unpublished gen.
+// becomes the key's rejection, as a retirement, until a reload loads the plugin again. It reports whether it
+// unpublished gen.
 func (c *Container) unpublish(ctx context.Context, gen *plugin, report *Report, attrs []slog.Attr) bool {
 	for {
 		old := c.catalogue.Load()
@@ -236,7 +237,10 @@ func (c *Container) unpublish(ctx context.Context, gen *plugin, report *Report, 
 		}
 	}
 
-	gen.reg.rejections.Store(gen.key, report)
+	if entry, listed := gen.reg.keys.Load(gen.key); listed { // a reload may have stopped listing it meanwhile
+		entry.rejection.Store(retireRejection(gen, report))
+	}
+
 	c.events.generation(ctx, EventRejected, gen, report)
 	c.retire(ctx, gen)
 

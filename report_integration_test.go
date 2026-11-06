@@ -5,6 +5,7 @@ package plg_test
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -160,8 +161,7 @@ func TestLoadReportsFlagMissingOwnership(t *testing.T) {
 
 		after := time.Now()
 
-		report, ok := plg.ServingReport(ctr, tc.name+"/p")
-		require.True(t, ok, tc.name)
+		report := *inspect(t, ctr, tc.name+"/p").Load
 
 		assert.Equal(t, tc.name+"/p", report.Key, tc.name)
 		assert.Equal(t, "1", report.Version, tc.name)
@@ -232,9 +232,7 @@ func TestRequiredOwnershipBlocksRegister(t *testing.T) {
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "owned",
 		plg.WithStorage(plg.NewFSStorage(owned)), plg.WithPool(1, 1), plg.WithRequiredOwnership()))
 
-	report, ok := plg.ServingReport(ctr, "owned/p")
-	require.True(t, ok)
-	assert.Empty(t, report.Issues)
+	assert.Empty(t, inspect(t, ctr, "owned/p").Load.Issues)
 
 	require.NoError(t, ctr.Close(t.Context())) // every record is written
 	assert.Equal(t, []issueRecord{{
@@ -275,20 +273,25 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 
 		return plg.ReloadInterface(t.Context(), ctr, "owned")
 	}
-	rejection := func(key string) (plg.Report, bool) {
+	// rejection returns the key's rejection: nil when it has none, or when Info knows nothing of the key.
+	rejection := func(key string) *plg.Report {
 		t.Helper()
 
-		return plg.RejectedReport(ctr, key)
+		state, err := plg.Info(ctr, key)
+		if errors.Is(err, plg.ErrNotFound) {
+			return nil
+		}
+
+		require.NoError(t, err)
+
+		return state.Rejection
 	}
 
 	assert.Equal(t, 1, count())
 
-	served, ok := plg.ServingReport(ctr, "owned/p")
-	require.True(t, ok)
+	served := inspect(t, ctr, "owned/p").Load
 	assert.Empty(t, served.Issues)
-
-	_, ok = rejection("owned/p")
-	assert.False(t, ok, "no rejection after a good Register")
+	assert.Nil(t, rejection("owned/p"), "no rejection after a good Register")
 
 	// An update without a contact is rejected; version 1 serves on.
 	writeManifest(t, root, "p", "2", teamOnlyOwner)
@@ -296,11 +299,11 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	err := reload()
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
 	assert.Contains(t, err.Error(), "owned/p")
-	assert.Equal(t, "1", plg.Version(ctr, "owned/p"))
+	assert.Equal(t, "1", inspect(t, ctr, "owned/p").Version)
 	assert.Equal(t, 2, count(), "the last good version's instance serves on")
 
-	rejected, ok := rejection("owned/p")
-	require.True(t, ok)
+	rejected := rejection("owned/p")
+	require.NotNil(t, rejected)
 	assert.Equal(t, "2", rejected.Version)
 	assert.Equal(t, plg.Owner{Team: plg.Team{Name: "payments"}}, rejected.Owner)
 	require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
@@ -308,37 +311,29 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	assert.Equal(t, plg.SeverityError, rejected.Issues[0].Severity)
 	assert.Equal(t, plg.CodeOwnershipMissing, rejected.Issues[0].Code)
 	assert.Equal(t, "owner.contact", rejected.Issues[0].Field)
-
-	stillServed, ok := plg.ServingReport(ctr, "owned/p")
-	require.True(t, ok)
-	assert.Equal(t, served, stillServed, "the last good version keeps its report")
+	assert.Same(t, served, inspect(t, ctr, "owned/p").Load, "the last good version keeps its report")
 
 	// A good version 3 replaces version 1 and clears the rejection.
 	writeManifest(t, root, "p", "3", minimalOwner)
 	require.NoError(t, reload())
 	assert.Equal(t, 1, count(), "version 3 loaded")
 
-	served, ok = plg.ServingReport(ctr, "owned/p")
-	require.True(t, ok)
+	served = inspect(t, ctr, "owned/p").Load
 	assert.Equal(t, "3", served.Version)
 	assert.Empty(t, served.Issues)
-
-	_, ok = rejection("owned/p")
-	assert.False(t, ok, "a good load clears the rejection")
+	assert.Nil(t, rejection("owned/p"), "a good load clears the rejection")
 
 	// Rejected again, then the storage lists version 3 again: unchanged, and the rejection goes.
 	writeManifest(t, root, "p", "4", contactOnlyOwner)
 	require.ErrorIs(t, reload(), plg.ErrBlockingIssue)
 
-	_, ok = rejection("owned/p")
-	require.True(t, ok)
+	require.NotNil(t, rejection("owned/p"))
 
 	writeManifest(t, root, "p", "3", minimalOwner)
 	require.NoError(t, reload())
 	assert.Equal(t, 2, count(), "version 3 was not loaded again")
 
-	_, ok = rejection("owned/p")
-	assert.False(t, ok, "listing the served version again clears the rejection")
+	assert.Nil(t, rejection("owned/p"), "listing the served version again clears the rejection")
 
 	// A new plugin without an owner is rejected and never served; it goes when no longer listed.
 	writeLuaPlugin(t, extra, "q", "")
@@ -347,11 +342,10 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, "owned/q")
 	require.ErrorIs(t, err, plg.ErrNotFound)
 
-	_, ok = plg.ServingReport(ctr, "owned/q")
-	assert.False(t, ok)
+	assert.Nil(t, inspect(t, ctr, "owned/q").Load, "no version of it serves")
 
-	newRejected, ok := rejection("owned/q")
-	require.True(t, ok)
+	newRejected := rejection("owned/q")
+	require.NotNil(t, newRejected)
 	assert.Equal(t, "1", newRejected.Version)
 	require.Len(t, newRejected.Issues, 1)
 	assert.Equal(t, "owner", newRejected.Issues[0].Field)
@@ -362,17 +356,15 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	require.ErrorIs(t, reload(), plg.ErrDuplicateKey)
 	assert.Equal(t, 3, count(), "version 3 serves on")
 
-	_, ok = rejection("owned/q")
-	assert.False(t, ok, "a key no longer listed has no rejection")
+	assert.Nil(t, rejection("owned/q"), "a key no longer listed has no rejection")
 
-	duplicate, ok := rejection("owned/p")
-	require.True(t, ok)
+	duplicate := rejection("owned/p")
+	require.NotNil(t, duplicate)
 	require.ErrorIs(t, duplicate.Err, plg.ErrDuplicateKey)
 	assert.Empty(t, duplicate.Issues)
 
 	require.NoError(t, os.RemoveAll(filepath.Join(extra, "p")))
 	require.NoError(t, reload())
 
-	_, ok = rejection("owned/p")
-	assert.False(t, ok)
+	assert.Nil(t, rejection("owned/p"))
 }

@@ -304,9 +304,9 @@ func TestAPanickingLoggerNeverFailsAStepOnGuestOutput(t *testing.T) {
 	assert.Len(t, ctr.RecentPanics(), 2, "each Create's output")
 
 	for _, key := range []string{"printing/line", "printing/partial"} {
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, key), key)
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1}, countsOf(t, ctr, key), key)
 		assert.Equal(t, "hello, x", greet(t, getFooer(t, ctr, key), "x"), key)
-		assert.Equal(t, plg.PoolStats{Size: 1, Idle: 1}, plg.Stats(ctr, key), "%s: the instance was kept", key)
+		assert.Equal(t, poolCounts{Instances: 1, IdleSlots: 1}, countsOf(t, ctr, key), "%s: the instance was kept", key)
 	}
 
 	panics := ctr.RecentPanics()

@@ -153,17 +153,21 @@ func TestOnDemandValidationDegradesUntilAPassingOne(t *testing.T) {
 		assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "%s: its charge was given back", mode)
 		assert.Equal(t, uint64(hostileLimit), plg.MemoryReserved(ctr), "%s: so was its extra room", mode)
 
-		kept, ok := plg.ValidatedReport(ctr, key)
-		require.True(t, ok, mode)
-		assert.Equal(t, report.Issues, kept.Issues, "%s: the report is kept with the version", mode)
-		assert.Equal(t, report.At, kept.At, mode)
-		assert.Equal(t, report.Err, kept.Err, "%s: the version is degraded while it failed", mode)
+		state := inspect(t, ctr, key)
+		require.NotNil(t, state.Validation, mode)
+		assert.Equal(t, report, *state.Validation, "%s: the report is kept with the version", mode)
+
+		status := plg.StatusServing
+		if report.Err != nil {
+			status = plg.StatusDegraded
+		}
+
+		assert.Equal(t, status, state.Status, "%s: the version is degraded while it failed", mode)
 
 		return report
 	}
 
-	_, ok := plg.ValidatedReport(ctr, key)
-	assert.False(t, ok, "no on-demand validation ran yet")
+	assert.Nil(t, inspect(t, ctr, key).Validation, "no on-demand validation ran yet")
 
 	report := validate("valid")
 	require.NoError(t, report.Err)
@@ -286,10 +290,10 @@ func TestOnDemandValidationUnpublishesUntilAPassingReload(t *testing.T) {
 	_, err = plg.Validate(t.Context(), ctr, key)
 	require.ErrorIs(t, err, plg.ErrNotFound)
 
-	rejected, ok := plg.RejectedReport(ctr, key)
-	require.True(t, ok, "the failed validation is the key's rejection")
-	assert.Equal(t, report.Issues, rejected.Issues)
-	require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
+	retired := inspect(t, ctr, key)
+	assert.Equal(t, plg.StatusRetired, retired.Status)
+	require.NotNil(t, retired.Rejection, "the failed validation is the key's rejection")
+	assert.Equal(t, report, *retired.Rejection)
 
 	assert.Equal(t, 1, plg.Retired(ctr), "the version drains its call in flight")
 	assert.Equal(t, 1, plg.Instances(ctr))
@@ -307,19 +311,23 @@ func TestOnDemandValidationUnpublishesUntilAPassingReload(t *testing.T) {
 	require.ErrorIs(t, err, plg.ErrNotFound)
 	assert.Zero(t, plg.Instances(ctr))
 
+	rejected := inspect(t, ctr, key)
+	assert.Equal(t, plg.StatusRejected, rejected.Status, "the reload's failed load is the rejection now")
+	require.NotNil(t, rejected.Rejection)
+	require.ErrorIs(t, rejected.Rejection.Err, plg.ErrBlockingIssue)
+
 	checks.set(map[string]string{key: "valid"})
 	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "gone"))
 
 	count, err := getFooer(t, ctr, key).Count(t.Context())
 	require.NoError(t, err, "a passing reload publishes the plugin again")
 	assert.Equal(t, 1, count, "from a fresh instance")
-	assert.Equal(t, "1", plg.Version(ctr, key))
 
-	_, ok = plg.RejectedReport(ctr, key)
-	assert.False(t, ok)
-
-	_, ok = plg.ValidatedReport(ctr, key)
-	assert.False(t, ok, "the new version has no on-demand validation yet")
+	served := inspect(t, ctr, key)
+	assert.Equal(t, plg.StatusServing, served.Status)
+	assert.Equal(t, "1", served.Version)
+	assert.Nil(t, served.Rejection)
+	assert.Nil(t, served.Validation, "the new version has no on-demand validation yet")
 }
 
 // TestValidateAllCoversEveryValidatingRegistration validates every plugin of two validating registrations, in
@@ -359,8 +367,8 @@ func TestValidateAllCoversEveryValidatingRegistration(t *testing.T) {
 	for _, key := range keys {
 		assert.Equal(t, key, reports[key].Key)
 
-		kept, ok := plg.ValidatedReport(ctr, key)
-		require.True(t, ok, key)
+		kept := inspect(t, ctr, key).Validation
+		require.NotNil(t, kept, key)
 		assert.Equal(t, reports[key].At, kept.At, "%s: each report is kept with its version", key)
 	}
 
@@ -391,9 +399,10 @@ func TestValidateAllCoversEveryValidatingRegistration(t *testing.T) {
 
 	assert.Equal(t, []string{"a/p"}, keys, "nothing more runs once the context ended")
 
-	kept, ok := plg.ValidatedReport(ctr, "a/p")
-	require.True(t, ok)
-	require.NoError(t, kept.Err, "a validation that could not run changes nothing")
+	kept := inspect(t, ctr, "a/p")
+	require.NotNil(t, kept.Validation)
+	require.NoError(t, kept.Validation.Err, "a validation that could not run changes nothing")
+	assert.Equal(t, plg.StatusServing, kept.Status)
 	assert.Equal(t, 4, plg.Instances(ctr), "every validation instance was closed")
 }
 
@@ -431,8 +440,9 @@ func TestOnDemandValidationNeedsRoomBeyondTheReservations(t *testing.T) {
 	assert.Equal(t, key, reports[0].Key)
 	assert.Equal(t, validatorOwner(), reports[0].Owner)
 
-	_, ok := plg.ValidatedReport(ctr, key)
-	assert.False(t, ok, "no report is kept")
+	state := inspect(t, ctr, key)
+	assert.Nil(t, state.Validation, "no report is kept")
+	assert.Equal(t, plg.StatusServing, state.Status)
 
 	count, err := getFooer(t, ctr, key).Count(t.Context())
 	require.NoError(t, err, "the version still serves")
@@ -480,9 +490,16 @@ func TestOnDemandValidationInEveryLanguage(t *testing.T) {
 			require.ErrorIs(t, report.Err, step.err, step.mode)
 			assert.Len(t, report.Issues, step.issues, step.mode)
 
-			kept, ok := plg.ValidatedReport(ctr, key)
-			require.True(t, ok, step.mode)
-			assert.Equal(t, report.Err, kept.Err, "%s: degraded while it failed", step.mode)
+			state := inspect(t, ctr, key)
+			require.NotNil(t, state.Validation, step.mode)
+			assert.Equal(t, report.Err, state.Validation.Err, step.mode)
+
+			status := plg.StatusServing
+			if step.err != nil {
+				status = plg.StatusDegraded
+			}
+
+			assert.Equal(t, status, state.Status, "%s: degraded while it failed", step.mode)
 
 			_, err = getFooer(t, ctr, key).Count(t.Context())
 			require.NoError(t, err, "%s: the version serves on", step.mode)

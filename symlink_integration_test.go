@@ -195,7 +195,7 @@ func TestSymlinksInsideAPluginAreSkipped(t *testing.T) {
 
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "plain",
 		plg.WithStorage(plg.NewFSStorage(pluginRoot(t, files, nil)))))
-	assert.Equal(t, plg.Version(ctr, "plain/p"), plg.Version(ctr, "linked/p"), "the links are not hashed")
+	assert.Equal(t, inspect(t, ctr, "plain/p").Version, inspect(t, ctr, "linked/p").Version, "the links are not hashed")
 
 	files["plugin.ts"] = tsFooerSource(`import data from "./alias.txt";`, "data")
 	err = plg.Register[testcontract.Fooer](t.Context(), ctr, "alias",
@@ -242,6 +242,6 @@ func TestPluginsHashTheFilesTheyLoad(t *testing.T) {
 
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "fixed",
 		plg.WithStorage(tsSource(t, fstest.MapFS{"plugin.ts": {Data: []byte(want)}}))))
-	assert.Equal(t, plg.Version(ctr, "fixed/p"), plg.Version(ctr, "changing/p"),
+	assert.Equal(t, inspect(t, ctr, "fixed/p").Version, inspect(t, ctr, "changing/p").Version,
 		"the version is the hash of the source the plugin runs")
 }

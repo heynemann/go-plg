@@ -40,7 +40,7 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 		return err
 	}
 
-	if _, dup := c.names.LoadOrStore(name, true); dup {
+	if _, dup := c.names.LoadOrStore(name, reg); dup {
 		reg.http.Close()
 
 		return fmt.Errorf("%w: %s", ErrDuplicateName, name)
@@ -74,11 +74,13 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 type registration struct {
 	contr      *contract
 	cfg        *registerConfig
-	http       *httpcap.Client             // enforces the call's HTTP policy; shared by its plugins
-	host       *host                       // the WithHost option's; nil without one
-	validation *validation                 // the WithValidation option's; nil without one
-	reloads    *reloader                   // set once the registration is published
-	rejections *xsync.Map[string, *Report] // by key: a reload's rejected load, until a later load succeeds
+	http       *httpcap.Client // enforces the call's HTTP policy; shared by its plugins
+	host       *host           // the WithHost option's; nil without one
+	validation *validation     // the WithValidation option's; nil without one
+	reloads    *reloader       // set once the registration is published
+	// keys are the plugin keys its storages list, as of their latest listing, with why each is not served as
+	// listed and the panics reported under it.
+	keys       *xsync.Map[string, *listedPlugin]
 	name       string
 	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host and the validation
 	goPayload  []byte // the Go init payload, likewise
@@ -118,7 +120,7 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 // its validation, the Go dispatcher rendered for them, its HTTP client and the script guests' schema.
 func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name string) (*registration, error) {
 	reg := &registration{
-		contr: contr, cfg: cfg, name: name, rejections: xsync.NewMap[string, *Report](),
+		contr: contr, cfg: cfg, name: name, keys: xsync.NewMap[string, *listedPlugin](),
 		dispatcher: contr.dispatcher, goPayload: contr.payload,
 	}
 
@@ -164,19 +166,28 @@ type source struct {
 }
 
 // problem is a listed plugin that cannot be loaded: its descriptor is invalid, its key is listed twice or its
-// language's guest is missing. key is its descriptor key, empty when it has none.
+// language's guest is missing. storage names the storage listing it and desc is as listed, its Key empty when it
+// has none.
 type problem struct {
-	err error
-	key string
+	err     error
+	storage string
+	desc    Descriptor
+}
+
+// pluginList is what listing a registration's storages found.
+type pluginList struct {
+	srcs     []source  // the plugins to load
+	skipped  []source  // the plugins in languages the Register does not enable
+	problems []problem // the plugins that cannot be loaded; none for Register, which fails on the first
 }
 
 // listPlugins lists the storages for Register, which fails on any problem: a storage that cannot be listed, an
 // invalid descriptor, a key listed twice, a language whose guest is not linked. Plugins in languages the
 // Register did not enable are skipped and logged.
-func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) ([]source, error) {
+func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) (pluginList, error) {
 	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
-	for _, p := range problems {
-		c.events.problem(ctx, &Report{Key: name + "/" + p.key, At: time.Now(), Err: p.err})
+	for i := range problems {
+		c.events.problem(ctx, problemRejection(name+"/"+problems[i].desc.Key, &problems[i]))
 	}
 
 	if err == nil && len(problems) > 0 {
@@ -184,53 +195,56 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 	}
 
 	if err != nil {
-		return nil, err
+		return pluginList{}, err
 	}
 
-	srcs := listed[:0]
+	found := pluginList{srcs: listed[:0]}
 
 	for i := range listed {
 		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelInfo)
 		if err != nil {
-			c.events.problem(ctx, &Report{Key: name + "/" + listed[i].desc.Key, At: time.Now(), Err: err})
+			c.events.problem(ctx, problemRejection(name+"/"+listed[i].desc.Key,
+				&problem{err: err, storage: listed[i].storeName, desc: listed[i].desc}))
 
-			return nil, err
+			return pluginList{}, err
 		}
 
 		if ok {
-			srcs = append(srcs, listed[i])
+			found.srcs = append(found.srcs, listed[i])
+		} else {
+			found.skipped = append(found.skipped, listed[i])
 		}
 	}
 
-	return srcs, nil
+	return found, nil
 }
 
-// relistPlugins lists the storages for a reload: it returns the plugins to load and the problems of the others,
-// and fails only when a storage cannot be listed. Skipped languages are logged at Debug level only, rather than
-// on every poll.
-func (c *Container) relistPlugins(ctx context.Context, name string, cfg *registerConfig) (
-	[]source, []problem, error,
-) {
+// relistPlugins lists the storages for a reload: it returns the plugins to load, those skipped and the problems
+// of the others, and fails only when a storage cannot be listed. Skipped languages are logged at Debug level
+// only, rather than on every poll.
+func (c *Container) relistPlugins(ctx context.Context, name string, cfg *registerConfig) (pluginList, error) {
 	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
 	if err != nil {
-		return nil, nil, err
+		return pluginList{}, err
 	}
 
-	srcs := listed[:0]
+	found := pluginList{srcs: listed[:0], problems: problems}
 
 	for i := range listed {
 		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelDebug)
 
 		switch {
 		case err != nil:
-			problems = append(problems, problem{key: listed[i].desc.Key, err: err})
+			found.problems = append(found.problems,
+				problem{err: err, storage: listed[i].storeName, desc: listed[i].desc})
 		case ok:
-			srcs = append(srcs, listed[i])
+			found.srcs = append(found.srcs, listed[i])
 		default: // in a language the Register did not enable
+			found.skipped = append(found.skipped, listed[i])
 		}
 	}
 
-	return srcs, problems, nil
+	return found, nil
 }
 
 // admit prepares a listed plugin for loading. It reports false for a plugin in a language the Register did not
@@ -299,7 +313,7 @@ func (c *Container) listStorages(ctx context.Context, name string, storages []St
 			}
 
 			if err != nil {
-				problems = append(problems, problem{key: desc.Key, err: err})
+				problems = append(problems, problem{err: err, storage: storeName, desc: desc})
 
 				continue
 			}
@@ -310,7 +324,7 @@ func (c *Container) listStorages(ctx context.Context, name string, storages []St
 	}
 
 	srcs = slices.DeleteFunc(srcs, func(src source) bool {
-		return slices.ContainsFunc(problems, func(p problem) bool { return p.key == src.desc.Key })
+		return slices.ContainsFunc(problems, func(p problem) bool { return p.desc.Key == src.desc.Key })
 	})
 
 	return srcs, problems, nil
@@ -389,12 +403,19 @@ func sameDescriptor(a, b *Descriptor) bool {
 }
 
 // loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
-// it closes the ones already loaded and gives the reservation back.
+// it closes the ones already loaded and gives the reservation back. It records in reg the keys listed (before
+// each load, which may report panics under its key) and the plugins skipped.
 func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, error) {
-	srcs, err := c.listPlugins(ctx, reg.name, reg.cfg)
+	found, err := c.listPlugins(ctx, reg.name, reg.cfg)
 	if err != nil {
 		return nil, err
 	}
+
+	for i := range found.skipped {
+		reg.entry(reg.name + "/" + found.skipped[i].desc.Key).rejection.Store(skipRejection(&found.skipped[i]))
+	}
+
+	srcs := found.srcs
 
 	reserved, err := c.reserveMemory(reg.name, reg.cfg, srcs)
 	if err != nil {
@@ -405,6 +426,8 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 
 	for i := range srcs {
 		key := reg.name + "/" + srcs[i].desc.Key
+		reg.entry(key)
+
 		report := newReport(key, &srcs[i], time.Now())
 
 		plug, err := c.load(ctx, reg, key, &srcs[i], report)

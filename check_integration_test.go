@@ -47,8 +47,7 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 			"owner": {Mode: "valid"}, "big": {Mode: "valid"},
 		}))))
 
-	serving, ok := plg.ServingReport(ctr, "rules/p")
-	require.True(t, ok)
+	serving := inspect(t, ctr, "rules/p").Load
 
 	host.charged.Store(0)
 
@@ -64,12 +63,13 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 		_, err := plg.Get[testcontract.Fooer](t.Context(), ctr, "rules/"+key)
 		require.ErrorIs(t, err, plg.ErrNotFound, "%s is not published", key)
 
-		_, rejected := plg.RejectedReport(ctr, "rules/"+key)
-		assert.False(t, rejected, "%s: no rejection is kept", key)
+		_, err = plg.Info(ctr, "rules/"+key)
+		require.ErrorIs(t, err, plg.ErrNotFound, "%s: no rejection is kept", key)
 
-		report, ok := plg.ServingReport(ctr, "rules/p")
-		require.True(t, ok)
-		assert.Equal(t, serving, report, "the serving version is unchanged")
+		state := inspect(t, ctr, "rules/p")
+		assert.Same(t, serving, state.Load, "the serving version is unchanged")
+		assert.Equal(t, plg.StatusServing, state.Status, key)
+		assert.Nil(t, state.Rejection, key)
 
 		var keys []string
 
@@ -161,7 +161,9 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 }
 
 // TestCheckCreatesWithoutValidation checks candidates against a registration without WithValidation: Create
-// runs, in an instance charged beyond the reservations, so a candidate whose Create fails is reported.
+// runs, in an instance charged beyond the reservations, so a candidate whose Create fails is reported. A
+// candidate under the served plugin's key whose Create panics is reported with its PanicError, which is the
+// check's: Info counts no panic for the plugin.
 func TestCheckCreatesWithoutValidation(t *testing.T) {
 	t.Parallel()
 
@@ -190,6 +192,20 @@ func TestCheckCreatesWithoutValidation(t *testing.T) {
 	assert.Equal(t, 1, plg.Instances(ctr))
 	assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr))
 	assert.Equal(t, uint64(hostileLimit), plg.MemoryReserved(ctr))
+
+	report, err = plg.Check(t.Context(), ctr, "plain", checkCandidate("p", "4"), sourceFS(goSource(t, "createpanics")))
+	require.NoError(t, err)
+
+	var panicErr *plg.PanicError
+
+	require.ErrorAs(t, report.Err, &panicErr)
+	assert.Equal(t, "plain/p", panicErr.Key)
+	assert.Contains(t, ctr.RecentPanics(), panicErr)
+
+	served := inspect(t, ctr, "plain/p")
+	assert.Zero(t, served.Panics, "the check's panic is not the plugin's")
+	assert.Nil(t, served.LastPanic)
+	assert.Equal(t, plg.StatusServing, served.Status)
 }
 
 // TestCheckNeedsRoomBeyondTheReservations checks a candidate in a container whose budget the registration's

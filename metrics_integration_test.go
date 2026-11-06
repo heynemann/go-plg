@@ -385,8 +385,8 @@ func TestRegisterContainsAPanickingMeterProvider(t *testing.T) {
 	}
 
 	require.NoError(t, register("ok", map[string]string{"a": "v1", "b": "v1"}))
-	assert.Equal(t, "v1", plg.Version(ctr, "ok/a"))
-	assert.Equal(t, "v1", plg.Version(ctr, "ok/b"))
+	assert.Equal(t, "v1", inspect(t, ctr, "ok/a").Version)
+	assert.Equal(t, "v1", inspect(t, ctr, "ok/b").Version)
 	inUse(t, 2, "both published")
 	assert.Equal(t, []string{"ok/a", "ok/b"}, meterPanicKeys(t, ctr.RecentPanics()), "counting each load")
 
@@ -419,7 +419,7 @@ func TestReloadContainsAPanickingMeterProvider(t *testing.T) {
 	served := func(t *testing.T, version string) {
 		t.Helper()
 		require.NoError(t, plg.AwaitRetired(t.Context(), ctr))
-		assert.Equal(t, version, plg.Version(ctr, "metered/k"))
+		assert.Equal(t, version, inspect(t, ctr, "metered/k").Version)
 		assert.Equal(t, uint64(goInstance), plg.MemoryInUse(ctr), "%s's one instance alone", version)
 		assert.Equal(t, uint64(goInstance), plg.MemoryReserved(ctr), "%s alone", version)
 	}

@@ -144,5 +144,5 @@ func TestRegisterHashesVersionlessPlugins(t *testing.T) {
 	require.NoError(t, lines.Err())
 	require.Regexp(t, isContentHash, versions["mem/multifile"])
 	assert.Equal(t, versions["mem/multifile"], versions["disk/multifile"])
-	assert.Equal(t, versions["disk/multifile"], plg.Version(ctr, "disk/multifile"))
+	assert.Equal(t, versions["disk/multifile"], inspect(t, ctr, "disk/multifile").Version)
 }

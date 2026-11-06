@@ -70,8 +70,7 @@ func TestPoolServesManyConcurrentCalls(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	stats := plg.Stats(ctr, "fooer/ref")
-	assert.LessOrEqual(t, stats.Size, maxSize)
+	assert.LessOrEqual(t, inspect(t, ctr, "fooer/ref").Pool.Instances, maxSize)
 	assert.LessOrEqual(t, plg.MemoryInUse(ctr), uint64(maxSize)*128*mib)
 }
 
@@ -242,7 +241,7 @@ func TestMemoryBudget(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	assert.LessOrEqual(t, plg.Stats(ctr, "a/k").Size, 2)
+	assert.LessOrEqual(t, inspect(t, ctr, "a/k").Pool.Instances, 2)
 }
 
 func TestDiscardedInstancesAreReplacedInTheBackground(t *testing.T) {
@@ -258,7 +257,7 @@ func TestDiscardedInstancesAreReplacedInTheBackground(t *testing.T) {
 
 		synctest.Wait() // until the refiller is idle again
 
-		assert.Equal(t, plg.PoolStats{Size: 3, Idle: 3, Refills: 3, Grows: 0}, plg.Stats(ctr, "fooer/ref"),
+		assert.Equal(t, poolCounts{Instances: 3, IdleSlots: 3, Refills: 3, Grows: 0}, countsOf(t, ctr, "fooer/ref"),
 			"the refiller started the three replacements; no call had to")
 	})
 }

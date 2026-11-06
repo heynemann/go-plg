@@ -87,8 +87,12 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 	out, err = first.Foo(t.Context(), "y")
 	require.NoError(t, err)
 	assert.Equal(t, "y", out)
-	assert.Equal(t, plg.Stats(ctr, "ts/p").Size+plg.Stats(ctr, "reloaded/p").Size, plg.Instances(ctr),
-		"no bundler instance is left open")
+	assert.Equal(
+		t,
+		inspect(t, ctr, "ts/p").Pool.Instances+inspect(t, ctr, "reloaded/p").Pool.Instances,
+		plg.Instances(ctr),
+		"no bundler instance is left open",
+	)
 }
 
 func TestTypeScriptBundlingStopsWithItsContext(t *testing.T) {
@@ -105,7 +109,7 @@ func TestTypeScriptBundlingStopsWithItsContext(t *testing.T) {
 	err := plg.Register[testcontract.Fooer](ctx, ctr, "layers", plg.WithStorage(tsSource(t, exportStarLayers(40))))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "layers/p (storage mem): bundling the TypeScript plugin: context deadline exceeded")
-	assert.Equal(t, plg.Stats(ctr, "ts/p").Size, plg.Instances(ctr), "the bundler instance is closed")
+	assert.Equal(t, inspect(t, ctr, "ts/p").Pool.Instances, plg.Instances(ctr), "the bundler instance is closed")
 
 	// A reload bundling such a plugin stops when the container closes.
 	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => s`)))
@@ -142,7 +146,7 @@ func TestTypeScriptBundlingHasAMemoryLimit(t *testing.T) {
 	require.ErrorContains(t, err, "big/p (storage mem): bundling the TypeScript plugin failed: the bundler stopped: "+
 		"runtime: out of memory")
 	assert.NotContains(t, err.Error(), "wasm stack trace", "the report is the failure, not its trace")
-	assert.Equal(t, plg.Stats(ctr, "ts/p").Size, plg.Instances(ctr), "the bundler instance is closed")
+	assert.Equal(t, inspect(t, ctr, "ts/p").Pool.Instances, plg.Instances(ctr), "the bundler instance is closed")
 }
 
 func TestTypeScriptBundlingTimeGrowsWithThePlugin(t *testing.T) {
