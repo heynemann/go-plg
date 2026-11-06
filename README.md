@@ -529,7 +529,10 @@ plg.Register[pricing.Rule](ctx, c, "pricing",
 - **Pool:** `WithPool(min, max)` (default `1, GOMAXPROCS`; `1 ≤ min ≤ max ≤ 4096`). Register starts `min`
   instances of each plugin (so a broken `Create` fails Register), a background goroutine keeps `min` warm and
   replaces discarded ones (retrying a failing `Create` with backoff from 100 ms to 30 s), and a call takes an idle
-  instance, starts one while under `max`, or waits on its `ctx`.
+  instance, starts one while under `max`, or waits on its `ctx`. A call that starts an instance does so under its
+  own `ctx`, and starting one takes far longer than a call (see [Performance](#performance)), more so on a busy
+  machine; a service whose calls have short deadlines therefore sets `min = max`, as `examples/service` does:
+  Register starts every instance, and their memory is taken from the start.
 - **Budget:** `plg.New(plg.WithMemoryBudget(total))` caps all instances of the container together. Register counts
   each plugin's worst case (`max × limit`) and fails with `plg.ErrMemoryBudget` when it does not fit; pools never
   grow past the budget.
@@ -807,8 +810,8 @@ authors who want Go, at a call rate where 0.1 ms per call is acceptable.
 - [`examples/plugins`](examples/plugins): three rules, in Go (`bulk`), Lua (`loyalty`, calls the host) and
   TypeScript (`coupon`, throws on an unknown code).
 - [`examples/service`](examples/service): an HTTP pricing service serving those rules, with a host, a memory
-  budget, per-call deadlines, optional polling of a plugin directory, and a clean shutdown:
-  `cd examples && go run ./service`.
+  budget, every rule instance started before serving, per-call deadlines, optional polling of a plugin directory,
+  and a clean shutdown: `cd examples && go run ./service`.
 - [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, tested against MinIO.
 - [`examples/pgstorage`](examples/pgstorage): a `plg.Storage` over PostgreSQL listing only enabled plugins, with
   its migration, tested against PostgreSQL.

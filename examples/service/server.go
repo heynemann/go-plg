@@ -25,7 +25,8 @@ const (
 	memoryBudget = 2 << 30
 	// maxInstances is how many calls each rule serves at once.
 	maxInstances = 4
-	// ruleTimeout bounds each rule call: a rule looping forever is stopped there, and its instance replaced.
+	// ruleTimeout bounds each rule call, including its wait for an idle instance: a rule looping forever is
+	// stopped there, and its instance replaced.
 	ruleTimeout = 2 * time.Second
 	// shutdownTimeout bounds the wait for requests and rule calls in flight once the service is asked to stop.
 	shutdownTimeout = 10 * time.Second
@@ -42,7 +43,12 @@ func serve(ctx context.Context, listener net.Listener, cfg config) error {
 	err := plg.Register[pricing.Rule](ctx, container, registration,
 		plg.WithStorage(cfg.storage),
 		plg.WithHost[pricing.Customers](customers{"ada": "gold", "bob": "silver"}),
-		plg.WithPool(1, maxInstances),
+		// Every instance starts here, before serving: starting one runs the rule's Create (a Go rule's source is
+		// interpreted then), which takes far longer than a call and, on a slow or busy machine, longer than
+		// ruleTimeout. With the pool at its maximum from the start, a request takes an idle instance or waits for
+		// one instead of starting it under its own deadline (only a request arriving while plg replaces an instance
+		// a failing rule lost may still start one). The price is every instance's memory from the start.
+		plg.WithPool(maxInstances, maxInstances),
 		plg.WithPollInterval(cfg.poll),
 	)
 	if err != nil {
