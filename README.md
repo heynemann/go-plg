@@ -847,10 +847,11 @@ Docker: `make examples`. Each top-level test starts its own server and terminate
 ## Development
 
 - `make check` runs every gate CI runs: formatting, golangci-lint (host and wasip1), the unit and integration
-  tests with `-race`, the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh` tests it and
-  checks that every test container is terminated through its test's cleanup), allocation and benchmark budgets,
-  a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples module, Docker
-  required).
+  tests with `-race` (after `make warm` compiles the guests into the compilation cache without it; each test run
+  has a `-timeout` to catch hangs), the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh`
+  tests it and checks that every test container is terminated through its test's cleanup), allocation and
+  benchmark budgets, a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples
+  module, Docker required).
 - `make guests` rebuilds the guest artifacts with pinned toolchains; `make verify-guests` checks that the
   committed ones are reproducible.
 - [`RULES.md`](RULES.md) holds the engineering rules every change follows; [`PLAN.md`](PLAN.md) the design and

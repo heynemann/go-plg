@@ -37,6 +37,11 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	err := prepareGuests()
+	if err != nil {
+		panic(err)
+	}
+
 	goleak.VerifyTestMain(m)
 }
 

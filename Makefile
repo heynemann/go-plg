@@ -13,6 +13,16 @@ BENCH_OUT := bench.txt
 BUDGET_RUNS := 5
 BUDGET_OUT := $(BIN)/budgets.txt
 
+# go test's -timeout, per test binary: a hang detector, not a speed limit, at about twice what the slowest binary
+# takes on CI (GitHub's 4-CPU ubuntu-latest), so that a hang fails the run within minutes while a slow runner does
+# not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package: 486-600+ s on CI when three of
+# its tests compiled the custom Go guest cold under the race detector, past go's 10-minute default; 383 s -> 215 s
+# on 4 CPUs here with a cold compilation cache once each guest compiled once (`make warm`, TestMain), so about
+# 350 s on CI, which ran it 1.6 times slower. The other runs take at most 124 s on CI (`make repeat`'s root
+# package). Benchmarks run outside -timeout.
+TEST_TIMEOUT := 12m
+SHORT_TEST_TIMEOUT := 5m
+
 # golangci-lint is pinned and built with the repo's toolchain, into bin/, with a cache of its own. A binary built
 # with an older Go (a distro or Homebrew build) loads this go1.27.3 module without full type information and
 # silently skips type-aware rules such as revive's time-naming, and sharing its cache replays those results; CI
@@ -95,8 +105,8 @@ TS_SRC := guestsrc/typescript
 TS_BUNDLER := guest/typescript/bundler.wasm.gz
 TS_BUNDLER_RAW := $(BIN)/bundler.wasm
 
-.PHONY: check fmt-check lint test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest lua-guest \
-	ts-guest ts-bundler verify-guests clean
+.PHONY: check fmt-check lint warm test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest \
+	lua-guest ts-guest ts-bundler verify-guests clean
 
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
@@ -112,15 +122,23 @@ lint: $(GOLANGCI_LINT)
 $(GOLANGCI_LINT):
 	GOFLAGS= GOBIN=$(dir $@) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
+# Compile the linked guests into the default compilation cache (`plg warm`), without the race detector: under it
+# wazero's compiler runs about ten times slower (the Go guest: 4 s cold natively, 40-65 s under -race on 4 CPUs),
+# and a cold cache is what CI gets whenever a guest artifact changes its cache key. The compiled code is the same,
+# so the race-instrumented tests read it from the cache like any other run's.
+warm:
+	go run ./cmd/plg warm
+
 # Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
 # caps the parallel subtests (each holding wasm instances under the race detector): the root package's run peaks
 # at about 6.8 GiB RSS (5.6 GiB at -parallel 2, 8.6 GiB at 16), which leaves room on this 30 GB machine with
 # about 12 GB free. Closed containers used to keep their decoded guest modules, so the run grew to about 14 GB
 # and was OOM-killed whatever -parallel (PLAN.md, "Closed containers release their compiled guests").
-# The previous profile is removed first, so a failed or interrupted run leaves none for the gate to pass on.
-test:
+# -timeout: see TEST_TIMEOUT. The previous profile is removed first, so a failed or interrupted run leaves none for
+# the gate to pass on.
+test: warm
 	rm -f $(COVERAGE)
-	go test -race -shuffle=on -tags integration -parallel 8 -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE) ./...
+	go test -race -shuffle=on -tags integration -parallel 8 -timeout $(TEST_TIMEOUT) -covermode=atomic -coverpkg=./... -coverprofile=$(COVERAGE) ./...
 
 # The gate checks the profile of this run's tests: it depends on them, so `make -j check` cannot run it first.
 coverage: test
@@ -132,8 +150,8 @@ gate-test:
 	scripts/gate-test.sh
 
 # Allocation budgets (RULES.md §3). Coverage instrumentation changes inlining, so they run uninstrumented.
-allocs:
-	go test -race -shuffle=on -tags integration -count=1 -run 'DoNotAllocate' ./...
+allocs: warm
+	go test -race -shuffle=on -tags integration -count=1 -timeout $(SHORT_TEST_TIMEOUT) -run 'DoNotAllocate' ./...
 
 # Benchmark budgets (RULES.md §3): Get <= 50 ns/op, Get and All 0 allocs/op, checked by scripts/bench-budget.sh.
 # Measured without the race detector and coverage (both slow every operation down), BUDGET_RUNS times: the time
@@ -147,22 +165,22 @@ budgets:
 
 # Unit tests repeated to flush out flakiness and state leaking between runs (RULES.md §2).
 repeat:
-	go test -race -shuffle=on -count=10 ./...
+	go test -race -shuffle=on -count=10 -timeout $(SHORT_TEST_TIMEOUT) ./...
 
 # The examples module (examples/go.mod), kept apart so the core's go.mod never gains its dependencies: formatting,
 # lint, tidy go.mod/go.sum, its unit and integration tests with the race detector (the storages against MinIO and
 # PostgreSQL containers, so Docker is required; the service and the README's quick start with real plugins), the
 # same coverage gate, and its unit tests repeated.
-examples: $(GOLANGCI_LINT)
+examples: $(GOLANGCI_LINT) warm
 	cd examples && $(GOLANGCI_LINT) fmt ./...
 	git diff --exit-code -- 'examples/*.go'
 	cd examples && $(GOLANGCI_LINT) run --build-tags integration ./...
 	cd examples && go mod tidy -diff
 	rm -f examples/$(COVERAGE)
-	cd examples && go test -race -shuffle=on -tags integration -covermode=atomic -coverpkg=./... \
-		-coverprofile=$(COVERAGE) ./...
+	cd examples && go test -race -shuffle=on -tags integration -timeout $(SHORT_TEST_TIMEOUT) -covermode=atomic \
+		-coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	cd examples && ../scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
-	cd examples && go test -race -shuffle=on -count=10 ./...
+	cd examples && go test -race -shuffle=on -count=10 -timeout $(SHORT_TEST_TIMEOUT) ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)

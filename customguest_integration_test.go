@@ -4,27 +4,59 @@ package plg_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tetratelabs/wazero/experimental"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/cli"
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
+// prepareGuests runs before the tests (TestMain). It compiles every guest they load into the default on-disk
+// compilation cache, the one their containers use: the guests the binary links (plg.Warm; `make test` has already
+// compiled them without the race detector, so these are cache hits there) and, meanwhile, the custom Go guest once
+// built. A cold cache (a fresh machine, or CI whenever a guest artifact changes the cache key) then costs one
+// compile per guest instead of one per container that loads it first: the three tests sharing the custom guest
+// used to compile it cold concurrently, each for a minute and more under the race detector, which took the
+// package past go test's 10-minute default timeout on CI (PLAN.md, "Test time").
+func prepareGuests() error {
+	warmed := make(chan error, 1)
+
+	go func() { warmed <- plg.Warm(compileOnEveryCore()) }()
+
+	_, err := customGoGuest()
+	if err != nil {
+		// The tests using the custom guest fail with this error; the others do not depend on it.
+		fmt.Fprintln(os.Stderr, "plg tests: building the custom Go guest:", err)
+	}
+
+	return <-warmed
+}
+
+// compileOnEveryCore returns a context compiling a guest on every core (a wazero experimental option): only
+// prepareGuests uses it, the containers of the tests compile as plg does.
+func compileOnEveryCore() context.Context {
+	return experimental.WithCompilationWorkers(context.Background(), runtime.GOMAXPROCS(0))
+}
+
 // customGoGuest is a custom Go guest with encoding/xml and example.com/greet (testdata/buildguest/greet), built
-// once per test binary by `plg build-guest` as a service would build it. It is reproducible, so after the first
-// run its compiled form comes from the default on-disk compilation cache like the default guest's.
+// once per test binary by `plg build-guest` as a service would build it, then compiled once into the default
+// on-disk compilation cache, where the containers of the tests using it find it. It is reproducible, so after
+// the first run on a machine that compile is a cache hit too.
 //
-//nolint:gochecknoglobals // one build (seconds of go build) shared by the tests of the binary
+//nolint:gochecknoglobals // one build (seconds of go build) and one compile shared by the tests of the binary
 var customGoGuest = sync.OnceValues(func() ([]byte, error) {
 	service, err := os.MkdirTemp("", "plg-service-")
 	if err != nil {
@@ -38,35 +70,37 @@ var customGoGuest = sync.OnceValues(func() ([]byte, error) {
 
 	wasm, err := buildCustomGoGuest(dir)
 
-	return wasm, errors.Join(err, dir.Close(), os.RemoveAll(service))
+	err = errors.Join(err, dir.Close(), os.RemoveAll(service))
+	if err != nil {
+		return nil, err
+	}
+
+	return wasm, compileIntoDefaultCache(compileOnEveryCore(), wasm)
 })
+
+// compileIntoDefaultCache compiles a guest into the default on-disk compilation cache, as plg.Warm does the
+// linked guests.
+func compileIntoDefaultCache(ctx context.Context, wasm []byte) error {
+	eng, err := engine.NewOnDisk(engine.Options{})
+	if err != nil {
+		return fmt.Errorf("custom guest: %w", err)
+	}
+
+	rt := eng.NewRuntime(ctx, engine.RuntimeOptions{})
+	_, err = rt.Compile(ctx, "custom go", wasm)
+
+	return errors.Join(err, rt.Close(ctx), eng.Close(ctx))
+}
 
 var errBuildGuest = errors.New("plg build-guest failed")
 
 // buildCustomGoGuest lays out, in the directory service, a service module requiring this checkout and the greet
-// module (a local replacement relative to the service's go.mod), and runs plg build-guest in it.
+// module (testdata/buildguest/greet, a local replacement relative to the service's go.mod), and runs plg
+// build-guest in it. The build records each replacement's directory, which build-guest makes absolute: the greet
+// module stays where it is, so the guest is the same bytes whatever the service directory, and its compiled form
+// a cache hit after the first run on a machine.
 func buildCustomGoGuest(service *os.Root) ([]byte, error) {
-	root, errRoot := filepath.Abs(".")
-	gomod, errMod := os.ReadFile("go.mod")
-	gosum, errSum := os.ReadFile("go.sum")
-
-	err := errors.Join(errRoot, errMod, errSum)
-	if err == nil {
-		// plg's own requirements and go.sum, so the build needs no network.
-		modfile := strings.Replace(string(gomod), "module github.com/heynemann/go-plg", "module example.com/svc", 1) +
-			"\nrequire (\n\tgithub.com/heynemann/go-plg v0.0.0\n\texample.com/greet v0.0.0\n)\n\n" +
-			"replace github.com/heynemann/go-plg => " + root + "\n\nreplace example.com/greet => ./greet\n"
-
-		err = errors.Join(
-			os.CopyFS(
-				filepath.Join(service.Name(), "greet"),
-				os.DirFS(filepath.Join("testdata", "buildguest", "greet")),
-			),
-			service.WriteFile("go.mod", []byte(modfile), 0o600),
-			service.WriteFile("go.sum", gosum, 0o600),
-		)
-	}
-
+	err := layOutService(service)
 	if err != nil {
 		return nil, fmt.Errorf("custom guest service module: %w", err)
 	}
@@ -88,6 +122,30 @@ func buildCustomGoGuest(service *os.Root) ([]byte, error) {
 	}
 
 	return wasm, nil
+}
+
+// layOutService writes the service module's go.mod and go.sum: plg's own requirements and go.sum (so the build
+// needs no network), plg replaced by this checkout and greet by its directory, relative to the service's.
+func layOutService(service *os.Root) error {
+	root, errRoot := filepath.Abs(".")
+	gomod, errMod := os.ReadFile("go.mod")
+	gosum, errSum := os.ReadFile("go.sum")
+	greet, errGreet := filepath.Rel(service.Name(), filepath.Join(root, "testdata", "buildguest", "greet"))
+
+	err := errors.Join(errRoot, errMod, errSum, errGreet)
+	if err != nil {
+		return err
+	}
+
+	modfile := strings.Replace(string(gomod), "module github.com/heynemann/go-plg", "module example.com/svc", 1) +
+		"\nrequire (\n\tgithub.com/heynemann/go-plg v0.0.0\n\texample.com/greet v0.0.0\n)\n\n" +
+		"replace github.com/heynemann/go-plg => " + root + "\n\n" +
+		"replace example.com/greet => " + filepath.ToSlash(greet) + "\n"
+
+	return errors.Join(
+		service.WriteFile("go.mod", []byte(modfile), 0o600),
+		service.WriteFile("go.sum", gosum, 0o600),
+	)
 }
 
 func requireCustomGoGuest(t *testing.T) []byte {

@@ -21,11 +21,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.3"
-      # The Go guest compiles cold in a few seconds; caching the default compilation cache keeps test runs warm.
+      # The default compilation cache: `make check` compiles the linked guests into it first (`plg warm`, no race
+      # detector) and the root package's tests the custom Go guest they build (from testdata/buildguest with
+      # internal/buildguest), so a hit spares those compiles; every compile is keyed by its module, so a miss only
+      # costs time.
       - uses: actions/cache@v4
         with:
           path: ~/.cache/plg
-          key: plg-cache-${{ hashFiles('guest/**/*.wasm*', 'go.sum') }}
+          key: plg-cache-${{ hashFiles('guest/**/*.wasm*', 'go.sum', 'testdata/buildguest/**', 'internal/buildguest/**') }}
       # fmt (no diff), lint (host and wasip1), -race -shuffle=on unit+integration tests, coverage gate (and its own tests), goleak,
       # allocation budgets (uninstrumented), benchmark budgets (Get <= 50 ns/op, Get/All 0 allocs/op, no race
       # detector, fastest of 5 runs), unit tests repeated with -count=10, and `make examples`: the examples module

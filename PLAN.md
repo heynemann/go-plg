@@ -1021,6 +1021,40 @@ Fixes for the second adversarial review of `4a3c31a` (`.scratch/adversarial-fixe
 - **Decision: `WithPool(maxInstances, maxInstances)`.** Register, with no deadline and before the service listens, starts every instance; a request takes an idle one or waits for one given back, and `ruleTimeout` bounds the rule's run plus that wait. This is what a real service with short call deadlines wants: an instance start costs orders of magnitude more than a call, so paying it on the request path makes latency depend on load, and on a slow or busy machine the start misses the deadline and is thrown away, so the pool may not grow at all. The price is every instance's memory from the start (the budget already reserves `max × limit` at Register) and a longer start-up. Bounding only the rule's own run is not something the service can ask for: the context of a call also bounds acquiring its instance (`WithPool`: "waits for one on its context"), so it would take a change to plg's pool, not to the example. One window remains: after a failing rule's instance is discarded, a call arriving before the refiller has reserved its replacement may start it under its own deadline; none of the example's tests discards an instance. README's pool paragraph now says so for services in general.
 - **Tests (before → after):** `TestServicePricesWithEveryRule` with `ruleTimeout` at 150 ms (throwaway), `taskset -c 0-1`, `-race -count=5`: 3 of 3 runs failed → 5 of 5 passed, no call starting an instance. The whole service package at the real 2 s, `-race -shuffle=on -count=10` on 2 CPUs shared with 4 busy loops: 10 of 10 (231 s; `TestServicePricesWithEveryRule` 10.2–16.5 s). Assertions are unchanged.
 
+#### Test time: each guest compiles once, and go test has explicit timeouts
+
+- **Symptom:** CI run 42162577537 (`a9f6182`) failed with `panic: test timed out after 10m0s` in the root package while the eight `TestRegisterFailsFastAndPublishesNothing/custom_guest/*` subtests had been running 12–66 s each; run 42165892436 (`98a90fc`) timed out the same way, in other tests. The green runs' root package took 486, 538 and 597 s: the package was at the edge of go test's 10-minute default.
+- **Measured** (the root package as CI runs it: `taskset -c 0-3`, `-race -shuffle=on -tags integration -parallel 8`, atomic coverage over `./...`, an empty `PLG_CACHE_DIR` as CI has whenever a guest artifact changes the cache key, `-json` for per-test times): 383 s. Two causes, both compiles under the race detector, which slows wazero's compiler about tenfold (the Go guest: 4–5 s natively, 40–65 s under `-race`):
+  - **The custom Go guest was never in the cache.** `plg build-guest` records each `replace` directory in the module's build info (and so in its build ID; `-trimpath` keeps them), and the test copied the greet module into a fresh temporary service directory, so every build differed (same size, 67 bytes apart). Each run, warm cache or not, the three tests using it compiled it cold in their own containers at the same time: `TestCustomGoGuestLetsPluginsImportItsPackages` 172 s, `TestHostileGoPluginsCannotTakeTheHostDown/custom_guest` 90 s, `TestRegisterFailsFastAndPublishesNothing/custom_guest/*` 51–72 s each (waiting on their container's compile). That is the CI failure.
+  - **The linked guests compiled cold under `-race`.** `TestClosedContainersKeepNoGuestMemory` runs alone before every parallel test and took 131 s, compiling the Go guest (71 s) and the TypeScript guest and bundler (58 s) single-threaded.
+- **Fix (tests and gates; no product change):**
+  - The service module refers to the greet module where it is (`testdata/buildguest/greet`, still a replacement relative to the service's `go.mod`), so the custom guest is the same bytes whatever the service directory (two builds: same SHA-256) and its compiled form a cache hit after the first run on a machine; CI's checkout path is fixed, and its cache key now includes `testdata/buildguest` and `internal/buildguest`.
+  - The root package's `TestMain` (`prepareGuests`, integration build only) compiles every guest the tests load into the default cache before any test runs: `plg.Warm` and, concurrently, the custom guest once built, each on every core (wazero's experimental `WithCompilationWorkers`; the tests' own compiles are unchanged). One compile per guest per run instead of one per container that loads it first.
+  - `make warm` (`go run ./cmd/plg warm`, no race detector) runs before `make test`, `allocs` and `examples`: the linked guests compile natively, 11 s cold here (Go 5.4 s, bundler 4.4 s), and every race-instrumented test binary on the default cache reads them (on CI `internal/cli` took 168–227 s and `internal/engine` 115–136 s alongside the root package, compiling guests too). The compiled code is the same, so the tests load it as they would any run's.
+  - What the tests prove is unchanged: same tests, assertions and plugins; each container still compiles its guests through its compilation cache; the tests about cold compiles and cache directories use their own directories.
+- **Root package (same conditions, cold cache): 383 s → 215 s**, of which 23 s are `prepareGuests` (the custom guest's build 1.8 s and race-instrumented compile; a cache hit on later runs), plus 11 s for `make warm` before it. Per test (s, as reported by `-json`, while running):
+
+  | Test | before | after |
+  |---|---:|---:|
+  | `TestCustomGoGuestLetsPluginsImportItsPackages` | 172 | 20 |
+  | `TestClosedContainersKeepNoGuestMemory` | 131 | 14 |
+  | `TestHostileGoPluginsCannotTakeTheHostDown/custom_guest` | 90 | 14 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/nilcreate` | 72 | 4 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/createfails` | 72 | 5 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/wronginterface` | 71 | 4 |
+  | `TestClosedContainersKeepNoGuestMemory/go` | 71 | 8 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/forbidden` | 70 | 5 |
+  | `TestPoolServesManyConcurrentCalls` | 63 | 72 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/syntaxerror` | 63 | 3 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/nocreate` | 63 | 2 |
+  | `TestClosedContainersKeepNoGuestMemory/typescript` | 58 | 6 |
+  | `TestPoolUnderContention` | 58 | 57 |
+  | `TestRegisterFailsFastAndPublishesNothing/custom_guest/createpanics` | 51 | 3 |
+  | `TestLuaNestedHostCallsKeepTheirOwnAnswers` | 49 | 24 |
+
+  The slowest after: `TestPoolServesManyConcurrentCalls` 72, `TestPoolUnderContention` 57, `TestReloadUnderHeavyCallTraffic` 33, `TestLuaNestedHostCallsKeepTheirOwnAnswers` 24, `TestClosingStopsCallsWaitingOnTheHost` 21; the first two are load tests (6,400 calls with 256 instance-discarding panics; 64 workers × 1000 rounds), costly by design. Tests running at once share the CPUs, so some take longer than before while the package takes less.
+- **Timeouts (Makefile):** `-timeout` is a hang detector: a hung test fails the run within minutes with every goroutine's stack instead of running into the job's limit, while a slow runner must not fail. Each is about twice what the slowest binary of its run takes on CI: `TEST_TIMEOUT` 12m for `make test`, set by the root package (CI ran it at about 1.6 times this machine's 4-CPU time, 486–600+ s before, so about 350 s expected now); `SHORT_TEST_TIMEOUT` 5m for `allocs`, `repeat` and the examples' runs (at most 124 s on CI: `repeat`'s root package). `bench` and `budgets` have none: testing stops the timeout's alarm before running benchmarks (`bench`'s root package took 1178–1380 s on CI).
+
 ### Validation and ownership
 
 #### 01: plugin.yaml replaces plugin.json
