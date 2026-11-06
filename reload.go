@@ -235,7 +235,8 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 
 // refresh makes reg's plugins mirror its storages; see [ReloadInterface]. Rounds of one registration never
 // overlap and Register never changes another name's plugins, so what c serves for reg when the round starts
-// is what it replaces, unless the container closes meanwhile.
+// is what it replaces, unless the container closes meanwhile or an on-demand validation unpublishes a version
+// ([Unpublish]): the round may then retire that version again, which does nothing, or publish its successor.
 func (c *Container) refresh(ctx context.Context, reg *registration, changes *reloadChanges) error {
 	current := c.generations(reg)
 
@@ -465,8 +466,13 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 
 // retire stops serving gen, which the published catalogue no longer holds. A goroutine waits for its last call
 // in flight to leave, then closes its instances, each running the plugin's optional Close, and gives its memory
-// reservation back; [Container.Close] waits for it.
+// reservation back; [Container.Close] waits for it. Retiring a generation again does nothing: an on-demand
+// validation that unpublishes it may race a reload replacing or removing it.
 func (c *Container) retire(ctx context.Context, gen *plugin) {
+	if !gen.retiring.CompareAndSwap(false, true) {
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.retired.Store(gen, cancel)
 

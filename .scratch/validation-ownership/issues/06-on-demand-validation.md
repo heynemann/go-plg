@@ -6,10 +6,10 @@
 
 **Blocked by:** 04 (Validate at load, for Go plugins)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests for both policies: degraded then recovered; unpublished then re-published on a later passing reload
-- [ ] ValidateAll covers several registrations and skips those without validation
-- [ ] Metrics for runs and issue counts observed via the SDK ManualReader
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] Tests for both policies: degraded then recovered; unpublished then re-published on a later passing reload
+- [x] ValidateAll covers several registrations and skips those without validation
+- [x] Metrics for runs and issue counts observed via the SDK ManualReader
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

@@ -47,6 +47,13 @@ const meterName = "github.com/heynemann/go-plg"
 //     at its last good version), and reloads that could not list their storages (key is the Register name);
 //   - plg.plugin.skipped {key, language}: listed plugins left out because the Register does not enable their
 //     language, at each Register and reload;
+//   - plg.plugin.validations {key, language, trigger, outcome}: validations ([WithValidation]) run at a load
+//     (trigger load), by [Check] (trigger check) or on demand ([Validate], [ValidateAll]; trigger on_demand),
+//     outcome being passed, failed (an issue of severity error, or Validate failed: see [WithValidation]) or
+//     unavailable (it could not run: its context ended, the container closed, or beyond the reservations no
+//     budget room);
+//   - plg.plugin.validation.issues {key, language, trigger, severity}: the issues the validations that ran
+//     found, severity being error (any severity plg does not know included), warning or info;
 //   - plg.http.requests {key, outcome[, status]}: the plugins' HTTP requests, outcome being ok (status is the
 //     response's status code), refused (by the policy) or failed (in transit, timed out, too large a response);
 //   - plg.http.duration {key, outcome}: their latency in seconds;
@@ -68,6 +75,7 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 // instruments are a container's OpenTelemetry instruments.
 type instruments struct {
 	calls, callErrors, panics, waits, refills, loads, reloadFailures, skipped metric.Int64Counter
+	validations, validationIssues                                             metric.Int64Counter
 	httpRequests, httpSent, httpReceived                                      metric.Int64Counter
 	callDuration, httpDuration                                                metric.Float64Histogram
 	instances, inUse, inFlight, memory                                        metric.Int64ObservableUpDownCounter
@@ -116,6 +124,8 @@ func newInstruments(provider metric.MeterProvider) (*instruments, error) {
 	inst.loads = counter("plg.plugin.loads", "{load}", "Plugin versions loaded.")
 	inst.reloadFailures = counter("plg.plugin.reload.failures", "{failure}", "Plugins a reload could not load.")
 	inst.skipped = counter("plg.plugin.skipped", "{plugin}", "Plugins skipped: their language is not enabled.")
+	inst.validations = counter("plg.plugin.validations", "{validation}", "Plugin validations run.")
+	inst.validationIssues = counter("plg.plugin.validation.issues", "{issue}", "Issues plugin validations found.")
 	inst.httpRequests = counter("plg.http.requests", "{request}", "HTTP requests made by plugins.")
 	inst.httpSent = counter("plg.http.request.size", "By", "Bytes of the HTTP requests plugins sent.")
 	inst.httpReceived = counter("plg.http.response.size", "By", "Bytes of the HTTP responses plugins received.")
@@ -267,6 +277,79 @@ func (c *Container) countSkipped(ctx context.Context, key string, lang Language,
 		c.meters.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
 			attribute.String("language", string(lang)), tags[0], tags[1], tags[2]))
 	})
+}
+
+// The triggers of a validation, its metrics' trigger attribute.
+const (
+	triggerLoad     = "load"
+	triggerOnDemand = "on_demand"
+	triggerCheck    = "check"
+)
+
+// The outcomes of a validation, its metrics' outcome attribute.
+const (
+	validationPassed      = "passed"
+	validationFailed      = "failed"
+	validationUnavailable = "unavailable"
+)
+
+// validationOutcome classifies a validation that ended with err, run under ctx: unavailable when it could not
+// run (ctx ended, the container closed, no budget room), else failed or passed.
+func (c *Container) validationOutcome(ctx context.Context, err error) string {
+	switch {
+	case err == nil:
+		return validationPassed
+	case ctx.Err() != nil || c.closed.Load() || errors.Is(err, ErrMemoryBudget):
+		return validationUnavailable
+	default:
+		return validationFailed
+	}
+}
+
+// countValidation counts a validation run with the given trigger for launch's plugin version, which ended with
+// err, and the issues it found by severity (none for one that could not run); it returns the validation's
+// outcome. It counts nothing when reg does not validate its plugins.
+func (c *Container) countValidation(ctx context.Context, reg *registration, launch *launcher, trigger string,
+	err error, issues []Issue,
+) string {
+	if reg.validation == nil {
+		return ""
+	}
+
+	outcome := c.validationOutcome(ctx, err)
+
+	var bySeverity [3]int64 // error, warning, info
+
+	if outcome != validationUnavailable {
+		for _, issue := range issues {
+			switch {
+			case issue.Severity.blocks():
+				bySeverity[0]++
+			case issue.Severity == SeverityWarning:
+				bySeverity[1]++
+			default:
+				bySeverity[2]++
+			}
+		}
+	}
+
+	tags := launch.owner.metrics
+	key, lang := attribute.String("key", launch.key), attribute.String("language", string(launch.lang))
+	when := attribute.String("trigger", trigger)
+
+	c.panics.callback(ctx, launch.key, launch.lang, meterMethod, func() {
+		c.meters.validations.Add(ctx, 1, metric.WithAttributes(key, lang, when,
+			attribute.String("outcome", outcome), tags[0], tags[1], tags[2]))
+
+		for i, severity := range [...]Severity{SeverityError, SeverityWarning, SeverityInfo} {
+			if bySeverity[i] > 0 {
+				c.meters.validationIssues.Add(ctx, bySeverity[i], metric.WithAttributes(key, lang, when,
+					attribute.String("severity", string(severity)), tags[0], tags[1], tags[2]))
+			}
+		}
+	})
+
+	return outcome
 }
 
 // callOutcome classifies how a call ended, for the call instruments.

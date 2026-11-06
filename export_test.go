@@ -179,6 +179,22 @@ func RejectedReport(c *Container, key string) (Report, bool) {
 	return *report, true
 }
 
+// ValidatedReport returns the report of the latest on-demand validation of the version c serves under key, which
+// is degraded when that report has an Err; false when it serves none or none ran.
+func ValidatedReport(c *Container, key string) (Report, bool) {
+	gen := c.catalogue.Load().plugins[key]
+	if gen == nil {
+		return Report{}, false
+	}
+
+	latest := gen.validated.Load()
+	if latest == nil {
+		return Report{}, false
+	}
+
+	return *latest, true
+}
+
 // LoadedVersion opens the plugin desc of store and returns the version Register gives it when desc has none:
 // the content hash of the snapshot it loads.
 func LoadedVersion(ctx context.Context, store Storage, desc *Descriptor) (string, error) {

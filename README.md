@@ -612,6 +612,40 @@ The validation instance is charged to the memory budget within the plugin versio
 (`max × limit`): it is closed before the pool's instances start, so a budget sized exactly to the plugins' worst
 case still validates them.
 
+### Validating on demand: `plg.Validate` and `plg.ValidateAll`
+
+What a plugin validates against can change after it loaded (limits, a remote dependency). Admin tools and health
+checks can validate the versions the container serves at any time:
+
+```go
+report, err := plg.Validate(ctx, c, "pricing/discounts")
+switch {
+case err != nil: // could not run: ErrNotFound, ErrNoValidation (no WithValidation), ErrClosed, ErrMemoryBudget, ctx
+case report.Err != nil: // it failed: ErrBlockingIssue (error issues) or ErrValidation (Validate failed)
+default: // it passed; report.Issues holds its warnings and info
+}
+
+for key, report := range plg.ValidateAll(ctx, c) { // every plugin of every registration with WithValidation
+	_ = key // one at a time, in key order; report.Err also holds why one could not run
+}
+```
+
+Each validation asks the Register's function for the plugin's input and runs `Validate` in a fresh, throwaway
+instance, as at load, then closes it. Its memory limit is charged to the budget as extra room, beyond every
+plugin's reservation (the version's own pool keeps its room), never waiting: a budget the reservations fill fails
+it at once with `plg.ErrMemoryBudget`, and nothing changes. Its issues are logged like a load's, and its report is
+kept with the version as its latest validation. What a failure does is set per Register:
+
+```go
+plg.WithOnDemandValidationPolicy(plg.Degrade)   // the default: keep serving, marked degraded until a later validation passes
+plg.WithOnDemandValidationPolicy(plg.Unpublish) // remove it: Get fails with ErrNotFound, calls in flight finish there
+```
+
+An unpublished version drains like one a reload removes, and the failed report becomes the key's rejection; the
+next reload loads and validates the plugin again and, if that passes, publishes it again. Every validation (at
+load, on demand and by `plg.Check`) is counted in the `plg.plugin.validations` metric by trigger and outcome
+(`passed`, `failed`, `unavailable`), and its issues in `plg.plugin.validation.issues` by severity.
+
 ### Checking a candidate: `plg.Check`
 
 Before enabling a new plugin or version (say, in an admin endpoint that receives an upload), dry-run it against
@@ -840,7 +874,8 @@ if errors.As(err, &pe) {
 - **Metrics:** OpenTelemetry, through `plg.WithMeterProvider(mp)` (default: the global provider): calls, latency
   and errors by key, method and outcome; panics by phase; pool instances, instances in use (serving at least one
   call), calls in flight (more than instances in use only with `WithConcurrentCalls`), waits and refills; instance
-  memory; loads, skips and reload failures; HTTP requests, latency and sizes. Names and attributes are listed on
+  memory; loads, skips and reload failures; validations by trigger and outcome, and their issues by severity;
+  HTTP requests, latency and sizes. Names and attributes are listed on
   `plg.WithMeterProvider`. Recording on the call path does not allocate.
 
 ## Deployment: `plg warm` and `plg build-guest`

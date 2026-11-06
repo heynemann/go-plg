@@ -97,7 +97,11 @@ func (c *Container) check(ctx context.Context, reg *registration, key string, sr
 	}
 
 	if reg.validation != nil {
-		return c.validate(ctx, reg, src, files, launch, src.limit, report)
+		found := len(report.Issues)
+		err = c.validate(ctx, reg, src, files, launch, src.limit, report)
+		c.countValidation(ctx, reg, launch, triggerCheck, err, report.Issues[found:])
+
+		return err
 	}
 
 	inst, release, err := c.startCharged(ctx, launch, src.limit, src.limit)

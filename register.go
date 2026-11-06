@@ -537,7 +537,12 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		return nil, err
 	}
 
+	// The version's reservation covers its pool's maximum and no pool instance runs yet, so it has room for the
+	// validation instance: nothing is reserved beyond it.
+	found := len(report.Issues)
 	err = c.validate(ctx, reg, src, files, launch, 0, report)
+	c.countValidation(ctx, reg, launch, triggerLoad, err, report.Issues[found:])
+
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +556,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	}
 
 	gen := newGeneration(key, reg.contr.iface, &src.desc, instances)
+	gen.reg, gen.launch, gen.storage = reg, launch, src.storeName
 
 	defer func() {
 		if v := recover(); v != nil {

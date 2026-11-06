@@ -101,13 +101,14 @@ type registerConfig struct {
 	goGuest           *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
 	ownership         Severity        // of a missing-ownership issue: a warning, an error with WithRequiredOwnership
 	storages          []Storage
-	languages         []Language       // enabled languages; empty enables every language
-	hosts             []hostSpec       // WithHost options; at most one is valid
-	goGuests          [][]byte         // WithGoGuest options; at most one is valid
-	validations       []validationSpec // WithValidation options; at most one is valid
-	memoryLimit       uint64           // per-instance limit, whole pages
-	pollInterval      time.Duration    // zero: no polling
-	validationTimeout time.Duration    // WithValidationTimeout
+	languages         []Language         // enabled languages; empty enables every language
+	hosts             []hostSpec         // WithHost options; at most one is valid
+	goGuests          [][]byte           // WithGoGuest options; at most one is valid
+	validations       []validationSpec   // WithValidation options; at most one is valid
+	policies          []ValidationPolicy // WithOnDemandValidationPolicy options; at most one is valid
+	memoryLimit       uint64             // per-instance limit, whole pages
+	pollInterval      time.Duration      // zero: no polling
+	validationTimeout time.Duration      // WithValidationTimeout
 	poolMin           int
 	poolMax           int
 	concurrent        int // WithConcurrentCalls

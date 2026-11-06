@@ -58,21 +58,21 @@ type Issue struct {
 }
 
 // Report is the outcome of one attempt to load a plugin version, at Register or on a reload, whether the
-// version went live or was rejected. Its Owner shares its slice and map with the plugin's descriptor: do not
-// modify them.
+// version went live or was rejected, or of an on-demand validation of a version it serves ([Validate]). Its Owner
+// shares its slice and map with the plugin's descriptor: do not modify them.
 type Report struct {
 	// At is when the attempt started.
 	At time.Time
-	// Err is why the version was rejected; nil when it loaded.
+	// Err is why the version was rejected, or why its on-demand validation failed; nil when it loaded or passed.
 	Err error
 	// Owner is the plugin's owner, as its descriptor names it.
 	Owner Owner
 	// Key is the plugin's key, "<name>/<descriptor key>".
 	Key string
 	// Version is the version the attempt loaded: the descriptor's, or the content hash of the plugin's files
-	// when it has none (empty if the attempt failed before the files were read).
+	// when it has none (empty if the attempt failed before the files were read); the version validated, on demand.
 	Version string
-	// Issues are the problems the attempt found, in the order found.
+	// Issues are the problems the attempt found, in the order found; on demand, those of the validation only.
 	Issues []Issue
 	// Duration is how long the attempt took.
 	Duration time.Duration
@@ -105,6 +105,11 @@ func (r *Report) blocking() error {
 func (c *Container) finishReport(ctx context.Context, report *Report, src *source, err error) {
 	report.Version, report.Err, report.Duration = src.desc.Version, err, time.Since(report.At)
 
+	c.logIssues(ctx, report)
+}
+
+// logIssues logs each issue of report at its severity's level with the plugin's key, version and owner.
+func (c *Container) logIssues(ctx context.Context, report *Report) {
 	if len(report.Issues) == 0 {
 		return
 	}

@@ -60,13 +60,18 @@ var (
 	ErrLoad = errors.New("plg: plugin failed to load")
 	// ErrBlockingIssue reports a plugin version whose load found an [Issue] of [SeverityError] (or of a severity
 	// plg does not know), such as missing ownership under [WithRequiredOwnership] or one its Validate returned
-	// ([WithValidation]); the message gives each such issue's code and message. It is wrapped in [ErrLoad].
+	// ([WithValidation]); the message gives each such issue's code and message. It is wrapped in [ErrLoad], or
+	// is the [Report.Err] of an on-demand validation ([Validate]) that found such an issue.
 	ErrBlockingIssue = errors.New("plg: load blocked by an error issue")
 	// ErrValidation reports a plugin version that could not be validated ([WithValidation]): its instance has no
 	// Validate (for Go, of the expected signature; the message shows the one the plugin declares), or Validate
 	// failed (a Go error, a Lua nil and message or error, a TypeScript throw or rejection), panicked, trapped or
-	// ran past the validation timeout. It is wrapped in [ErrLoad].
+	// ran past the validation timeout. It is wrapped in [ErrLoad], or is the [Report.Err] of an on-demand
+	// validation ([Validate]).
 	ErrValidation = errors.New("plg: plugin validation failed")
+	// ErrNoValidation reports an on-demand validation ([Validate]) of a plugin registered without
+	// [WithValidation].
+	ErrNoValidation = errors.New("plg: plugin registered without validation")
 	// ErrGoStatement reports a Go plugin whose source contains go statements; the message names the file, line
 	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
 	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance

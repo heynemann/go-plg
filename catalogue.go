@@ -19,14 +19,20 @@ type plugin struct {
 	iface    reflect.Type // the interface it was registered for
 	closeErr error        // closing the retired generation's instances failed; set before closed is closed
 	pool     *pool
+	reg      *registration // the Register (or reload) that loaded it
+	launch   *launcher     // starts its instances, and its on-demand validation instances
 	report   *Report       // the load that produced it; set before it is published, read-only afterwards
 	idle     chan struct{} // closed once the generation is retired and no call is in flight
 	closed   chan struct{} // closed once a retired generation's instances are closed
-	key      string        // "<name>/<descriptor key>"
-	desc     Descriptor    // as loaded, its Version resolved
-	reserved uint64        // its worst case in the container's memory budget, given back once it is closed
-	state    atomic.Int64  // calls in flight, plus retiredBit once retired
-	quiet    atomic.Bool   // idle is closed
+	// validated is the report of its latest on-demand validation ([Validate]); nil before the first.
+	validated atomic.Pointer[Report]
+	key       string       // "<name>/<descriptor key>"
+	storage   string       // the name of the storage it was loaded from
+	desc      Descriptor   // as loaded, its Version resolved
+	reserved  uint64       // its worst case in the container's memory budget, given back once it is closed
+	state     atomic.Int64 // calls in flight, plus retiredBit once retired
+	quiet     atomic.Bool  // idle is closed
+	retiring  atomic.Bool  // Container.retire took it: an on-demand Unpublish and a reload or Close may both try
 }
 
 // retiredBit marks a retired generation in plugin.state, far above any count of calls in flight.

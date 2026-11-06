@@ -63,6 +63,10 @@ type PluginInfo struct {
 // goroutine with the load's context; a panic in it is recovered and reported as a [PanicError] in
 // [PhaseCallback].
 //
+// [Validate] and [ValidateAll] run the same validation on demand, on the versions the container serves; what a
+// failure then does is the Register's [WithOnDemandValidationPolicy]. Every validation is counted in the
+// plg.plugin.validations and plg.plugin.validation.issues metrics ([WithMeterProvider]).
+//
 // V is the type of the validation input: a named data type (see the interface contract) declared in the
 // registered interface's package, whose source Go plugins interpret, so they can name it. Register fails with
 // [ErrInvalidOption] for any other V, a nil input or the option given twice.
@@ -119,7 +123,8 @@ type validation struct {
 	scriptIssues *wire.Codec
 	want         string // the method Go plugins declare, for messages
 	timeout      time.Duration
-	index        uint32 // the number of the interface's methods: guests serve Validate after them
+	index        uint32           // the number of the interface's methods: guests serve Validate after them
+	policy       ValidationPolicy // what a failed on-demand validation does
 }
 
 // scriptIssue is an [Issue] as Lua and TypeScript plugins write it, with lower-case field names. It has Issue's
@@ -142,8 +147,9 @@ var (
 // newValidation checks the Register call's validation options against the contract and prepares its validation;
 // it returns nil without one.
 func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
-	if cfg.validationTimeout <= 0 {
-		return nil, fmt.Errorf("%w: %w, got %s", ErrInvalidOption, errValidationTimeout, cfg.validationTimeout)
+	policy, err := checkValidationOptions(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	switch len(cfg.validations) {
@@ -161,7 +167,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 
 	typ := spec.typ
 
-	err := checkValidationInput(contr, typ)
+	err = checkValidationInput(contr, typ)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +175,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 	var planner wire.Planner
 
 	val := &validation{
-		input: spec.input, typ: typ, timeout: cfg.validationTimeout,
+		input: spec.input, typ: typ, timeout: cfg.validationTimeout, policy: policy,
 		index: uint32(len(contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
 	}
 
@@ -189,6 +195,16 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 	val.want = "Validate(ctx context.Context, in " + typ.String() + ") ([]plugin.Issue, error)"
 
 	return val, nil
+}
+
+// checkValidationOptions checks the Register call's validation timeout and on-demand policy, returning the
+// policy.
+func checkValidationOptions(cfg *registerConfig) (ValidationPolicy, error) {
+	if cfg.validationTimeout <= 0 {
+		return 0, fmt.Errorf("%w: %w, got %s", ErrInvalidOption, errValidationTimeout, cfg.validationTimeout)
+	}
+
+	return onDemandPolicy(cfg)
 }
 
 // checkValidationInput checks that typ, a WithValidation input type, is a named, non-generic data type declared
@@ -230,7 +246,21 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 		Storage: src.storeName,
 	}
 
-	args, err := c.validationInput(ctx, val, launch, &info)
+	err := c.runValidation(ctx, val, launch, &info, src.limit, extra, report)
+	if errors.Is(err, errNoValidate) {
+		err = fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
+	}
+
+	return err
+}
+
+// runValidation asks val's input for the input of the plugin version info describes and runs its Validate with
+// it in a throwaway instance (see [Container.validateInstance]), adding the issues found to report. It fails when
+// an issue of report blocks, or with why the plugin could not be validated (errNoValidate as is).
+func (c *Container) runValidation(ctx context.Context, val *validation, launch *launcher, info *PluginInfo,
+	limit, extra uint64, report *Report,
+) error {
+	args, err := c.validationInput(ctx, val, launch, info)
 	if err != nil {
 		report.Issues = append(report.Issues, Issue{
 			Severity: SeverityError, Code: CodeValidationInput,
@@ -240,10 +270,7 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 		return report.blocking()
 	}
 
-	issues, err := c.validateInstance(ctx, val, launch, src.limit, extra, args)
-	if errors.Is(err, errNoValidate) {
-		err = fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
-	}
+	issues, err := c.validateInstance(ctx, val, launch, limit, extra, args)
 
 	report.Issues = append(report.Issues, issues...)
 
