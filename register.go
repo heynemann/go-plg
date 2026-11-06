@@ -144,7 +144,7 @@ func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name s
 		hostMethods = reg.host.methods
 	}
 
-	reg.schema = scriptSchema(contr.methods, hostMethods)
+	reg.schema = scriptSchema(contr.methods, reg.validation, hostMethods)
 
 	return reg, nil
 }
@@ -601,17 +601,11 @@ func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key st
 }
 
 // checkLoad checks a plugin about to launch, adding the issues found to report: it fails when one blocks the
-// load, or when the Register validates its plugins and the plugin's language cannot validate yet.
+// load.
 func checkLoad(reg *registration, src *source, report *Report) error {
 	checkOwnership(report, src.desc.owner(), reg.cfg.ownership)
 
-	err := report.blocking()
-	if err == nil && reg.validation != nil && !src.loader.validates() {
-		err = fmt.Errorf("%w: %s plugins cannot validate yet; register them without WithValidation",
-			ErrValidation, src.desc.Language)
-	}
-
-	return err
+	return report.blocking()
 }
 
 // newLauncher returns the launcher of a plugin version's instances, which start from spec.

@@ -53,7 +53,10 @@ func (tsLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
 func (tsLoader) multiplexes() bool { return true }
 
-func (tsLoader) validates() bool { return false }
+func (tsLoader) missingValidate(*memfs.FS, string, *validation) string {
+	return "the object Create returned has no method Validate: inst.Validate(v) returns an array of issues " +
+		"({severity, code, message, field}), or a Promise of one"
+}
 
 func (tsLoader) prepare(ctx context.Context, c *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,
@@ -64,10 +67,11 @@ func (tsLoader) prepare(ctx context.Context, c *Container, reg *registration, sr
 	}
 
 	payload := scriptabi.Payload{
-		Name:    src.desc.Entrypoint,
-		Source:  bundle,
-		Methods: uint32(len(reg.contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
-		Schema:  reg.schema,
+		Name:     src.desc.Entrypoint,
+		Source:   bundle,
+		Methods:  uint32(len(reg.contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
+		Schema:   reg.schema,
+		Validate: reg.validation != nil,
 	}
 
 	return launchSpec{payload: payload.Append(nil)}, nil

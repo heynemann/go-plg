@@ -30,7 +30,9 @@ func (goLoader) memoryLimit() uint64 { return goMemoryLimit }
 
 func (goLoader) multiplexes() bool { return false }
 
-func (goLoader) validates() bool { return true }
+func (goLoader) missingValidate(files *memfs.FS, entrypoint string, val *validation) string {
+	return goValidateMissing(files, entrypoint, val.want)
+}
 
 func (goLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,

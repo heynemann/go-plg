@@ -199,7 +199,8 @@ func TestCheckNeedsRoomBeyondTheReservations(t *testing.T) {
 	t.Parallel()
 
 	ctr := newContainer(t, plg.WithMemoryBudget(hostileLimit))
-	require.NoError(t, registerValidator(t, ctr, "full", "p", newTestHost(), testcontract.Check{Mode: "valid"}))
+	require.NoError(t, registerValidator(t, ctr, golang(), "full", "p", newTestHost(),
+		testcontract.Check{Mode: "valid"}))
 
 	report, err := plg.Check(t.Context(), ctr, "full", checkCandidate("p", "2"), sourceFS(goSource(t, "validator")))
 	require.ErrorIs(t, err, plg.ErrMemoryBudget)

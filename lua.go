@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
-	"slices"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/memfs"
 	"github.com/heynemann/go-plg/internal/scriptabi"
 	"github.com/heynemann/go-plg/internal/wire"
@@ -33,7 +33,10 @@ func (luaLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
 func (luaLoader) multiplexes() bool { return true }
 
-func (luaLoader) validates() bool { return false }
+func (luaLoader) missingValidate(*memfs.FS, string, *validation) string {
+	return "the table Create returned has no method Validate: inst:Validate(v) returns a list of issue tables " +
+		"({severity, code, message, field}), or nil and a message"
+}
 
 func (luaLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,
@@ -46,9 +49,10 @@ func (luaLoader) prepare(_ context.Context, _ *Container, reg *registration, src
 	}
 
 	payload := scriptabi.Payload{
-		Name:    entrypoint,
-		Methods: uint32(len(reg.contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
-		Schema:  reg.schema,
+		Name:     entrypoint,
+		Methods:  uint32(len(reg.contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
+		Schema:   reg.schema,
+		Validate: reg.validation != nil,
 	}
 
 	return launchSpec{payload: payload.Append(nil), mounts: []engine.Mount{{FS: tree, GuestPath: luaPluginPath}}}, nil
@@ -106,12 +110,21 @@ func copyLuaFiles(files fs.FS) (*memfs.FS, error) {
 	return mounted, nil
 }
 
-// scriptSchema returns the encoded [wire.Schema] the script guests receive: the interface's methods, then the
-// Host's. The two sets were planned separately, so a type both use is described twice; the guests do not care.
-func scriptSchema(methods, hostMethods []*method) []byte {
+// scriptSchema returns the encoded [wire.Schema] the script guests receive: the interface's methods, then
+// Validate when the plugins validate (val is not nil), then the Host's. The sets were planned separately, so a
+// type several use is described more than once; the guests do not care.
+func scriptSchema(methods []*method, val *validation, hostMethods []*method) []byte {
 	var schema wire.Schema
 
-	for _, meth := range slices.Concat(methods, hostMethods) {
+	for _, meth := range methods {
+		schema.AddMethod(meth.name, meth.args, meth.results)
+	}
+
+	if val != nil {
+		schema.AddMethod(goabi.ValidateMethod, []*wire.Codec{val.codec}, []*wire.Codec{val.scriptIssues})
+	}
+
+	for _, meth := range hostMethods {
 		schema.AddMethod(meth.name, meth.args, meth.results)
 	}
 

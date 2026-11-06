@@ -1,14 +1,15 @@
 // Package validator is the Go test plugin that validates itself (plg.WithValidation): it implements
 // testcontract.Fooer with a Create taking testcontract.Host, and its Validate does what the input's Mode says:
 //
-//	valid   no issue
-//	warn    a warning and an info issue
-//	error   an error issue and a warning
-//	fail    returns an error
-//	panic   panics
-//	loop    never returns
-//	host    an info issue "create=<Host.Value in Create> validate=<Host.Value in Validate>"
-//	http    an info issue "<status code> <body>" of a GET of the input's URL
+//	valid    no issue
+//	warn     a warning and an info issue
+//	error    an error issue and a warning
+//	unknown  an issue of a severity plg does not know
+//	fail     returns an error
+//	panic    panics
+//	loop     never returns
+//	host     an info issue "create=<Host.Value in Create> validate=<Host.Value in Validate>"
+//	http     an info issue "<status code> <body>" of a GET of the input's URL
 //
 // Validate also marks its instance validated: Foo("validated") reports whether this instance was.
 package validator
@@ -58,6 +59,8 @@ func (v *validator) Validate(ctx context.Context, in testcontract.Check) ([]plug
 			{Severity: plugin.Error, Code: "validator.broken", Message: "broken", Field: "max"},
 			{Severity: plugin.Warning, Code: "validator.slow", Message: "slow"},
 		}, nil
+	case "unknown":
+		return []plugin.Issue{{Severity: "fatal", Code: "validator.fatal", Message: "fatal"}}, nil
 	case "fail":
 		return nil, errors.New("validation broke")
 	case "panic":

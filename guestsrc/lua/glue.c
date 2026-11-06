@@ -2,9 +2,11 @@
 ** The Lua guest's ABI (plg_alloc, plg_init, plg_call, plg_close), its sandboxed Lua state and `require`.
 **
 ** plg_init receives the script init payload (internal/scriptabi): the entrypoint's path in the /plugin mount, an
-** unused source, the interface's method count and the wire schema of the interface's methods followed by the
-** Host's. It runs the entrypoint, calls the global Create and keeps the table it returns; plg_call(i) calls
-** inst:<method i>(args...). Every result buffer starts with a status byte (internal/wire).
+** unused source, the interface's method count, whether the plugins validate and the wire schema of the
+** interface's methods followed by Validate, when they validate, and the Host's. It runs the entrypoint, calls the
+** global Create and keeps the table it returns; plg_call(i) calls inst:<method i>(args...), Validate included,
+** which the table need not have: without it the call fails with PLG_LOAD. Every result buffer starts with a
+** status byte (internal/wire).
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +29,8 @@
 #define MAX_MODULE_NAME 200
 
 plg_schema plg_the_schema;
-uint32_t plg_iface_methods;
+static uint32_t iface_methods; /* the interface's: the schema's first methods */
+uint32_t plg_host_base;
 
 static lua_State *L;
 static uint8_t *inbuf;
@@ -330,7 +333,7 @@ static int init_protected(lua_State *L) {
   if (n == 0 || !lua_istable(L, base))
     return luaL_error(L, "Create returned %s, want a table", n == 0 ? "nothing" : luaL_typename(L, base));
   lua_settop(L, base);
-  for (uint32_t i = 0; i < plg_iface_methods; i++) {
+  for (uint32_t i = 0; i < iface_methods; i++) {
     lua_getfield(L, base, plg_the_schema.methods[i].name);
     if (!callable(L, -1)) return luaL_error(L, "the table Create returned has no method %s", plg_the_schema.methods[i].name);
     lua_pop(L, 1);
@@ -343,13 +346,16 @@ static int init_protected(lua_State *L) {
 static const char *parse_init(plg_reader *r) {
   const char *source;
   size_t source_len;
+  uint8_t validates;
   if (!plg_read_str(r, &entrypoint, &entrypoint_len) || !plg_read_str(r, &source, &source_len) ||
-      !plg_read_u32(r, &plg_iface_methods))
+      !plg_read_u32(r, &iface_methods) || !plg_read_u8(r, &validates) || validates > 1)
     return "malformed init payload";
   if (entrypoint_len == 0 || memchr(entrypoint, 0, entrypoint_len) != NULL) return "malformed init payload: entrypoint";
   const char *err = plg_schema_parse(r, &plg_the_schema);
   if (err != NULL) return err;
-  if (plg_iface_methods > plg_the_schema.nmethods) return "malformed init payload: method count";
+  if (plg_the_schema.nmethods < validates || iface_methods > plg_the_schema.nmethods - validates)
+    return "malformed init payload: method count";
+  plg_host_base = iface_methods + validates;
   return NULL;
 }
 
@@ -432,6 +438,10 @@ static int call_protected(lua_State *L) {
   luaL_checkstack(L, (int)m->nparams + 8, "too many arguments");
   lua_rawgeti(L, LUA_REGISTRYINDEX, instref); /* 1 */
   lua_getfield(L, 1, m->name);                 /* 2 */
+  if (calling == iface_methods && !callable(L, 2)) { /* Validate, which the plugin may lack */
+    fail_status = PLG_LOAD;
+    return luaL_error(L, "the table Create returned has no method %s", m->name);
+  }
   lua_pushvalue(L, 1);
   for (uint32_t k = 0; k < m->nparams; k++) {
     const char *err = plg_push_value(L, &plg_the_schema, m->params[k], &args, 0);
@@ -445,7 +455,7 @@ static int call_protected(lua_State *L) {
 
 EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
   if (!initialized) return cmessage(PLG_ABI, "plg_call before a successful plg_init");
-  if (method >= plg_iface_methods) return cmessage(PLG_ABI, "unknown method");
+  if (method >= plg_host_base) return cmessage(PLG_ABI, "unknown method");
   if (len > incap) return cmessage(PLG_ABI, "arguments beyond the input buffer");
   args = (plg_reader){inbuf, inbuf + len};
   calling = method;
@@ -551,7 +561,7 @@ static void run(size_t i) {
 /* plg_start starts call number call of the interface method with the given index (arguments as for plg_call). */
 EXPORT("plg_start") uint64_t plg_start(uint32_t call, uint32_t method, uint32_t len) {
   if (!initialized) return cmessage(PLG_ABI, "plg_start before a successful plg_init");
-  if (method >= plg_iface_methods) return cmessage(PLG_ABI, "unknown method");
+  if (method >= iface_methods) return cmessage(PLG_ABI, "unknown method");
   if (len > incap) return cmessage(PLG_ABI, "arguments beyond the input buffer");
   for (size_t i = 0; i < nwaits; i++)
     if (waits[i].call == call) return cmessage(PLG_ABI, "call number already in flight");

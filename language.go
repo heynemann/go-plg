@@ -23,8 +23,9 @@ type loader interface {
 	memoryLimit() uint64
 	// multiplexes reports whether the language's guest can serve several calls at once ([WithConcurrentCalls]).
 	multiplexes() bool
-	// validates reports whether the language's guest can call the plugin's Validate ([WithValidation]).
-	validates() bool
+	// missingValidate explains why a plugin version cannot validate ([WithValidation]): its instance has no
+	// Validate of the kind val needs; files are the version's snapshot and entrypoint its descriptor's.
+	missingValidate(files *memfs.FS, entrypoint string, val *validation) string
 	// prepare turns an opened plugin's files (the snapshot of src) into what each of its instances starts from:
 	// the init payload and the file trees mounted read-only into the guest. It fails when the plugin cannot load
 	// (a missing entrypoint, source the host rejects) and when ctx ends; c runs what it runs on the host

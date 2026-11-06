@@ -135,7 +135,7 @@ static int host_call(lua_State *L, uint32_t index) {
       return -1;
     }
   }
-  uint32_t n = plg_host_call(index - plg_iface_methods, addr(scr->request.data), (uint32_t)scr->request.len);
+  uint32_t n = plg_host_call(index - plg_host_base, addr(scr->request.data), (uint32_t)scr->request.len);
   plg_reader r = take(L, n);
   uint8_t status = *r.p++;
   if (status != PLG_OK) {
@@ -162,9 +162,9 @@ static int host_method(lua_State *L) {
 }
 
 void plg_open_host(lua_State *L) {
-  if (plg_the_schema.nmethods == plg_iface_methods) return; /* no Host: no host global */
-  lua_createtable(L, 0, (int)(plg_the_schema.nmethods - plg_iface_methods));
-  for (uint32_t i = plg_iface_methods; i < plg_the_schema.nmethods; i++) {
+  if (plg_the_schema.nmethods == plg_host_base) return; /* no Host: no host global */
+  lua_createtable(L, 0, (int)(plg_the_schema.nmethods - plg_host_base));
+  for (uint32_t i = plg_host_base; i < plg_the_schema.nmethods; i++) {
     lua_pushinteger(L, (lua_Integer)i);
     lua_pushcclosure(L, host_method, 1);
     lua_setfield(L, -2, plg_the_schema.methods[i].name);

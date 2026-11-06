@@ -137,9 +137,12 @@ void plg_conv_push(lua_State *L, plg_conv *cv, const char *prefix);
 */
 int plg_protect(lua_State *L, lua_CFunction fn);
 
-/* The guest's schema: the interface's methods (plg_call indexes), then the Host's (glue.c). */
+/*
+** The guest's schema: the interface's methods (plg_call indexes), then Validate when the plugins validate, then
+** the Host's, from plg_host_base on (glue.c).
+*/
 extern plg_schema plg_the_schema;
-extern uint32_t plg_iface_methods;
+extern uint32_t plg_host_base;
 
 /* Globals (capi.c, json.c). */
 void plg_open_host(lua_State *L);

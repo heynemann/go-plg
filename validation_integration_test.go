@@ -23,6 +23,10 @@ import (
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
+// The validation tests belong to the cross-language contract suite (RULES.md §2): each runs against the
+// equivalent validator plugins of every language, testdata/plugins/<dir>/validator, whose Validate does what the
+// input's Mode says, with the same outcomes.
+
 // validatorOwner owns the validating test plugins, so their reports hold only what validation found.
 func validatorOwner() plg.Owner {
 	return plg.Owner{Team: plg.Team{Name: "payments"}, Contact: plg.Contact{Email: "payments@example.com"}}
@@ -38,6 +42,16 @@ func putGo(t *testing.T, store *plg.MemoryStorage, key, version string, files fs
 	}, files))
 }
 
+// putValidator puts lang's validator plugin of the given version into store under key.
+func putValidator(t *testing.T, store *plg.MemoryStorage, lang contractLanguage, key, version string) {
+	t.Helper()
+
+	owner := validatorOwner()
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: key, Language: lang.lang, Entrypoint: lang.entry, Version: version, Owner: &owner,
+	}, lang.files("validator")))
+}
+
 // goSource returns the plugin.go of a Go test plugin.
 func goSource(t *testing.T, plugin string) string {
 	t.Helper()
@@ -51,6 +65,35 @@ func goSource(t *testing.T, plugin string) string {
 // sourceFS is a plugin directory holding src as its plugin.go.
 func sourceFS(src string) fstest.MapFS {
 	return fstest.MapFS{"plugin.go": {Data: []byte(src)}}
+}
+
+// eachValidatingLanguage runs test as a parallel subtest per contract language; validation does not depend on
+// the binder.
+func eachValidatingLanguage(t *testing.T, test func(t *testing.T, lang contractLanguage)) {
+	t.Helper()
+
+	for _, lang := range contractLanguages() {
+		t.Run(lang.dir, func(t *testing.T) {
+			t.Parallel()
+
+			test(t, lang)
+		})
+	}
+}
+
+// validatePanic is what the PanicError of the validator plugin's panic mode holds in lang: Go plugins panic;
+// script plugins, which fail any other way with an error, run out of memory.
+func validatePanic(lang plg.Language) string {
+	switch lang {
+	case plg.LanguageGo:
+		return "Validate panicked on purpose"
+	case plg.LanguageLua:
+		return "not enough memory"
+	case plg.LanguageTypeScript:
+		return "out of memory"
+	default:
+		panic("no validator plugin in " + string(lang))
+	}
 }
 
 // checkByKey is a WithValidation function giving each plugin the check of its key, after the Register name.
@@ -72,15 +115,15 @@ func checkByKey(
 
 var errInputFailed = errors.New("no limits for this plugin")
 
-// registerValidator registers the validator test plugin as name/key with opts, host and WithPool(1, 1) under
+// registerValidator registers lang's validator plugin as name/key with opts, host and WithPool(1, 1) under
 // hostileLimit, validated with check; Register's context carries "register" for testHost.Value.
-func registerValidator(t *testing.T, ctr *plg.Container, name, key string, host testcontract.Host,
-	check testcontract.Check, opts ...plg.RegisterOption,
+func registerValidator(t *testing.T, ctr *plg.Container, lang contractLanguage, name, key string,
+	host testcontract.Host, check testcontract.Check, opts ...plg.RegisterOption,
 ) error {
 	t.Helper()
 
 	store := plg.NewMemoryStorage(name)
-	putGo(t, store, key, "1", sourceFS(goSource(t, "validator")))
+	putValidator(t, store, lang, key, "1")
 
 	opts = append([]plg.RegisterOption{
 		plg.WithStorage(store), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit),
@@ -91,23 +134,76 @@ func registerValidator(t *testing.T, ctr *plg.Container, name, key string, host 
 	return plg.Register[testcontract.Fooer](withHostValue(t.Context(), "register"), ctr, name, opts...)
 }
 
+// blockedValidation registers lang's validator plugin as name/key validated with check, which must fail its load,
+// and checks nothing of it is left: no instance, charge or reservation, no catalogue entry.
+func blockedValidation(t *testing.T, ctr *plg.Container, lang contractLanguage, name, key string,
+	check testcontract.Check, opts ...plg.RegisterOption,
+) error {
+	t.Helper()
+
+	instances, used, reserved := plg.Instances(ctr), plg.MemoryInUse(ctr), plg.MemoryReserved(ctr)
+
+	err := registerValidator(t, ctr, lang, name, key, newTestHost(), check, opts...)
+	require.ErrorIs(t, err, plg.ErrLoad, name)
+	assert.Contains(t, err.Error(), name+"/"+key)
+	assert.Equal(t, instances, plg.Instances(ctr), "%s: no instance is left", name)
+	assert.Equal(t, used, plg.MemoryInUse(ctr), "%s: the instances' charges were given back", name)
+	assert.Equal(t, reserved, plg.MemoryReserved(ctr), "%s: the reservation was given back", name)
+
+	_, getErr := plg.Get[testcontract.Fooer](t.Context(), ctr, name+"/"+key)
+	require.ErrorIs(t, getErr, plg.ErrNotFound, name)
+
+	return err
+}
+
 // TestValidationAtRegister registers the validator plugin with each of its Validate behaviours: a valid plugin
 // and one with only warnings go live with their issues in the load report and the log, in a pool whose
-// instance never ran Validate; error issues, an error, a panic, a Validate looping past the validation timeout
-// and a failing WithValidation function each fail Register, with no instance left and the memory given back.
+// instance never ran Validate; error issues, an issue of an unknown severity, a failing Validate, a panic, a
+// Validate looping past the validation timeout and a failing WithValidation function each fail Register, with no
+// instance left and the memory given back.
 func TestValidationAtRegister(t *testing.T) {
 	t.Parallel()
 
-	var logs bytes.Buffer
+	eachValidatingLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	// slog's JSON handler serializes its writes; the test reads once the container is closed.
-	ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+		var logs bytes.Buffer
 
-	// The subtests share the container and run in turn: each compares the instances and memory left with what
-	// the previous ones left.
+		// slog's JSON handler serializes its writes; the test reads once the container is closed.
+		ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
 
-	// A valid plugin goes live, in a pool whose instance never ran Validate.
-	require.NoError(t, registerValidator(t, ctr, "valid", "p", newTestHost(), testcontract.Check{Mode: "valid"}))
+		// The steps share the container and run in turn: each compares the instances and memory left with what
+		// the previous ones left.
+		validationGoesLive(t, ctr, lang)
+		validationBlocks(t, ctr, lang)
+
+		require.NoError(t, ctr.Close(t.Context())) // every record is written
+
+		codes := func(key string) []string {
+			records := issueRecords(t, logs.Bytes(), key)
+			got := make([]string, 0, len(records))
+
+			for _, rec := range records {
+				got = append(got, rec.Level+" "+rec.Code)
+			}
+
+			return got
+		}
+
+		assert.Empty(t, codes("valid/p"))
+		assert.Equal(t, []string{"WARN validator.slow", "INFO validator.note"}, codes("warn/p"))
+		assert.Equal(t, []string{"ERROR validator.broken", "WARN validator.slow"}, codes("error/p"))
+		assert.Equal(t, []string{"ERROR validator.fatal"}, codes("unknown/p"), "an unknown severity is an error")
+		assert.Equal(t, []string{"ERROR " + plg.CodeValidationInput}, codes("input/input"))
+	})
+}
+
+// validationGoesLive registers a valid validator plugin and one with warnings: both go live, in a pool whose
+// instance never ran Validate, the warnings recorded in the report.
+func validationGoesLive(t *testing.T, ctr *plg.Container, lang contractLanguage) {
+	t.Helper()
+
+	require.NoError(t, registerValidator(t, ctr, lang, "valid", "p", newTestHost(), testcontract.Check{Mode: "valid"}))
 
 	report, ok := plg.ServingReport(ctr, "valid/p")
 	require.True(t, ok)
@@ -124,8 +220,7 @@ func TestValidationAtRegister(t *testing.T) {
 	assert.Equal(t, 1, plg.Instances(ctr), "the validation instance was closed")
 	assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "only the serving instance is charged")
 
-	// Warnings and info go live, recorded in the report.
-	require.NoError(t, registerValidator(t, ctr, "warn", "p", newTestHost(), testcontract.Check{Mode: "warn"}))
+	require.NoError(t, registerValidator(t, ctr, lang, "warn", "p", newTestHost(), testcontract.Check{Mode: "warn"}))
 
 	report, ok = plg.ServingReport(ctr, "warn/p")
 	require.True(t, ok)
@@ -133,41 +228,31 @@ func TestValidationAtRegister(t *testing.T) {
 		{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
 		{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
 	}, report.Issues)
+}
 
-	// blocked registers a plugin that must fail validation, and checks nothing of it is left.
-	blocked := func(name, key string, check testcontract.Check, opts ...plg.RegisterOption) error {
-		t.Helper()
+// validationBlocks registers the validator plugin with each behaviour that must fail its load.
+func validationBlocks(t *testing.T, ctr *plg.Container, lang contractLanguage) {
+	t.Helper()
 
-		instances, used, reserved := plg.Instances(ctr), plg.MemoryInUse(ctr), plg.MemoryReserved(ctr)
-
-		loadErr := registerValidator(t, ctr, name, key, newTestHost(), check, opts...)
-		require.ErrorIs(t, loadErr, plg.ErrLoad, name)
-		assert.Contains(t, loadErr.Error(), name+"/"+key)
-		assert.Equal(t, instances, plg.Instances(ctr), "%s: no instance is left", name)
-		assert.Equal(t, used, plg.MemoryInUse(ctr), "%s: the instances' charges were given back", name)
-		assert.Equal(t, reserved, plg.MemoryReserved(ctr), "%s: the reservation was given back", name)
-
-		_, getErr := plg.Get[testcontract.Fooer](t.Context(), ctr, name+"/"+key)
-		require.ErrorIs(t, getErr, plg.ErrNotFound, name)
-
-		return loadErr
-	}
-
-	err = blocked("error", "p", testcontract.Check{Mode: "error"})
+	err := blockedValidation(t, ctr, lang, "error", "p", testcontract.Check{Mode: "error"})
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
 	assert.Contains(t, err.Error(), "validator.broken: broken")
 	assert.NotContains(t, err.Error(), "validator.slow", "a warning does not block")
 
-	err = blocked("fail", "p", testcontract.Check{Mode: "fail"})
+	err = blockedValidation(t, ctr, lang, "unknown", "p", testcontract.Check{Mode: "unknown"})
+	require.ErrorIs(t, err, plg.ErrBlockingIssue)
+	assert.Contains(t, err.Error(), "validator.fatal: fatal")
+
+	err = blockedValidation(t, ctr, lang, "fail", "p", testcontract.Check{Mode: "fail"})
 	require.ErrorIs(t, err, plg.ErrValidation)
 
 	var pluginErr *plg.PluginError
 
 	require.ErrorAs(t, err, &pluginErr)
 	assert.Equal(t, "Validate", pluginErr.Method)
-	assert.Equal(t, "validation broke", pluginErr.Message)
+	assert.Contains(t, pluginErr.Message, "validation broke")
 
-	err = blocked("panic", "p", testcontract.Check{Mode: "panic"})
+	err = blockedValidation(t, ctr, lang, "panic", "p", testcontract.Check{Mode: "panic"})
 	require.ErrorIs(t, err, plg.ErrValidation)
 
 	var panicErr *plg.PanicError
@@ -175,44 +260,135 @@ func TestValidationAtRegister(t *testing.T) {
 	require.ErrorAs(t, err, &panicErr)
 	assert.Equal(t, plg.PhaseCall, panicErr.Phase)
 	assert.Equal(t, "Validate", panicErr.Method)
-	assert.Contains(t, err.Error(), "Validate panicked on purpose")
+	assert.Equal(t, lang.lang, panicErr.Language)
+	assert.Contains(t, err.Error(), validatePanic(lang.lang))
 
-	err = blocked("loop", "p", testcontract.Check{Mode: "loop"}, plg.WithValidationTimeout(100*time.Millisecond))
+	err = blockedValidation(t, ctr, lang, "loop", "p", testcontract.Check{Mode: "loop"},
+		plg.WithValidationTimeout(100*time.Millisecond))
 	require.ErrorIs(t, err, plg.ErrValidation)
 	assert.Contains(t, err.Error(), "Validate did not return within the validation timeout (100ms, "+
 		"WithValidationTimeout)")
 	require.ErrorAs(t, err, &panicErr, "the stopped Validate is reported")
 	assert.Equal(t, "Validate", panicErr.Method)
 
-	err = blocked("input", "input", testcontract.Check{})
+	err = blockedValidation(t, ctr, lang, "input", "input", testcontract.Check{})
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
 	assert.Contains(t, err.Error(), plg.CodeValidationInput+": the WithValidation function failed: "+
 		errInputFailed.Error())
 
-	err = blocked("inputpanic", "inputpanic", testcontract.Check{})
+	err = blockedValidation(t, ctr, lang, "inputpanic", "inputpanic", testcontract.Check{})
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
 	assert.Contains(t, err.Error(), "the WithValidation function failed: panic: input panicked on purpose")
-
-	require.NoError(t, ctr.Close(t.Context())) // every record is written
-
-	codes := func(key string) []string {
-		records := issueRecords(t, logs.Bytes(), key)
-		got := make([]string, 0, len(records))
-
-		for _, rec := range records {
-			got = append(got, rec.Level+" "+rec.Code)
-		}
-
-		return got
-	}
-
-	assert.Empty(t, codes("valid/p"))
-	assert.Equal(t, []string{"WARN validator.slow", "INFO validator.note"}, codes("warn/p"))
-	assert.Equal(t, []string{"ERROR validator.broken", "WARN validator.slow"}, codes("error/p"))
-	assert.Equal(t, []string{"ERROR " + plg.CodeValidationInput}, codes("input/input"))
 }
 
-// TestValidationNeedsAValidateOfTheExpectedSignature registers plugins whose instance has no Validate, or one of
+// TestScriptValidationFollowsTheLanguage registers the Lua and TypeScript validator plugins with the ways only
+// their language has to fail or answer: Lua's error(...), TypeScript's rejected Promise, a Promise nothing is
+// left to settle and one that never settles while its jobs run on (stopped by the validation timeout), and
+// issues that do not fit plg.Issue each fail Register; TypeScript's async Validate goes live with its issues.
+func TestScriptValidationFollowsTheLanguage(t *testing.T) {
+	t.Parallel()
+
+	type failure struct {
+		mode, message string
+		timeout       bool // stopped by the validation timeout, a PanicError
+		plugin        bool // a PluginError whose message holds message
+	}
+
+	failures := map[plg.Language][]failure{
+		plg.LanguageLua: {
+			{mode: "raise", message: "validation broke", plugin: true},
+			{mode: "malformed", message: "Validate returned issues that cannot cross the plugin boundary"},
+		},
+		plg.LanguageTypeScript: {
+			{mode: "reject", message: "validation broke", plugin: true},
+			{mode: "stuck", message: "the returned promise never settles", plugin: true},
+			{
+				mode: "pending", timeout: true,
+				message: "Validate did not return within the validation timeout (100ms, WithValidationTimeout)",
+			},
+			{mode: "malformed", message: "Validate returned issues that cannot cross the plugin boundary"},
+		},
+	}
+
+	for _, lang := range []contractLanguage{luaLanguage(), typescript()} {
+		t.Run(lang.dir, func(t *testing.T) {
+			t.Parallel()
+
+			ctr := newContainer(t)
+
+			for _, tc := range failures[lang.lang] {
+				err := blockedValidation(t, ctr, lang, tc.mode, "p", testcontract.Check{Mode: tc.mode},
+					plg.WithValidationTimeout(100*time.Millisecond))
+				require.ErrorIs(t, err, plg.ErrValidation, tc.mode)
+				assert.Contains(t, err.Error(), tc.message, tc.mode)
+
+				var (
+					pluginErr *plg.PluginError
+					panicErr  *plg.PanicError
+				)
+
+				if tc.plugin {
+					require.ErrorAs(t, err, &pluginErr, tc.mode)
+					assert.Equal(t, "Validate", pluginErr.Method, tc.mode)
+					assert.Contains(t, pluginErr.Message, tc.message, tc.mode)
+				} else {
+					assert.NotErrorAs(t, err, &pluginErr, tc.mode)
+				}
+
+				assert.Equal(t, tc.timeout, errors.As(err, &panicErr), "%s: reported as a panic", tc.mode)
+			}
+
+			if lang.lang != plg.LanguageTypeScript {
+				return
+			}
+
+			require.NoError(t, registerValidator(t, ctr, lang, "async", "p", newTestHost(),
+				testcontract.Check{Mode: "async"}))
+
+			report, ok := plg.ServingReport(ctr, "async/p")
+			require.True(t, ok)
+			assert.Equal(t, []plg.Issue{
+				{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
+				{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
+			}, report.Issues, "the issues the async Validate's Promise settled with")
+		})
+	}
+}
+
+// TestValidationNeedsAValidate registers each language's reference fooer, whose instance has no Validate: its
+// load fails with ErrValidation, saying how the language's Validate looks, and nothing runs in its place.
+func TestValidationNeedsAValidate(t *testing.T) {
+	t.Parallel()
+
+	missing := map[plg.Language]string{
+		plg.LanguageGo: "the plugin instance has no method Validate(ctx context.Context, in testcontract.Check) " +
+			"([]plugin.Issue, error), and the plugin declares no method Validate",
+		plg.LanguageLua: "the table Create returned has no method Validate: inst:Validate(v) returns a list of issue " +
+			"tables ({severity, code, message, field}), or nil and a message",
+		plg.LanguageTypeScript: "the object Create returned has no method Validate: inst.Validate(v) returns an array " +
+			"of issues ({severity, code, message, field}), or a Promise of one",
+	}
+
+	eachValidatingLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
+
+		ctr := newContainer(t)
+
+		err := plg.Register[testcontract.Fooer](t.Context(), ctr, "missing",
+			plg.WithStorage(lang.storage(t, "missing", map[string]string{"p": "fooer"})), plg.WithPool(1, 1),
+			plg.WithMemoryLimit(hostileLimit), plg.WithValidation(checkByKey(nil)))
+		require.ErrorIs(t, err, plg.ErrLoad)
+		require.ErrorIs(t, err, plg.ErrValidation)
+		assert.Contains(t, err.Error(), missing[lang.lang])
+
+		var failure *plg.PanicError
+
+		assert.NotErrorAs(t, err, &failure, "no Validate ran")
+		assert.Zero(t, plg.Instances(ctr))
+	})
+}
+
+// TestValidationNeedsAValidateOfTheExpectedSignature registers Go plugins whose instance has a Validate of
 // another signature: each fails Register with ErrValidation, the message giving the method expected and the ones
 // the plugin declares. A Validate taking an extra leading parameter, which yaegi would bind, never runs.
 func TestValidationNeedsAValidateOfTheExpectedSignature(t *testing.T) {
@@ -232,7 +408,6 @@ func TestValidationNeedsAValidateOfTheExpectedSignature(t *testing.T) {
 	tests := []struct {
 		name, src, declares string
 	}{
-		{name: "missing", src: goSource(t, "fooer"), declares: ", and the plugin declares no method Validate"},
 		{
 			name: "input of another type",
 			src:  withValidate("(ctx context.Context, in string) ([]plugin.Issue, error)"),
@@ -298,32 +473,36 @@ func (h *validationHost) Value(ctx context.Context) (string, error) {
 func TestValidationWorksWithinTheVersionsReservation(t *testing.T) {
 	t.Parallel()
 
-	ctr := newContainer(t, plg.WithMemoryBudget(hostileLimit))
-	host := &validationHost{testHost: newTestHost()}
-	host.ctr.Store(ctr)
+	eachValidatingLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	require.NoError(t, registerValidator(t, ctr, "exact", "p", host, testcontract.Check{Mode: "host"}))
+		ctr := newContainer(t, plg.WithMemoryBudget(hostileLimit))
+		host := &validationHost{testHost: newTestHost()}
+		host.ctr.Store(ctr)
 
-	assert.Equal(t, uint64(hostileLimit), host.charged.Load(), "the validation instance was charged")
-	assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "and released before the pool's instance started")
+		require.NoError(t, registerValidator(t, ctr, lang, "exact", "p", host, testcontract.Check{Mode: "host"}))
 
-	report, ok := plg.ServingReport(ctr, "exact/p")
-	require.True(t, ok)
-	assert.Equal(t, []plg.Issue{
-		{
-			Severity: plg.SeverityInfo,
-			Code:     "validator.host",
-			Message:  "create=validating register validate=validating register",
-		},
-	}, report.Issues, "Create and Validate of the validation instance saw IsValidation")
+		assert.Equal(t, uint64(hostileLimit), host.charged.Load(), "the validation instance was charged")
+		assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "and released before the pool's instance started")
 
-	origin, err := getFooer(t, ctr, "exact/p").Foo(t.Context(), "origin")
-	require.NoError(t, err)
-	assert.Equal(t, "register", origin, "the serving instance's Create is no validation")
+		report, ok := plg.ServingReport(ctr, "exact/p")
+		require.True(t, ok)
+		assert.Equal(t, []plg.Issue{
+			{
+				Severity: plg.SeverityInfo,
+				Code:     "validator.host",
+				Message:  "create=validating register validate=validating register",
+			},
+		}, report.Issues, "Create and Validate of the validation instance saw IsValidation")
 
-	err = registerValidator(t, ctr, "over", "p", newTestHost(), testcontract.Check{Mode: "valid"})
-	require.ErrorIs(t, err, plg.ErrMemoryBudget)
-	assert.Equal(t, 1, plg.Instances(ctr))
+		origin, err := getFooer(t, ctr, "exact/p").Foo(t.Context(), "origin")
+		require.NoError(t, err)
+		assert.Equal(t, "register", origin, "the serving instance's Create is no validation")
+
+		err = registerValidator(t, ctr, lang, "over", "p", newTestHost(), testcontract.Check{Mode: "valid"})
+		require.ErrorIs(t, err, plg.ErrMemoryBudget)
+		assert.Equal(t, 1, plg.Instances(ctr))
+	})
 }
 
 // TestValidationRequestsAreLoggedAsSuch validates a plugin whose Validate makes an HTTP request under the
@@ -331,39 +510,44 @@ func TestValidationWorksWithinTheVersionsReservation(t *testing.T) {
 func TestValidationRequestsAreLoggedAsSuch(t *testing.T) {
 	t.Parallel()
 
-	var logs bytes.Buffer
+	eachValidatingLanguage(t, func(t *testing.T, lang contractLanguage) {
+		t.Helper()
 
-	api := newAPIServer(t)
-	ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+		var logs bytes.Buffer
 
-	require.NoError(t, registerValidator(t, ctr, "web", "p", newTestHost(),
-		testcontract.Check{Mode: "http", URL: api.URL + "/v1/check"}, plg.WithHTTP(openPolicy(hostOf(t, api.URL)))))
+		api := newAPIServer(t)
+		ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
 
-	report, ok := plg.ServingReport(ctr, "web/p")
-	require.True(t, ok)
-	require.Len(t, report.Issues, 1)
-	assert.Equal(t, "200 GET /v1/check  "+hostOf(t, api.URL)+" 0", report.Issues[0].Message)
-	assert.Equal(t, int64(1), api.hits.Load())
+		require.NoError(t, registerValidator(t, ctr, lang, "web", "p", newTestHost(),
+			testcontract.Check{Mode: "http", URL: api.URL + "/v1/check"},
+			plg.WithHTTP(openPolicy(hostOf(t, api.URL)))))
 
-	require.NoError(t, ctr.Close(t.Context())) // every record is written
+		report, ok := plg.ServingReport(ctr, "web/p")
+		require.True(t, ok)
+		require.Len(t, report.Issues, 1)
+		assert.Equal(t, "200 GET /v1/check  "+hostOf(t, api.URL)+" 0", report.Issues[0].Message)
+		assert.Equal(t, int64(1), api.hits.Load())
 
-	var requests []map[string]any
+		require.NoError(t, ctr.Close(t.Context())) // every record is written
 
-	lines := bufio.NewScanner(bytes.NewReader(logs.Bytes()))
-	for lines.Scan() {
-		var rec map[string]any
+		var requests []map[string]any
 
-		require.NoError(t, sonic.Unmarshal(lines.Bytes(), &rec))
+		lines := bufio.NewScanner(bytes.NewReader(logs.Bytes()))
+		for lines.Scan() {
+			var rec map[string]any
 
-		if rec["msg"] == "plg: http request" {
-			requests = append(requests, rec)
+			require.NoError(t, sonic.Unmarshal(lines.Bytes(), &rec))
+
+			if rec["msg"] == "plg: http request" {
+				requests = append(requests, rec)
+			}
 		}
-	}
 
-	require.NoError(t, lines.Err())
-	require.Len(t, requests, 1)
-	assert.Equal(t, "web/p", requests[0]["key"])
-	assert.Equal(t, true, requests[0]["validation"])
+		require.NoError(t, lines.Err())
+		require.Len(t, requests, 1)
+		assert.Equal(t, "web/p", requests[0]["key"])
+		assert.Equal(t, true, requests[0]["validation"])
+	})
 }
 
 // TestValidationKeepsTheLastGoodVersion reloads updates of a validated plugin: one whose Validate reports an
@@ -372,83 +556,70 @@ func TestValidationRequestsAreLoggedAsSuch(t *testing.T) {
 func TestValidationKeepsTheLastGoodVersion(t *testing.T) {
 	t.Parallel()
 
-	modes := map[string]string{"1": "valid", "2": "error", "3": "panic", "4": "warn"}
-	store := plg.NewMemoryStorage("kept")
-	src := sourceFS(goSource(t, "validator"))
-	putGo(t, store, "p", "1", src)
-
-	ctr := newContainer(t)
-	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "kept", plg.WithStorage(store),
-		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit), plg.WithHost[testcontract.Host](newTestHost()),
-		plg.WithValidation(func(_ context.Context, info plg.PluginInfo) (testcontract.Check, error) {
-			assert.Equal(t, plg.PluginInfo{
-				Owner:    validatorOwner(),
-				Key:      "kept/p",
-				Version:  info.Version,
-				Language: plg.LanguageGo,
-				Storage:  "kept",
-			}, info)
-
-			return testcontract.Check{Mode: modes[info.Version]}, nil
-		})))
-
-	count := func() int {
+	eachValidatingLanguage(t, func(t *testing.T, lang contractLanguage) {
 		t.Helper()
 
-		n, err := getFooer(t, ctr, "kept/p").Count(t.Context())
-		require.NoError(t, err)
+		modes := map[string]string{"1": "valid", "2": "error", "3": "panic", "4": "warn"}
+		store := plg.NewMemoryStorage("kept")
+		putValidator(t, store, lang, "p", "1")
 
-		return n
-	}
+		ctr := newContainer(t)
+		require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "kept", plg.WithStorage(store),
+			plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit), plg.WithHost[testcontract.Host](newTestHost()),
+			plg.WithValidation(func(_ context.Context, info plg.PluginInfo) (testcontract.Check, error) {
+				assert.Equal(t, plg.PluginInfo{
+					Owner:    validatorOwner(),
+					Key:      "kept/p",
+					Version:  info.Version,
+					Language: lang.lang,
+					Storage:  "kept",
+				}, info)
 
-	assert.Equal(t, 1, count())
+				return testcontract.Check{Mode: modes[info.Version]}, nil
+			})))
 
-	putGo(t, store, "p", "2", src)
+		count := func() int {
+			t.Helper()
 
-	err := plg.ReloadInterface(t.Context(), ctr, "kept")
-	require.ErrorIs(t, err, plg.ErrBlockingIssue)
-	assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
-	assert.Equal(t, 2, count(), "the last good version's instance serves on")
+			n, err := getFooer(t, ctr, "kept/p").Count(t.Context())
+			require.NoError(t, err)
 
-	rejected, ok := plg.RejectedReport(ctr, "kept/p")
-	require.True(t, ok)
-	assert.Equal(t, "2", rejected.Version)
-	require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
-	assert.Equal(t, []plg.Issue{
-		{Severity: plg.SeverityError, Code: "validator.broken", Message: "broken", Field: "max"},
-		{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow"},
-	}, rejected.Issues)
+			return n
+		}
 
-	putGo(t, store, "p", "3", src)
-	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "kept"), plg.ErrValidation)
-	assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
-	assert.Equal(t, 3, count())
+		assert.Equal(t, 1, count())
 
-	putGo(t, store, "p", "4", src)
-	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "kept"))
-	assert.Equal(t, "4", plg.Version(ctr, "kept/p"))
-	assert.Equal(t, 1, count(), "version 4 serves from a fresh instance")
+		putValidator(t, store, lang, "p", "2")
 
-	served, ok := plg.ServingReport(ctr, "kept/p")
-	require.True(t, ok)
-	assert.Len(t, served.Issues, 2)
+		err := plg.ReloadInterface(t.Context(), ctr, "kept")
+		require.ErrorIs(t, err, plg.ErrBlockingIssue)
+		assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
+		assert.Equal(t, 2, count(), "the last good version's instance serves on")
 
-	_, ok = plg.RejectedReport(ctr, "kept/p")
-	assert.False(t, ok)
-}
+		rejected, ok := plg.RejectedReport(ctr, "kept/p")
+		require.True(t, ok)
+		assert.Equal(t, "2", rejected.Version)
+		require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
+		assert.Equal(t, []plg.Issue{
+			{Severity: plg.SeverityError, Code: "validator.broken", Message: "broken", Field: "max"},
+			{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow"},
+		}, rejected.Issues)
 
-// TestScriptPluginsCannotValidateYet registers a Lua plugin with WithValidation: its load fails with
-// ErrValidation before any instance starts.
-func TestScriptPluginsCannotValidateYet(t *testing.T) {
-	t.Parallel()
+		putValidator(t, store, lang, "p", "3")
+		require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "kept"), plg.ErrValidation)
+		assert.Equal(t, "1", plg.Version(ctr, "kept/p"))
+		assert.Equal(t, 3, count())
 
-	root := t.TempDir()
-	writeLuaPlugin(t, root, "p", minimalOwner)
+		putValidator(t, store, lang, "p", "4")
+		require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "kept"))
+		assert.Equal(t, "4", plg.Version(ctr, "kept/p"))
+		assert.Equal(t, 1, count(), "version 4 serves from a fresh instance")
 
-	ctr := newContainer(t)
-	err := plg.Register[testcontract.Fooer](t.Context(), ctr, "lua", plg.WithStorage(plg.NewFSStorage(root)),
-		plg.WithPool(1, 1), plg.WithValidation(checkByKey(nil)))
-	require.ErrorIs(t, err, plg.ErrValidation)
-	require.ErrorContains(t, err, "lua plugins cannot validate yet")
-	assert.Zero(t, plg.Instances(ctr))
+		served, ok := plg.ServingReport(ctr, "kept/p")
+		require.True(t, ok)
+		assert.Len(t, served.Issues, 2)
+
+		_, ok = plg.RejectedReport(ctr, "kept/p")
+		assert.False(t, ok)
+	})
 }

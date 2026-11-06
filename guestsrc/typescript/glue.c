@@ -1,12 +1,14 @@
 // The plg guest ABI for TypeScript plugins, on QuickJS-ng (built by `make guests`, see the Makefile).
 //
 // The host bundles a plugin into one script with esbuild and sends it in the init payload (internal/scriptabi):
-// its file name, the script, the number of interface methods and the wire.Schema of the interface's methods
-// followed by the Host's. plg_init evaluates the prelude (console, fetch, Headers, Response), creates the global
-// `host` object, evaluates the script and calls its exported Create; plg_call decodes the wire-encoded
-// arguments straight into JS values, calls the method with `this` bound to Create's result, runs pending jobs
-// until a returned Promise settles, and encodes the result. QuickJS's std and os modules are not linked: plugins
-// get the ECMAScript built-ins, console, host and fetch only.
+// its file name, the script, the number of interface methods, whether the plugins validate and the wire.Schema
+// of the interface's methods followed by Validate, when they validate, and the Host's. plg_init evaluates the
+// prelude (console, fetch, Headers, Response), creates the global `host` object, evaluates the script and calls
+// its exported Create; plg_call decodes the wire-encoded arguments straight into JS values, calls the method
+// (Validate included, which Create's result need not have: without it the call fails with Load) with `this`
+// bound to Create's result, runs pending jobs until a returned Promise settles, and encodes the result.
+// QuickJS's std and os modules are not linked: plugins get the ECMAScript built-ins, console, host and fetch
+// only.
 //
 // Result buffers start with a status byte (internal/wire): OK + results, or Error (the plugin threw), Load (the
 // script or Create is unusable), Convert (a result does not fit its Go type), Panic (out of memory: the host
@@ -198,7 +200,9 @@ static bool closed;
 static type_t *types;
 static uint32_t ntypes;
 static method_t *methods;
-static uint32_t nmethods, nplugin; // methods [0, nplugin) are the interface's, the rest the Host's
+// methods [0, nplugin) are the interface's, then Validate when the plugins validate, and [hostbase, nmethods) the
+// Host's.
+static uint32_t nmethods, nplugin, hostbase;
 
 static buf_t in;     // the input buffer plg_alloc hands out
 static buf_t out;    // the result buffer
@@ -498,7 +502,7 @@ static bool read_schema(rd_t *r) {
       if (t->fields[f].type >= ntypes) return false;
   }
   min_sizes();
-  if (!rd_u32(r, &nmethods) || nmethods < nplugin || !rd_need(r, nmethods)) return false;
+  if (!rd_u32(r, &nmethods) || nmethods < hostbase || !rd_need(r, nmethods)) return false;
   methods = calloc(nmethods ? nmethods : 1, sizeof *methods);
   if (!methods) return false;
   for (uint32_t i = 0; i < nmethods; i++) {
@@ -1126,7 +1130,7 @@ static JSValue host_method(JSContext *c, JSValueConst this_val, int argc, JSValu
   buf_t own = {0};
   enc_t enc;
   start_encoding(&enc, request(&own));
-  JSValue v = host_request(&enc, &methods[nplugin + (uint32_t)magic], (uint32_t)magic, argc, argv);
+  JSValue v = host_request(&enc, &methods[hostbase + (uint32_t)magic], (uint32_t)magic, argc, argv);
   done(enc.b, &own);
   free(enc.trail.p);
   return v;
@@ -1333,9 +1337,9 @@ static bool globals(void) {
   JSValue g = JS_GetGlobalObject(ctx);
   JSValue host = JS_NewObject(ctx);
   bool ok = !JS_IsException(host);
-  for (uint32_t i = nplugin; ok && i < nmethods; i++) {
+  for (uint32_t i = hostbase; ok && i < nmethods; i++) {
     JSValue fn = JS_NewCFunctionMagic(ctx, host_method, methods[i].name, (int)methods[i].nparams,
-                                      JS_CFUNC_generic_magic, (int)(i - nplugin));
+                                      JS_CFUNC_generic_magic, (int)(i - hostbase));
     ok = !JS_IsException(fn) && JS_DefinePropertyValue(ctx, host, methods[i].atom, fn, JS_PROP_ENUMERABLE) >= 0;
   }
   ok = ok && JS_DefinePropertyValueStr(ctx, g, "host", host, JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE) >= 0;
@@ -1355,7 +1359,7 @@ static bool globals(void) {
   return ok;
 }
 
-// plg_init loads the plugin: payload = name source methodCount schema (internal/scriptabi).
+// plg_init loads the plugin: payload = name source methodCount validate schema (internal/scriptabi).
 EXPORT("plg_init") uint64_t plg_init(uint32_t len) {
   if (rt) return message(ST_ABI, "plg_init called twice", 21);
   if (len > in.cap) return message(ST_ABI, "init payload beyond the input buffer", 36);
@@ -1363,8 +1367,11 @@ EXPORT("plg_init") uint64_t plg_init(uint32_t len) {
   rd_t r = {in.p, len, 0};
   const char *name, *source;
   uint32_t name_len, source_len;
-  if (!rd_str(&r, &name, &name_len) || !rd_str(&r, &source, &source_len) || !rd_u32(&r, &nplugin))
+  uint8_t validates;
+  if (!rd_str(&r, &name, &name_len) || !rd_str(&r, &source, &source_len) || !rd_u32(&r, &nplugin) ||
+      !rd_u8(&r, &validates) || validates > 1 || nplugin == UINT32_MAX)
     return message(ST_ABI, "malformed init payload", 22);
+  hostbase = nplugin + validates;
   if (!setup()) return message(ST_PANIC, "out of memory", 13);
   if (!read_schema(&r)) return oom ? message(ST_PANIC, "out of memory", 13) : message(ST_ABI, "malformed schema", 16);
   if (!globals()) return failure(ST_ABI, "plg: prelude: ");
@@ -1469,12 +1476,12 @@ static uint64_t encode_result(const method_t *m, JSValue v) {
   return res;
 }
 
-// invoke decodes the arguments of the interface method with the given index from the input buffer and calls the
-// method: it returns 0 with what the method returned (a value, a Promise or an exception) in *v, or the result of
-// a request that breaks the ABI.
-static uint64_t invoke(uint32_t method, uint32_t len, JSValue *v) {
+// invoke decodes the arguments of the method with the given index, below limit, from the input buffer and calls
+// the method: it returns 0 with what the method returned (a value, a Promise or an exception) in *v, or the
+// result of a request that breaks the ABI or of a Validate the plugin does not have.
+static uint64_t invoke(uint32_t method, uint32_t limit, uint32_t len, JSValue *v) {
   if (!rt || JS_IsUndefined(inst) || closed) return message(ST_ABI, "plugin not loaded", 17);
-  if (method >= nplugin) return message(ST_ABI, "unknown method", 14);
+  if (method >= limit) return message(ST_ABI, "unknown method", 14);
   if (len > in.cap) return message(ST_ABI, "arguments beyond the input buffer", 33);
   oom = false;
   const method_t *m = &methods[method];
@@ -1495,22 +1502,26 @@ static uint64_t invoke(uint32_t method, uint32_t len, JSValue *v) {
     return failure(ST_ABI, "plg: decoding the arguments: ");
   }
   JSValue fn = JS_GetProperty(ctx, inst, m->atom);
+  uint64_t res = 0;
   if (JS_IsFunction(ctx, fn)) {
     *v = JS_Call(ctx, fn, inst, (int)m->nparams, args);
   } else if (JS_IsException(fn)) {
     *v = JS_EXCEPTION;
+  } else if (method == nplugin) { // Validate, which the plugin may lack
+    res = messagef(ST_LOAD, "the object Create returned has no method %s", m->name);
   } else {
     *v = JS_ThrowTypeError(ctx, "the plugin's %s is not a function", m->name);
   }
   JS_FreeValue(ctx, fn);
   for (uint32_t k = 0; k < m->nparams; k++) JS_FreeValue(ctx, args[k]);
   free(args);
-  return 0;
+  return res;
 }
 
+// plg_call calls the interface method, or Validate, with the given index.
 EXPORT("plg_call") uint64_t plg_call(uint32_t method, uint32_t len) {
   JSValue v;
-  uint64_t bad = invoke(method, len, &v);
+  uint64_t bad = invoke(method, hostbase, len, &v);
   if (bad) return bad;
   v = settle(v);
   if (JS_IsException(v)) return failure(ST_ERROR, NULL);
@@ -1641,7 +1652,7 @@ EXPORT("plg_start") uint64_t plg_start(uint32_t call, uint32_t method, uint32_t 
   }
   begin_step(call);
   JSValue v;
-  uint64_t bad = invoke(method, len, &v);
+  uint64_t bad = invoke(method, nplugin, len, &v);
   if (bad) {
     stepping = false;
     return bad;

@@ -551,9 +551,10 @@ plg.Register[pricing.Rule](ctx, c, "pricing", plg.WithStorage(store),
 ```
 
 Register fails with `plg.ErrInvalidOption` when the input type is not a named data type declared in the contract
-package. Every Go plugin's instance (what `Create` returns) must then have a `Validate` method beside the
-interface's, returning `plugin.Issue` values from `github.com/heynemann/go-plg/plugin`, a package compiled into
-the Go guest (custom guests from `plg build-guest` included):
+package. Every plugin's instance (what `Create` returns) must then have a `Validate` method beside the
+interface's, looked up by name like `Close`. In Go it returns `plugin.Issue` values from
+`github.com/heynemann/go-plg/plugin`, a package compiled into the Go guest (custom guests from
+`plg build-guest` included):
 
 ```go
 import "github.com/heynemann/go-plg/plugin"
@@ -567,6 +568,29 @@ func (r *rule) Validate(ctx context.Context, in pricing.Limits) ([]plugin.Issue,
 }
 ```
 
+Lua and TypeScript plugins receive the input as any argument (a table, an object, keyed like the contract's
+fields) and return a list of issues with the fields `severity` (`"error"`, `"warning"` or `"info"`), `code`,
+`message` and `field`; a missing field is empty and `nil` or `undefined` means no issue. TypeScript's `Validate`
+may also return a Promise of the array:
+
+```lua
+function Rule:Validate(limits)
+  if self.discount > limits.MaxDiscount then
+    return { { severity = "error", code = "rule.discount", message = "over the limit", field = "discount" } }
+  end
+  return nil -- or nil, "message" to fail; error(...) fails too
+end
+```
+
+```ts
+async Validate(limits: { MaxDiscount: number }) {
+  if (this.discount > limits.MaxDiscount) {
+    return [{ severity: "error", code: "rule.discount", message: "over the limit", field: "discount" }];
+  }
+  return []; // throwing (or rejecting) fails
+}
+```
+
 On every load (at Register and on each reload), before any of the plugin's pool instances starts, plg starts a
 separate, throwaway instance, runs its `Create`, calls `Validate` with the function's input under the validation
 timeout (never past the load's `ctx`) and closes it, so the serving instances' state never sees validation. It
@@ -575,15 +599,18 @@ has the Register's Host and HTTP policy; Host methods called from that `Create` 
 report and the log like the ownership check's. The load is blocked (Register fails with `plg.ErrLoad`; a reload
 keeps the last good version) by:
 
-- an issue of severity `plugin.Error` (wrapping `plg.ErrBlockingIssue`); warnings and info are only recorded;
+- an issue of severity error, or of a severity plg does not know (wrapping `plg.ErrBlockingIssue`); warnings
+  and info are only recorded;
 - the function returning an error or panicking (a `plg.validation.input` error issue, `plg.CodeValidationInput`);
-- `Validate` returning an error, panicking or running past the timeout, and an instance without a `Validate` of
-  exactly that signature, the message showing the one the plugin declares (all wrapping `plg.ErrValidation`).
+- `Validate` failing (a Go error, Lua's `nil, msg` or `error(...)`, a TypeScript throw or rejected Promise),
+  panicking or trapping (for scripts: running out of memory), running past the timeout (a TypeScript Promise
+  still unsettled then included; one that nothing is left to settle fails at once), issues that do not fit
+  `plg.Issue`, and an instance without a `Validate` (in Go: of exactly that signature, the message showing the
+  one the plugin declares), all wrapping `plg.ErrValidation`.
 
 The validation instance is charged to the memory budget within the plugin version's own reservation
 (`max × limit`): it is closed before the pool's instances start, so a budget sized exactly to the plugins' worst
-case still validates them. Lua and TypeScript plugins cannot validate yet: with `WithValidation` their loads fail
-with `plg.ErrValidation`.
+case still validates them.
 
 ### Checking a candidate: `plg.Check`
 

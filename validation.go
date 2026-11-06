@@ -34,17 +34,25 @@ type PluginInfo struct {
 // WithValidation makes the Register's plugins validate themselves before they go live. Every load (at Register
 // and on each reload), before any of the plugin's pool instances starts, plg asks input for the plugin's
 // validation input and calls the plugin's Validate with it in a separate, throwaway instance, once its Create
-// succeeded:
+// succeeded. Validate is a method of the instance Create returns, beside the interface's methods, looked up by
+// name like Close:
 //
-//	func (r *rule) Validate(ctx context.Context, in contract.V) ([]plugin.Issue, error) // a Go plugin
+//	func (r *rule) Validate(ctx context.Context, in contract.V) ([]plugin.Issue, error) // Go
+//	function Rule:Validate(v) return { { severity = "warning", code = "rule.slow", message = "..." } } end -- Lua
+//	Validate(v: V): Issue[] | Promise<Issue[]> { return []; } // TypeScript
 //
-// on the instance Create returns, beside the interface's methods (plugin is github.com/heynemann/go-plg/plugin).
+// plugin is github.com/heynemann/go-plg/plugin. Lua and TypeScript receive v as they receive any argument (a
+// table, an object) and return a list of issue tables or objects with the fields severity, code, message and
+// field (a missing one is empty; nil or undefined is no issue at all). Failing Validate the language's way is a
+// failure: a Go error, Lua's nil and a message or error(...), a TypeScript throw or rejected Promise.
+//
 // The issues it returns go into the load's [Report] and the log; one of severity error (or a severity plg does
-// not know) blocks the load, and so do an error or a panic in Validate, a Validate that does not return within
-// [WithValidationTimeout], an instance without a Validate of exactly that signature (the error shows the one the
-// plugin declares) and an error from input, which is recorded as a [CodeValidationInput] issue. A blocked load
-// fails Register with [ErrLoad] (wrapping [ErrBlockingIssue] for issues, [ErrValidation] otherwise); a reload
-// keeps serving the plugin's last good version.
+// not know) blocks the load, and so do a failing Validate, a panic or trap in it, a Validate that does not return
+// (or whose Promise does not settle) within [WithValidationTimeout], an instance without a Validate (for Go, of
+// exactly that signature; the error shows the one the plugin declares) and an error from input, which is
+// recorded as a [CodeValidationInput] issue. A blocked load fails Register with [ErrLoad] (wrapping
+// [ErrBlockingIssue] for issues, [ErrValidation] otherwise); a reload keeps serving the plugin's last good
+// version.
 //
 // The validation instance runs in the same sandbox as the plugin's calls, with the Register's Host and HTTP
 // policy; the context its Create, its Validate and their Host methods and HTTP requests get tells them apart:
@@ -53,8 +61,7 @@ type PluginInfo struct {
 // start, so a budget sized exactly to the plugins' worst case still validates them, and a budget without room
 // for the version fails the load with [ErrMemoryBudget] without waiting. input runs on the loading
 // goroutine with the load's context; a panic in it is recovered and reported as a [PanicError] in
-// [PhaseCallback]. Lua and TypeScript plugins cannot validate yet: with this option their loads fail with
-// [ErrValidation].
+// [PhaseCallback].
 //
 // V is the type of the validation input: a named data type (see the interface contract) declared in the
 // registered interface's package, whose source Go plugins interpret, so they can name it. Register fails with
@@ -101,15 +108,28 @@ type validationSpec struct {
 }
 
 // validation is a Register call's validation, checked once: the input function, the codecs of the input and of
-// the issues Validate returns, the Validate plugins must declare and the guest method index it is called at.
+// the issues Validate returns, the Validate Go plugins must declare and the guest method index it is called at.
 type validation struct {
-	input   func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
-	typ     reflect.Type
-	codec   *wire.Codec // of the input
-	issues  *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
-	want    string      // the method plugins declare, for messages
-	timeout time.Duration
-	index   uint32 // the number of the interface's methods: guests serve Validate after them
+	input  func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
+	typ    reflect.Type
+	codec  *wire.Codec // of the input
+	issues *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
+	// scriptIssues is the codec of []scriptIssue, which describes the issues to the script guests: the same
+	// encoding as issues.
+	scriptIssues *wire.Codec
+	want         string // the method Go plugins declare, for messages
+	timeout      time.Duration
+	index        uint32 // the number of the interface's methods: guests serve Validate after them
+}
+
+// scriptIssue is an [Issue] as Lua and TypeScript plugins write it, with lower-case field names. It has Issue's
+// fields in Issue's order, so it crosses the boundary as Issue does: the script guests learn its names from the
+// schema, and the host decodes the issues into []Issue.
+type scriptIssue struct {
+	Severity Severity `json:"severity"`
+	Code     string   `json:"code"`
+	Message  string   `json:"message"`
+	Field    string   `json:"field"`
 }
 
 var (
@@ -156,6 +176,10 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 	val.codec, err = planner.For(typ)
 	if err == nil {
 		val.issues, err = planner.For(reflect.TypeFor[[]Issue]())
+	}
+
+	if err == nil {
+		val.scriptIssues, err = planner.For(reflect.TypeFor[[]scriptIssue]())
 	}
 
 	if err != nil { // a data type whose fields share a name for other guest languages
@@ -218,7 +242,7 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 
 	issues, err := c.validateInstance(ctx, val, launch, src.limit, extra, args)
 	if errors.Is(err, errNoValidate) {
-		err = fmt.Errorf("%w: %s", ErrValidation, goValidateMissing(files, src.desc.Entrypoint, val.want))
+		err = fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
 	}
 
 	report.Issues = append(report.Issues, issues...)

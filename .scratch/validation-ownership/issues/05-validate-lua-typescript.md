@@ -4,10 +4,10 @@
 
 **Blocked by:** 04 (Validate at load, for Go plugins)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The shared cross-language contract suite runs the validation cases from ticket 04 against equivalent Go, Lua and TS plugins with identical outcomes
-- [ ] TS async `Validate` and a Promise that never settles (stopped by the timeout) are covered
-- [ ] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] The shared cross-language contract suite runs the validation cases from ticket 04 against equivalent Go, Lua and TS plugins with identical outcomes
+- [x] TS async `Validate` and a Promise that never settles (stopped by the timeout) are covered
+- [x] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
