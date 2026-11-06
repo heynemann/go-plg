@@ -11,11 +11,11 @@ Parsing uses `go.yaml.in/yaml/v3` (the maintained successor of the archived `gop
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A regression/behaviour test suite for `ParseManifest` covers valid manifests and each rejected construct (anchor, alias, merge key, custom tag, two documents, unknown field, duplicate key, wrong types, oversize)
-- [ ] The existing manifest fuzz target is converted to YAML and run
-- [ ] No `plugin.json` remains in the repository (testdata, examples, docs); a directory with only `plugin.json` is reported as not a plugin, with a hint naming `plugin.yaml`
-- [ ] Postgres and S3 examples store and parse `plugin.yaml` through `ParseManifest`; their testcontainers tests pass
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] A regression/behaviour test suite for `ParseManifest` covers valid manifests and each rejected construct (anchor, alias, merge key, custom tag, two documents, unknown field, duplicate key, wrong types, oversize)
+- [x] The existing manifest fuzz target is converted to YAML and run
+- [x] No `plugin.json` remains in the repository (testdata, examples, docs); a directory with only `plugin.json` is reported as not a plugin, with a hint naming `plugin.yaml`
+- [x] Postgres and S3 examples store and parse `plugin.yaml` through `ParseManifest`; their testcontainers tests pass
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

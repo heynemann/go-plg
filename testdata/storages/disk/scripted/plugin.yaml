@@ -1,0 +1,3 @@
+language: lua
+entrypoint: main.lua
+version: 0.1.0

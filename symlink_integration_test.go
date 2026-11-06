@@ -77,8 +77,8 @@ func TestSymlinksOutOfAPluginFailItsLoad(t *testing.T) {
 end
 `
 
-	tsManifest := `{"language":"typescript","entrypoint":"plugin.ts","version":"1"}`
-	luaManifest := `{"language":"lua","entrypoint":"main.lua","version":"1"}`
+	tsManifest := "language: typescript\nentrypoint: plugin.ts\nversion: \"1\"\n"
+	luaManifest := "language: lua\nentrypoint: main.lua\nversion: \"1\"\n"
 	tsImport := tsFooerSource(`import secret from "./x.txt";`, "secret")
 
 	tests := []struct {
@@ -88,7 +88,7 @@ end
 	}{
 		{
 			name:  "TypeScript import of a host file",
-			files: map[string]string{"plugin.json": tsManifest, "plugin.ts": tsImport},
+			files: map[string]string{"plugin.yaml": tsManifest, "plugin.ts": tsImport},
 			links: map[string]string{"x.txt": secret},
 			path:  "x.txt",
 		},
@@ -96,7 +96,7 @@ end
 			// The storage's top-level files are not plugins: secret.txt is next to the plugin, outside it.
 			name: "TypeScript import of a file next to the plugin by a relative link",
 			files: map[string]string{
-				"plugin.json":   `{"language":"typescript","entrypoint":"lib/plugin.ts","version":"1"}`,
+				"plugin.yaml":   "language: typescript\nentrypoint: lib/plugin.ts\nversion: \"1\"\n",
 				"lib/plugin.ts": tsImport, "../secret.txt": hostSecret,
 			},
 			links: map[string]string{"lib/x.txt": "../../secret.txt"},
@@ -104,19 +104,19 @@ end
 		},
 		{
 			name:  "TypeScript import of the host's environment",
-			files: map[string]string{"plugin.json": tsManifest, "plugin.ts": tsImport},
+			files: map[string]string{"plugin.yaml": tsManifest, "plugin.ts": tsImport},
 			links: map[string]string{"x.txt": "/proc/self/environ"},
 			path:  "x.txt",
 		},
 		{
 			name:  "Go entrypoint linked to the root directory",
-			files: map[string]string{"plugin.json": `{"language":"go","entrypoint":"src","version":"1"}`},
+			files: map[string]string{"plugin.yaml": "language: go\nentrypoint: src\nversion: \"1\"\n"},
 			links: map[string]string{"src": "/"},
 			path:  "src",
 		},
 		{
 			name:  "Lua require of a host module",
-			files: map[string]string{"plugin.json": luaManifest, "main.lua": luaPlugin},
+			files: map[string]string{"plugin.yaml": luaManifest, "main.lua": luaPlugin},
 			links: map[string]string{"lib.lua": secretLua},
 			path:  "lib.lua",
 		},
@@ -179,7 +179,7 @@ func TestSymlinksInsideAPluginAreSkipped(t *testing.T) {
 	t.Parallel()
 
 	files := map[string]string{
-		"plugin.json": `{"language":"typescript","entrypoint":"plugin.ts"}`,
+		"plugin.yaml": "language: typescript\nentrypoint: plugin.ts\n",
 		"plugin.ts":   tsFooerSource(`import data from "./data.txt";`, "data"),
 		"data.txt":    "plugin data",
 	}

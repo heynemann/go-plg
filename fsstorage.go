@@ -13,20 +13,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/memfs"
 )
 
-// manifestName is the file describing a plugin directory of an [FSStorage].
-const manifestName = "plugin.json"
-
-// MaxManifestSize is the largest plugin.json, in bytes: [FSStorage] and [ParseManifest] reject a bigger one with
-// [ErrInvalidManifest], and a storage reading manifests from elsewhere should read at most this much plus one.
-const MaxManifestSize = 64 << 10
-
-// The memory limits a Register, a descriptor or a plugin.json may ask for: from one wasm page (64 KiB) to the
+// The memory limits a Register, a descriptor or a plugin.yaml may ask for: from one wasm page (64 KiB) to the
 // most a wasm32 instance can address, 65536 pages (4 GiB).
 const (
 	minMemoryLimit = engine.PageSize
@@ -34,7 +25,7 @@ const (
 )
 
 // validMemoryLimit reports whether limit is from [minMemoryLimit] to [maxMemoryLimit], the one rule shared by
-// WithMemoryLimit, Register's descriptor check and plugin.json decoding.
+// WithMemoryLimit, Register's descriptor check and plugin.yaml decoding.
 func validMemoryLimit(limit uint64) bool {
 	return limit >= minMemoryLimit && limit <= maxMemoryLimit
 }
@@ -43,9 +34,12 @@ func validMemoryLimit(limit uint64) bool {
 const contentVersionPrefix = "sha256:"
 
 // FSStorage is a [Storage] over a file tree holding one plugin per top-level directory. The directory's name is
-// the plugin's key, and the directory holds the plugin's files and a plugin.json manifest:
+// the plugin's key, and the directory holds the plugin's files and a plugin.yaml manifest:
 //
-//	{"language": "go", "entrypoint": "plugin.go", "version": "1.4.0", "memoryLimit": 67108864}
+//	language: go
+//	entrypoint: plugin.go
+//	version: 1.4.0
+//	memoryLimit: 67108864
 //
 // Its keys are:
 //   - language (required): "go", "lua" or "typescript".
@@ -57,10 +51,12 @@ const contentVersionPrefix = "sha256:"
 //   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 65536 (one wasm page) to
 //     4 GiB, as Register requires of every descriptor. It can only lower the Register limit.
 //
-// A plugin.json must be a regular file (a link to one is followed only where the tree allows it) of at most
-// [MaxManifestSize] bytes. Keys are case sensitive and unknown keys are errors, so a misspelt key is not
-// silently ignored. Top-level entries that are not directories (symbolic links to directories included), and
-// entries whose names start with a dot, are not plugins and are ignored.
+// A plugin.yaml must be a regular file (a link to one is followed only where the tree allows it) of at most
+// [MaxManifestSize] bytes, in the strict subset of YAML [ParseManifest] describes: keys are case sensitive and
+// unknown keys are errors, so a misspelt key is not silently ignored. A plugin.yaml is never read: a directory
+// with one but no plugin.yaml fails List, with a hint to convert it. Top-level entries that are not directories
+// (symbolic links to directories included), and entries whose names start with a dot, are not plugins and are
+// ignored.
 //
 // Open copies the plugin directory into memory, as Register copies every storage's files (see [Storage]):
 // symbolic links are never followed; a link that stays inside the plugin directory is skipped, and one whose
@@ -74,7 +70,7 @@ const contentVersionPrefix = "sha256:"
 // each directory and file below it, is opened relative to its open parent and must then be the very entry that
 // parent holds under its name, so an entry swapped for a link during the copy is judged as a link (left out, or
 // failing the load, never followed), and one replaced otherwise fails the load. No open there waits: a
-// plugin.json, directory or file swapped for a FIFO (which an ordinary open waits on for a writer) fails List or
+// plugin.yaml, directory or file swapped for a FIFO (which an ordinary open waits on for a writer) fails List or
 // the load at once. Over an fs.FS ([NewFSStorageFromFS]) the copy can only trust what the fs.FS reports, as
 // [Storage] describes, and an fs.FS's open of an entry swapped for a FIFO may wait.
 //
@@ -109,8 +105,8 @@ func (s *FSStorage) Name() string {
 	return s.name
 }
 
-// List reads every plugin directory's plugin.json and returns the plugins, sorted by key. It fails with
-// [ErrInvalidManifest], naming the directory, if a plugin.json is missing or malformed.
+// List reads every plugin directory's plugin.yaml and returns the plugins, sorted by key. It fails with
+// [ErrInvalidManifest], naming the directory, if a plugin.yaml is missing or malformed.
 func (s *FSStorage) List(ctx context.Context) ([]Descriptor, error) {
 	return s.listCalling(ctx, nil)
 }
@@ -237,10 +233,14 @@ func (s *FSStorage) withTree(beforeOpen func(name string), use func(fsys fs.FS, 
 	return err
 }
 
-// describe reads the plugin directory dir of fsys. A plugin.json without a version leaves Version empty:
+// describe reads the plugin directory dir of fsys. A plugin.yaml without a version leaves Version empty:
 // Register hashes the files it loads.
 func describe(fsys fs.FS, dir string) (Descriptor, error) {
 	data, err := readManifest(fsys, path.Join(dir, manifestName))
+	if errors.Is(err, fs.ErrNotExist) && hasLegacyManifest(fsys, dir) {
+		err = errLegacyManifest
+	}
+
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("%w: plugin directory %s: %w", ErrInvalidManifest, dir, err)
 	}
@@ -255,15 +255,24 @@ func describe(fsys fs.FS, dir string) (Descriptor, error) {
 	return desc, nil
 }
 
+// hasLegacyManifest reports whether the plugin directory dir of fsys holds a plugin.json, for the hint.
+func hasLegacyManifest(fsys fs.FS, dir string) bool {
+	_, err := fs.Stat(fsys, path.Join(dir, legacyManifestName))
+
+	return err == nil
+}
+
 var (
-	errManifestFile = errors.New("plugin.json is not a regular file")
-	errManifestSize = fmt.Errorf("plugin.json is over %d bytes", MaxManifestSize)
+	errManifestFile   = errors.New("plugin.yaml is not a regular file")
+	errManifestSize   = fmt.Errorf("plugin.yaml is over %d bytes", MaxManifestSize)
+	errLegacyManifest = errors.New("no plugin.yaml, only a plugin.json, which plg no longer reads: " +
+		"write the same keys as YAML in plugin.yaml")
 )
 
-// readManifest reads the plugin.json name of fsys: a regular file (followed through links the tree allows) of at
+// readManifest reads the plugin.yaml name of fsys: a regular file (followed through links the tree allows) of at
 // most [MaxManifestSize] bytes. It checks the type before opening, since opening a FIFO can wait for a writer, and
 // again on the opened file, and reads at most one byte past the cap. The storage's directory is read through a
-// nonblockingFS, whose open never waits, so a plugin.json replaced by a FIFO after the first check fails the
+// nonblockingFS, whose open never waits, so a plugin.yaml replaced by a FIFO after the first check fails the
 // second; an fs.FS tree's open may wait (see [FSStorage]).
 func readManifest(fsys fs.FS, name string) ([]byte, error) {
 	info, err := fs.Stat(fsys, name)
@@ -311,76 +320,6 @@ func readRegular(file fs.File) ([]byte, error) {
 	}
 
 	return data, nil
-}
-
-// manifest is the content of a plugin.json.
-type manifest struct {
-	MemoryLimit *uint64  `json:"memoryLimit"`
-	Language    Language `json:"language"`
-	Entrypoint  string   `json:"entrypoint"`
-	Version     string   `json:"version"`
-}
-
-var (
-	errManifestLanguage    = errors.New(`language must be "go", "lua" or "typescript"`)
-	errManifestEntrypoint  = errors.New("entrypoint must be a slash-separated path inside the plugin directory")
-	errManifestMemoryLimit = fmt.Errorf("memoryLimit must be from %d bytes (one wasm page) to 4 GiB", minMemoryLimit)
-)
-
-// ParseManifest parses and checks a plugin.json exactly as [FSStorage] does, for storages keeping the same
-// manifest in another place (an object store, a database). The returned Descriptor has no Key, and an empty
-// Version when the manifest gives none: the storage then picks one (Register falls back to a content hash).
-// A malformed manifest, or one over [MaxManifestSize] bytes, fails with [ErrInvalidManifest].
-func ParseManifest(data []byte) (Descriptor, error) {
-	desc, err := decodeManifest(data)
-	if err != nil {
-		return Descriptor{}, fmt.Errorf("%w: %w", ErrInvalidManifest, err)
-	}
-
-	return desc, nil
-}
-
-// decodeManifest parses and checks a plugin.json; the returned descriptor has no key.
-func decodeManifest(data []byte) (Descriptor, error) {
-	if len(data) > MaxManifestSize {
-		return Descriptor{}, errManifestSize
-	}
-
-	strict := sonic.Config{
-		CaseSensitive:         true,
-		DisallowUnknownFields: true,
-		ValidateString:        true,
-		UseUnicodeErrors:      true,
-	}.Froze()
-
-	var parsed manifest
-
-	err := strict.Unmarshal(data, &parsed)
-	if err != nil {
-		return Descriptor{}, fmt.Errorf("parsing: %w", err)
-	}
-
-	switch parsed.Language {
-	case LanguageGo, LanguageLua, LanguageTypeScript:
-	default:
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestLanguage, parsed.Language)
-	}
-
-	if parsed.Entrypoint == "" || !fs.ValidPath(parsed.Entrypoint) {
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
-	}
-
-	desc := Descriptor{Language: parsed.Language, Entrypoint: parsed.Entrypoint, Version: parsed.Version}
-
-	if limit := parsed.MemoryLimit; limit != nil {
-		if !validMemoryLimit(*limit) {
-			return Descriptor{}, fmt.Errorf("%w, not %d", errManifestMemoryLimit, *limit)
-		}
-
-		desc.MemoryLimit = *limit
-	}
-
-	return desc, nil
 }
 
 // contentVersion returns the version of the files below root in fsys: a SHA-256 over every regular file's path

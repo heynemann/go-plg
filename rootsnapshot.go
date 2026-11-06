@@ -71,7 +71,7 @@ func openRootDir(root *os.Root, name string) (*os.Root, error) {
 }
 
 // nonblockingFS is an [os.Root] as an fs.FS, like its FS method's, whose opens never wait (see nonblockingRead):
-// List reads the plugin.json files it stated, and the walk of a plugin directory reads the directories it listed,
+// List reads the plugin.yaml files it stated, and the walk of a plugin directory reads the directories it listed,
 // either of which may have become a FIFO since. It is no [fs.ReadDirFS]: a directory is read from the file Open
 // returns, in the batches the walk asks for (see listFiles), and the walk fails when what it opened is no
 // directory (one was listed there, which was replaced). beforeOpen, when not nil, is called with each name right

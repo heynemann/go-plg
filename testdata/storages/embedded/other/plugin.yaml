@@ -1,0 +1,3 @@
+language: go
+entrypoint: src/plugin.go
+version: 2.0.0

@@ -97,7 +97,8 @@ linters:
     tagliatelle:
       case:
         rules:
-          json: camel # plugin.json uses camelCase keys
+          json: camel # the JSON in this repository uses camelCase keys
+          yaml: camel # plugin.yaml uses camelCase keys
     errcheck:
       check-type-assertions: true
       check-blank: true

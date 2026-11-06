@@ -111,12 +111,12 @@ func TestPluginFilesNeverFollowSymlinks(t *testing.T) {
 func TestFSStorageReadsThroughARoot(t *testing.T) {
 	t.Parallel()
 
-	outside := filepath.Join(t.TempDir(), "plugin.json")
-	require.NoError(t, os.WriteFile(outside, []byte(`{"language":"go","entrypoint":".","version":"1"}`), 0o600))
+	outside := filepath.Join(t.TempDir(), "plugin.yaml")
+	require.NoError(t, os.WriteFile(outside, []byte("language: go\nentrypoint: .\nversion: \"1\"\n"), 0o600))
 
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "p"), 0o750))
-	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "p", "plugin.json")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "p", "plugin.yaml")))
 
 	// os.DirFS would read the manifest through the link.
 	_, err := plg.NewFSStorage(dir).List(t.Context())
@@ -124,7 +124,7 @@ func TestFSStorageReadsThroughARoot(t *testing.T) {
 	require.ErrorContains(t, err, "plugin directory p")
 	require.ErrorContains(t, err, "path escapes from parent")
 
-	require.NoError(t, os.Remove(filepath.Join(dir, "p", "plugin.json")))
+	require.NoError(t, os.Remove(filepath.Join(dir, "p", "plugin.yaml")))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "p", "a.go"), []byte("package p\n"), 0o600))
 	require.NoError(t, os.Symlink("a.go", filepath.Join(dir, "p", "b.go")))
 	require.NoError(t, os.Symlink(filepath.Dir(outside), filepath.Join(dir, "p", "out")))
@@ -156,7 +156,7 @@ const secretContent = "next to the plugin"
 func swapFiles(left ...string) map[string]string {
 	files := map[string]string{}
 
-	for _, name := range []string{"plugin.json", "other/x.txt", "sub/x.txt", "x.txt", "y.txt"} {
+	for _, name := range []string{"plugin.yaml", "other/x.txt", "sub/x.txt", "x.txt", "y.txt"} {
 		if !slices.Contains(left, name) {
 			files[name] = name
 		}

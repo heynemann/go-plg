@@ -31,7 +31,7 @@ This library runs third-party code inside other people's servers, so tests are t
   - boundaries: empty, nil, zero, maximum, just over the limit;
   - every error path;
   - state transitions: load → serve → reload → drain → close;
-  - precedence: Register options vs `plugin.json`; last good version vs a new failure;
+  - precedence: Register options vs `plugin.yaml`; last good version vs a new failure;
   - concurrency invariants.
 - **Banned (test theater):**
   - tests of wiring or forwarding;
@@ -47,7 +47,7 @@ This library runs third-party code inside other people's servers, so tests are t
 - **Determinism:** no `time.Sleep` for synchronization. Use `testing/synctest` for time-dependent logic (refill backoff, polling, draining) and channels or explicit signals otherwise. No dependence on test order: CI runs with `-shuffle=on`.
 - **Race detector always:** every test run uses `-race`. CI also runs the suite with `-count=10` to flush out flakiness.
 - **Goroutine hygiene:** `go.uber.org/goleak` verifies in `TestMain` that every package leaks no goroutines.
-- **Fuzzing:** every parser or decoder that touches untrusted input has a fuzz target: the codec, `plugin.json`, interface validation, HTTP policy and host matching. Crashers found by fuzzing become permanent seed-corpus cases.
+- **Fuzzing:** every parser or decoder that touches untrusted input has a fuzz target: the codec, `plugin.yaml`, interface validation, HTTP policy and host matching. Crashers found by fuzzing become permanent seed-corpus cases.
 
 ### Integration tests
 - **Real dependencies only:** they exercise **real storages and real plugins**, with no mocks of wazero, guests or storages.
@@ -96,7 +96,7 @@ This library runs third-party code inside other people's servers, so tests are t
 
 ## 5. JSON: sonic
 
-- **Go code in this repository** uses `github.com/bytedance/sonic` for JSON (e.g. `plugin.json`), never `encoding/json` (depguard enforces this). sonic v1.15.5 has been verified on go1.27.3/amd64, including under `-race`.
+- **Go code in this repository** uses `github.com/bytedance/sonic` for JSON (e.g. the log records tests decode), never `encoding/json` (depguard enforces this). sonic v1.15.5 has been verified on go1.27.3/amd64, including under `-race`.
   - **sonic depends on Go runtime internals,** so every Go upgrade needs a green CI run on the new version before it's adopted.
 - **The exception is the guest stdlib symbol tables** (excluded in the config). Go plugin authors import the standard `encoding/json` from the guest allowlist. Inside wasm, sonic can't JIT, so routing plugin JSON to the host would only add a host call and copies.
 - **JSON helpers for plugins**, by language:

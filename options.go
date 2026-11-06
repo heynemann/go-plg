@@ -274,7 +274,7 @@ func WithConcurrentCalls(n int) RegisterOption {
 
 // WithMemoryLimit caps the linear memory of each instance of the Register's plugins, in bytes, rounded down to
 // whole 64 KiB wasm pages. A call that needs more fails and its instance is discarded; other instances are
-// unaffected. A plugin's [Descriptor.MemoryLimit] (memoryLimit in plugin.json) may lower the limit, never
+// unaffected. A plugin's [Descriptor.MemoryLimit] (memoryLimit in plugin.yaml) may lower the limit, never
 // raise it. It must be from 64 KiB to 4 GiB, otherwise Register fails with [ErrInvalidOption]. The default
 // depends on the plugin's language: 128 MiB for Go plugins, 64 MiB for Lua and TypeScript plugins.
 func WithMemoryLimit(limit uint64) RegisterOption {

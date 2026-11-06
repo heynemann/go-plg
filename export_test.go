@@ -179,7 +179,7 @@ func WalkSwapping(ctx context.Context, s *FSStorage, desc Descriptor, beforeOpen
 }
 
 // ListSwapping lists s as s.List does, calling beforeOpen with each name of the storage's directory right before
-// List opens it (a plugin.json once List stated it).
+// List opens it (a plugin.yaml once List stated it).
 func ListSwapping(ctx context.Context, s *FSStorage, beforeOpen func(name string)) ([]Descriptor, error) {
 	return s.listCalling(ctx, beforeOpen)
 }

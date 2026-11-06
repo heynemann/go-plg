@@ -4,9 +4,10 @@
 // ([plg.Container.Reload], or polling with [plg.WithPollInterval]) takes it out of service, and enabling it
 // brings it back. [Migrate] creates the tables.
 //
-// A plugin's version is its revision, which the database changes whenever the plugin's language, entrypoint,
-// memory limit or files change (triggers, see migrations/001_plugins.sql), whether through [Storage.Put] or plain
-// SQL: a poll costs one small query and plg reloads exactly the plugins that changed.
+// A plugin's manifest is one of its files, plugin.yaml, which List reads with [plg.ParseManifest], as plg's own
+// storages do. A plugin's version is its revision, which the database changes whenever any of its files change,
+// plugin.yaml included (a trigger, see migrations/), whether through [Storage.Put] or plain SQL: a poll costs one
+// small query and plg reloads exactly the plugins that changed. A version in plugin.yaml is not used.
 package pgstorage
 
 import (
@@ -33,10 +34,13 @@ type DB interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// migration001 creates the plugin tables.
-//
-//go:embed migrations/001_plugins.sql
-var migration001 string
+// The migrations: 001 creates the plugin tables, 002 moves each plugin's manifest into a plugin.yaml file.
+var (
+	//go:embed migrations/001_plugins.sql
+	migration001 string
+	//go:embed migrations/002_manifest_file.sql
+	migration002 string
+)
 
 // migration is one schema change, applied once.
 type migration struct {
@@ -47,7 +51,10 @@ type migration struct {
 // migrations returns the schema's migrations, oldest first. A schema change is a new file in migrations/ and a
 // new entry here; applied migrations never change.
 func migrations() []migration {
-	return []migration{{version: "001_plugins.sql", script: migration001}}
+	return []migration{
+		{version: "001_plugins.sql", script: migration001},
+		{version: "002_manifest_file.sql", script: migration002},
+	}
 }
 
 // setupMigrations serializes Migrate calls (several instances of a service starting together) on an advisory
@@ -115,12 +122,25 @@ func (s *Storage) Name() string {
 	return "postgres:" + s.registration
 }
 
-// List returns the registration's enabled plugins, sorted by key. Their versions are "r<revision>".
+// manifestName is the file holding a plugin's manifest.
+const manifestName = "plugin.yaml"
+
+// listSQL selects the registration's enabled plugins with the size of their plugin.yaml (NULL without one) and
+// its content when it is at most $2 bytes, so an oversized manifest never leaves the database.
+const listSQL = `
+	SELECT p.key, p.revision, octet_length(f.content),
+		CASE WHEN octet_length(f.content) <= $2 THEN f.content END
+	FROM plg_plugins p
+	LEFT JOIN plg_plugin_files f ON f.registration = p.registration AND f.key = p.key AND f.path = '` +
+	manifestName + `'
+	WHERE p.registration = $1 AND p.enabled
+	ORDER BY p.key COLLATE "C"`
+
+// List returns the registration's enabled plugins, sorted by key, each described by its plugin.yaml
+// ([plg.ParseManifest]). Their versions are "r<revision>". It fails with [plg.ErrInvalidManifest], naming the
+// plugin, when one has no plugin.yaml, or one over [plg.MaxManifestSize] bytes or malformed.
 func (s *Storage) List(ctx context.Context) ([]plg.Descriptor, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT key, language, entrypoint, memory_limit, revision FROM plg_plugins
-		WHERE registration = $1 AND enabled
-		ORDER BY key COLLATE "C"`, s.registration)
+	rows, err := s.db.Query(ctx, listSQL, s.registration, plg.MaxManifestSize)
 	if err == nil {
 		descs, collectErr := pgx.CollectRows(rows, scanDescriptor)
 		if collectErr == nil {
@@ -133,19 +153,42 @@ func (s *Storage) List(ctx context.Context) ([]plg.Descriptor, error) {
 	return nil, fmt.Errorf("pgstorage: listing %s: %w", s.registration, err)
 }
 
-// scanDescriptor reads a plugin row as List selects it.
+var (
+	errNoManifest       = errors.New("no " + manifestName)
+	errManifestTooLarge = fmt.Errorf("%s is over %d bytes", manifestName, plg.MaxManifestSize)
+)
+
+// scanDescriptor reads a plugin row as List selects it and parses its manifest.
 func scanDescriptor(row pgx.CollectableRow) (plg.Descriptor, error) {
 	var (
-		desc     plg.Descriptor
-		limit    int64
+		key      string
 		revision int64
+		size     *int64
+		manifest []byte
 	)
 
-	err := row.Scan(&desc.Key, &desc.Language, &desc.Entrypoint, &limit, &revision)
-	desc.MemoryLimit = uint64(limit) //nolint:gosec // G115: a CHECK keeps it from 0 to 4 GiB
+	err := row.Scan(&key, &revision, &size, &manifest)
+	if err != nil {
+		return plg.Descriptor{}, err //nolint:wrapcheck // List wraps it
+	}
+
+	if size == nil {
+		return plg.Descriptor{}, fmt.Errorf("%w: plugin %s: %w", plg.ErrInvalidManifest, key, errNoManifest)
+	}
+
+	if *size > plg.MaxManifestSize { // its content was not selected
+		return plg.Descriptor{}, fmt.Errorf("%w: plugin %s: %w", plg.ErrInvalidManifest, key, errManifestTooLarge)
+	}
+
+	desc, err := plg.ParseManifest(manifest)
+	if err != nil {
+		return plg.Descriptor{}, fmt.Errorf("plugin %s: %w", key, err)
+	}
+
+	desc.Key = key
 	desc.Version = "r" + strconv.FormatInt(revision, 10)
 
-	return desc, err //nolint:wrapcheck // List wraps it
+	return desc, nil
 }
 
 var errFilePath = errors.New("file path is not a valid path inside the plugin")
@@ -235,35 +278,22 @@ func readFiles(ctx context.Context, txn pgx.Tx, registration, key string) (fstes
 
 // Plugin is a plugin's row: what [Storage.Put] writes besides the files.
 type Plugin struct {
-	Key        string
-	Language   plg.Language
-	Entrypoint string
-	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit (see
-	// [plg.Descriptor]).
-	MemoryLimit uint64
-	Enabled     bool
+	Key     string
+	Enabled bool
 }
 
 // ErrNoPlugin reports a key with no plugin in the registration.
 var ErrNoPlugin = errors.New("pgstorage: no such plugin")
 
-// maxMemoryLimit is the largest memory limit a plugin may have (the table's CHECK): 4 GiB, all a wasm32
-// instance can address.
-const maxMemoryLimit = 4 << 30
-
-var errMemoryLimit = errors.New("memory limit over 4 GiB")
-
 // Put creates the plugin, or replaces it and all of its files, in one transaction, with every regular file of
-// files. The table's checks reject an empty or invalid key (".", "..", or one with a slash), an unknown language
-// and an empty entrypoint. Put always gives the plugin a new revision, so plg reloads it.
+// files. files must hold the plugin's plugin.yaml, which Put checks with [plg.ParseManifest] before writing
+// anything (failing with [plg.ErrInvalidManifest]); the table's checks reject an empty or invalid key (".", "..",
+// or one with a slash). Put always gives the plugin a new revision, so plg reloads it.
 func (s *Storage) Put(ctx context.Context, plugin Plugin, files fs.FS) error {
-	if plugin.MemoryLimit > maxMemoryLimit {
-		return fmt.Errorf("pgstorage: putting %s/%s: %w", s.registration, plugin.Key, errMemoryLimit)
-	}
-
 	var (
-		rows [][]any
-		read int
+		rows     [][]any
+		read     int
+		manifest []byte
 	)
 
 	err := fs.WalkDir(files, ".", func(name string, entry fs.DirEntry, err error) error {
@@ -275,8 +305,16 @@ func (s *Storage) Put(ctx context.Context, plugin Plugin, files fs.FS) error {
 		read += len(content)
 		rows = append(rows, []any{s.registration, plugin.Key, name, content})
 
+		if name == manifestName {
+			manifest = content
+		}
+
 		return err
 	})
+	if err == nil {
+		err = checkManifest(manifest)
+	}
+
 	if err == nil {
 		err = pgx.BeginFunc(ctx, s.db, func(txn pgx.Tx) error { return s.writePlugin(ctx, txn, plugin, rows) })
 	}
@@ -286,6 +324,17 @@ func (s *Storage) Put(ctx context.Context, plugin Plugin, files fs.FS) error {
 	}
 
 	return nil
+}
+
+// checkManifest checks the plugin.yaml Put read, nil when there was none, as List will parse it.
+func checkManifest(manifest []byte) error {
+	if manifest == nil {
+		return fmt.Errorf("%w: %w", plg.ErrInvalidManifest, errNoManifest)
+	}
+
+	_, err := plg.ParseManifest(manifest)
+
+	return err //nolint:wrapcheck // Put wraps it
 }
 
 // readFile reads the file name of files, after read bytes of the plugin's other files, failing with
@@ -335,14 +384,10 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 
 // writePlugin writes, in txn, the plugin's row and its files (rows of plg_plugin_files), replacing its old files.
 func (s *Storage) writePlugin(ctx context.Context, txn pgx.Tx, plugin Plugin, rows [][]any) error {
-	limit := int64(plugin.MemoryLimit) //nolint:gosec // G115: Put checked it is at most 4 GiB
-
 	_, err := txn.Exec(ctx, `
-		INSERT INTO plg_plugins (registration, key, language, entrypoint, memory_limit, enabled)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (registration, key) DO UPDATE SET language = EXCLUDED.language,
-			entrypoint = EXCLUDED.entrypoint, memory_limit = EXCLUDED.memory_limit, enabled = EXCLUDED.enabled`,
-		s.registration, plugin.Key, string(plugin.Language), plugin.Entrypoint, limit, plugin.Enabled)
+		INSERT INTO plg_plugins (registration, key, enabled) VALUES ($1, $2, $3)
+		ON CONFLICT (registration, key) DO UPDATE SET enabled = EXCLUDED.enabled`,
+		s.registration, plugin.Key, plugin.Enabled)
 	if err == nil {
 		_, err = txn.Exec(ctx, "DELETE FROM plg_plugin_files WHERE registration = $1 AND key = $2",
 			s.registration, plugin.Key)

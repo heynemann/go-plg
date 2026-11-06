@@ -19,6 +19,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/heynemann/go-plg"
 )
@@ -42,10 +43,10 @@ func embeddedStorage(t *testing.T, name, dir string) *plg.FSStorage {
 	return plg.NewFSStorageFromFS(name, sub)
 }
 
-// manifestStorage returns a storage holding one plugin directory, p, with the given plugin.json and plugin.go.
+// manifestStorage returns a storage holding one plugin directory, p, with the given plugin.yaml and plugin.go.
 func manifestStorage(manifest string) *plg.FSStorage {
 	return plg.NewFSStorageFromFS("mapfs", fstest.MapFS{
-		"p/plugin.json": {Data: []byte(manifest)},
+		"p/plugin.yaml": {Data: []byte(manifest)},
 		"p/plugin.go":   {Data: []byte("package p\n")},
 	})
 }
@@ -88,9 +89,9 @@ func TestFSStorageIgnoresEntriesThatAreNotPlugins(t *testing.T) {
 	store := plg.NewFSStorageFromFS("mapfs", fstest.MapFS{
 		"README":               {Data: []byte("not a plugin")},
 		".git/config":          {Data: []byte("[core]")},
-		".hidden/plugin.json":  {Data: []byte("{malformed")},
-		"p/plugin.json":        {Data: []byte(`{"language":"go","entrypoint":".","version":"1"}`)},
-		"p/.notes/plugin.json": {Data: []byte("{malformed")},
+		".hidden/plugin.yaml":  {Data: []byte("{malformed")},
+		"p/plugin.yaml":        {Data: []byte("language: go\nentrypoint: .\nversion: \"1\"\n")},
+		"p/.notes/plugin.yaml": {Data: []byte("{malformed")},
 	})
 
 	descs, err := store.List(t.Context())
@@ -106,28 +107,45 @@ func TestFSStorageParsesManifests(t *testing.T) {
 		want     plg.Descriptor
 	}{
 		{
-			manifest: `{"language":"go","entrypoint":"plugin.go","version":"v1"}`,
+			manifest: "language: go\nentrypoint: plugin.go\nversion: v1\n",
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v1"},
 		},
 		{
-			manifest: " \n{\"version\": \"2\", \"entrypoint\": \"main.lua\", \"language\": \"lua\"}\n\t",
+			manifest: "# a comment\n---\nversion: '2'   # quoted\nentrypoint: \"main.lua\"\nlanguage: lua\n...\n",
 			want:     plg.Descriptor{Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "2"},
 		},
 		{
-			manifest: `{"language":"typescript","entrypoint":"src/index.ts","version":"3","memoryLimit":null}`,
+			manifest: `{"language": "typescript", "entrypoint": "src/index.ts", "version": "3", "memoryLimit": null}`,
 			want:     plg.Descriptor{Language: plg.LanguageTypeScript, Entrypoint: "src/index.ts", Version: "3"},
 		},
 		{
-			manifest: `{"language":"go","entrypoint":".","version":"4","memoryLimit":65536}`,
+			manifest: "language: go\nentrypoint: .\nversion: 4\nmemoryLimit: 65536\n",
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "4", MemoryLimit: 64 << 10},
 		},
 		{
-			manifest: `{"language":"go","entrypoint":".","version":"5","memoryLimit":4294967296}`,
+			manifest: "language: go\nentrypoint: .\nversion: 5\nmemoryLimit: 4294967296\n",
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "5", MemoryLimit: 4 << 30},
 		},
 		{
-			manifest: `{"language":"go","entrypoint":".","version":"\u00e9t\u00e9"}`,
+			manifest: "language: go\nentrypoint: .\nmemoryLimit: 0x4000000\n",
+			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", MemoryLimit: 64 << 20},
+		},
+		{
+			manifest: "language: go\nentrypoint: .\nversion: \"\\u00e9t\\u00e9\"\n",
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "été"},
+		},
+		{
+			// a string takes the scalar verbatim: no float rounding, no date parsing
+			manifest: "language: go\nentrypoint: .\nversion: 1.10\n",
+			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "1.10"},
+		},
+		{
+			manifest: "language: go\nentrypoint: .\nversion: 2026-11-06\n",
+			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "2026-11-06"},
+		},
+		{
+			manifest: "language: !!str go\nentrypoint: .\n",
+			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: "."},
 		},
 	}
 
@@ -151,7 +169,7 @@ func TestFSStorageParsesManifests(t *testing.T) {
 func TestParseManifestLeavesAMissingVersionToRegister(t *testing.T) {
 	t.Parallel()
 
-	manifest := `{"language":"go","entrypoint":"."}`
+	manifest := "language: go\nentrypoint: .\n"
 
 	parsed, err := plg.ParseManifest([]byte(manifest))
 	require.NoError(t, err)
@@ -168,32 +186,52 @@ func TestFSStorageRejectsMalformedManifests(t *testing.T) {
 
 	tests := map[string]string{
 		"empty":                ``,
-		"not JSON":             `language = "go"`,
-		"unterminated":         `{"language":"go","entrypoint":"."`,
-		"array":                `[{"language":"go","entrypoint":"."}]`,
+		"only a comment":       "# language: go\n",
+		"not YAML":             "language: [go\n",
+		"tab indentation":      "language: go\n\tentrypoint: .\n",
+		"a sequence":           "- language: go\n  entrypoint: .\n",
+		"a scalar":             "go",
 		"null":                 `null`,
-		"trailing data":        `{"language":"go","entrypoint":"."} {}`,
-		"unknown key":          `{"language":"go","entrypoint":".","memory_limit":1}`,
-		"key case":             `{"Language":"go","entrypoint":"."}`,
-		"language type":        `{"language":1,"entrypoint":"."}`,
-		"no language":          `{"entrypoint":"."}`,
-		"unknown language":     `{"language":"python","entrypoint":"main.py"}`,
-		"language case":        `{"language":"Go","entrypoint":"."}`,
-		"no entrypoint":        `{"language":"go"}`,
-		"empty entrypoint":     `{"language":"go","entrypoint":""}`,
-		"escaping entrypoint":  `{"language":"go","entrypoint":"../other"}`,
-		"absolute entrypoint":  `{"language":"go","entrypoint":"/plugin.go"}`,
-		"trailing slash":       `{"language":"go","entrypoint":"pkg/"}`,
-		"version type":         `{"language":"go","entrypoint":".","version":1}`,
-		"control character":    "{\"language\":\"go\",\"entrypoint\":\".\",\"version\":\"a\x01b\"}",
-		"zero memory limit":    `{"language":"go","entrypoint":".","memoryLimit":0}`,
-		"limit of 1 byte":      `{"language":"go","entrypoint":".","memoryLimit":1}`,
-		"limit under a page":   `{"language":"go","entrypoint":".","memoryLimit":65535}`,
-		"negative memoryLimit": `{"language":"go","entrypoint":".","memoryLimit":-1}`,
-		"fractional limit":     `{"language":"go","entrypoint":".","memoryLimit":1.5}`,
-		"limit as a string":    `{"language":"go","entrypoint":".","memoryLimit":"64MiB"}`,
-		"limit over 4 GiB":     `{"language":"go","entrypoint":".","memoryLimit":4294967297}`,
-		"limit over uint64":    `{"language":"go","entrypoint":".","memoryLimit":18446744073709551616}`,
+		"two documents":        "language: go\nentrypoint: .\n---\nlanguage: go\nentrypoint: .\n",
+		"an empty second doc":  "language: go\nentrypoint: .\n---\n",
+		"anchor":               "language: &l go\nentrypoint: .\n",
+		"alias":                "x: &l go\nlanguage: *l\nentrypoint: .\n",
+		"merge key":            "<<: {language: go, entrypoint: .}\n",
+		"merge of an alias":    "x: &m {language: go}\n<<: *m\nentrypoint: .\n",
+		"custom tag":           "language: !lang go\nentrypoint: .\n",
+		"custom mapping tag":   "--- !plugin\nlanguage: go\nentrypoint: .\n",
+		"binary tag":           "language: !!binary Z28=\nentrypoint: .\n",
+		"duplicate key":        "language: go\nentrypoint: .\nlanguage: lua\n",
+		"duplicate flow key":   "{language: go, entrypoint: ., entrypoint: x}",
+		"non-scalar key":       "? [language]\n: go\nentrypoint: .\n",
+		"unknown key":          "language: go\nentrypoint: .\nmemory_limit: 65536\n",
+		"key case":             "Language: go\nentrypoint: .\n",
+		"language type":        "language: [go]\nentrypoint: .\n",
+		"no language":          "entrypoint: .\n",
+		"null language":        "language: ~\nentrypoint: .\n",
+		"unknown language":     "language: python\nentrypoint: main.py\n",
+		"language case":        "language: Go\nentrypoint: .\n",
+		"no entrypoint":        "language: go\n",
+		"empty entrypoint":     "language: go\nentrypoint: ''\n",
+		"escaping entrypoint":  "language: go\nentrypoint: ../other\n",
+		"absolute entrypoint":  "language: go\nentrypoint: /plugin.go\n",
+		"trailing slash":       "language: go\nentrypoint: pkg/\n",
+		"version type":         "language: go\nentrypoint: .\nversion: {major: 1}\n",
+		"control character":    "language: go\nentrypoint: .\nversion: \"a\x01b\"\n",
+		"invalid UTF-8":        "language: go\nentrypoint: \"\xff\"\n",
+		"zero memory limit":    "language: go\nentrypoint: .\nmemoryLimit: 0\n",
+		"limit of 1 byte":      "language: go\nentrypoint: .\nmemoryLimit: 1\n",
+		"limit under a page":   "language: go\nentrypoint: .\nmemoryLimit: 65535\n",
+		"negative memoryLimit": "language: go\nentrypoint: .\nmemoryLimit: -1\n",
+		"fractional limit":     "language: go\nentrypoint: .\nmemoryLimit: 65536.5\n",
+		"float limit":          "language: go\nentrypoint: .\nmemoryLimit: 1e6\n",
+		"limit as a string":    "language: go\nentrypoint: .\nmemoryLimit: 64MiB\n",
+		"quoted limit":         "language: go\nentrypoint: .\nmemoryLimit: \"65536\"\n",
+		"boolean limit":        "language: go\nentrypoint: .\nmemoryLimit: true\n",
+		"limit over 4 GiB":     "language: go\nentrypoint: .\nmemoryLimit: 4294967297\n",
+		"limit over uint64":    "language: go\nentrypoint: .\nmemoryLimit: 18446744073709551616\n",
+		"limit of 2^64+65536":  "language: go\nentrypoint: .\nmemoryLimit: 18446744073709617152\n",
+		"oversize":             "language: go\nentrypoint: .\n" + strings.Repeat("#", plg.MaxManifestSize),
 	}
 
 	for name, manifest := range tests {
@@ -215,10 +253,10 @@ func TestFSStorageRequiresAManifestPerPluginDirectory(t *testing.T) {
 
 	tests := map[string]fstest.MapFS{
 		"missing": {
-			"a/plugin.json": {Data: []byte(`{"language":"go","entrypoint":".","version":"1"}`)},
+			"a/plugin.yaml": {Data: []byte("language: go\nentrypoint: .\nversion: 1\n")},
 			"b/plugin.go":   {Data: []byte("package b\n")},
 		},
-		"a directory": {"b/plugin.json/x": {Data: []byte("{}")}},
+		"a directory": {"b/plugin.yaml/x": {Data: []byte("{}")}},
 	}
 
 	for name, files := range tests {
@@ -235,13 +273,48 @@ func TestFSStorageRequiresAManifestPerPluginDirectory(t *testing.T) {
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
-// TestFSStorageBoundsManifestReads lists plugin directories whose plugin.json is a FIFO (opening it would wait
+// TestFSStorageNeverReadsPluginJSON checks the cutover to plugin.yaml: a directory holding only a (valid)
+// plugin.json is not a plugin, and the error names plugin.yaml so the author knows what to write; beside a
+// plugin.yaml, a plugin.json is just another file.
+func TestFSStorageNeverReadsPluginJSON(t *testing.T) {
+	t.Parallel()
+
+	legacy := []byte(`{"language": "go", "entrypoint": "."}`)
+
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "p"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "p", "plugin.json"), legacy, 0o600))
+
+	for name, store := range map[string]*plg.FSStorage{
+		"directory": plg.NewFSStorage(dir),
+		"fs.FS":     plg.NewFSStorageFromFS("mapfs", fstest.MapFS{"p/plugin.json": {Data: legacy}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			descs, err := store.List(t.Context())
+			require.ErrorIs(t, err, plg.ErrInvalidManifest)
+			require.NotErrorIs(t, err, fs.ErrNotExist, "the hint replaces the missing-file error")
+			require.ErrorContains(t, err, "plugin directory p: no plugin.yaml, only a plugin.json")
+			assert.Empty(t, descs)
+		})
+	}
+
+	descs, err := plg.NewFSStorageFromFS("mapfs", fstest.MapFS{
+		"p/plugin.json": {Data: []byte("{malformed")},
+		"p/plugin.yaml": {Data: []byte("language: lua\nentrypoint: main.lua\n")},
+	}).List(t.Context())
+	require.NoError(t, err, "a plugin.json beside a plugin.yaml is not read")
+	assert.Equal(t, []plg.Descriptor{{Key: "p", Language: plg.LanguageLua, Entrypoint: "main.lua"}}, descs)
+}
+
+// TestFSStorageBoundsManifestReads lists plugin directories whose plugin.yaml is a FIFO (opening it would wait
 // for a writer forever), a link to /dev/zero (an endless read) or a regular file over MaxManifestSize: each fails
 // at once with ErrInvalidManifest naming the directory, through an os.Root and through an os.DirFS alike.
 func TestFSStorageBoundsManifestReads(t *testing.T) {
 	t.Parallel()
 
-	valid := `{"language":"go","entrypoint":"."}`
+	valid := "language: go\nentrypoint: .\n"
 	oversized := valid + strings.Repeat(" ", plg.MaxManifestSize+1-len(valid))
 
 	tests := map[string]struct {
@@ -270,7 +343,7 @@ func TestFSStorageBoundsManifestReads(t *testing.T) {
 
 			dir := t.TempDir()
 			require.NoError(t, os.Mkdir(filepath.Join(dir, "p"), 0o700))
-			tc.make(t, filepath.Join(dir, "p", "plugin.json"))
+			tc.make(t, filepath.Join(dir, "p", "plugin.yaml"))
 
 			for _, store := range []*plg.FSStorage{plg.NewFSStorage(dir), plg.NewFSStorageFromFS("dirfs", os.DirFS(dir))} {
 				_, err := store.List(t.Context())
@@ -289,29 +362,29 @@ func TestFSStorageBoundsManifestReads(t *testing.T) {
 	require.NoError(t, err, "a manifest of exactly MaxManifestSize bytes is accepted")
 }
 
-// TestFSStorageListNeverWaitsOnASwappedManifest replaces a plugin.json List found to be a regular file by a FIFO
+// TestFSStorageListNeverWaitsOnASwappedManifest replaces a plugin.yaml List found to be a regular file by a FIFO
 // right before List opens it: a read-only open of a FIFO waits for a writer, so it would block List forever. List
 // fails at once with ErrInvalidManifest naming the directory.
 func TestFSStorageListNeverWaitsOnASwappedManifest(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	manifest := filepath.Join(dir, "p", "plugin.json")
+	manifest := filepath.Join(dir, "p", "plugin.yaml")
 	require.NoError(t, os.Mkdir(filepath.Dir(manifest), 0o700))
-	require.NoError(t, os.WriteFile(manifest, []byte(`{"language":"go","entrypoint":"."}`), 0o600))
+	require.NoError(t, os.WriteFile(manifest, []byte("language: go\nentrypoint: .\n"), 0o600))
 
 	swapped := false
 
 	_, err := plg.ListSwapping(t.Context(), plg.NewFSStorage(dir), func(name string) {
-		if name == "p/plugin.json" {
+		if name == "p/plugin.yaml" {
 			swapped = true
 
 			swapFIFO(t, manifest)
 		}
 	})
-	require.True(t, swapped, "List opened plugin.json")
+	require.True(t, swapped, "List opened plugin.yaml")
 	require.ErrorIs(t, err, plg.ErrInvalidManifest)
-	require.ErrorContains(t, err, "plugin directory p: plugin.json is not a regular file")
+	require.ErrorContains(t, err, "plugin directory p: plugin.yaml is not a regular file")
 }
 
 func TestFSStorageListAndOpenErrors(t *testing.T) {
@@ -328,12 +401,12 @@ func TestFSStorageListAndOpenErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err = manifestStorage(`{"language":"go","entrypoint":"."}`).List(ctx)
+	_, err = manifestStorage("language: go\nentrypoint: .\n").List(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 
 	// Opening a plugin copies every file and directory below it; listing reads only the manifests.
 	files := fstest.MapFS{
-		"p/plugin.json": {Data: []byte(`{"language":"go","entrypoint":"."}`)},
+		"p/plugin.yaml": {Data: []byte("language: go\nentrypoint: .\n")},
 		"p/plugin.go":   {Data: []byte("package p\n")},
 		"p/sub/x.go":    {Data: []byte("package sub\n")},
 	}
@@ -595,11 +668,11 @@ func versionOf(t *testing.T, files fs.FS) string {
 func TestFSStorageVersionFallsBackToAStableContentHash(t *testing.T) {
 	t.Parallel()
 
-	const manifest = `{"language":"go","entrypoint":"."}`
+	const manifest = "language: go\nentrypoint: .\n"
 
 	base := func() fstest.MapFS {
 		return fstest.MapFS{
-			"p/plugin.json": {Data: []byte(manifest)},
+			"p/plugin.yaml": {Data: []byte(manifest)},
 			"p/a.go":        {Data: []byte("package p // a\n")},
 			"p/sub/b.txt":   {Data: []byte("b")},
 		}
@@ -635,7 +708,7 @@ func TestFSStorageVersionFallsBackToAStableContentHash(t *testing.T) {
 		"added empty":   func(m fstest.MapFS) { m["p/sub/empty"] = &fstest.MapFile{} },
 		"removed":       func(m fstest.MapFS) { delete(m, "p/sub/b.txt") },
 		"emptied":       func(m fstest.MapFS) { m["p/sub/b.txt"] = &fstest.MapFile{} },
-		"manifest edit": func(m fstest.MapFS) { m["p/plugin.json"] = &fstest.MapFile{Data: []byte(manifest + "\n")} },
+		"manifest edit": func(m fstest.MapFS) { m["p/plugin.yaml"] = &fstest.MapFile{Data: []byte(manifest + "\n")} },
 		"path/data split": func(m fstest.MapFS) {
 			delete(m, "p/sub/b.txt")
 
@@ -674,7 +747,7 @@ func TestMalformedManifestFailsRegister(t *testing.T) {
 
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "broken-plugin"), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "broken-plugin", "plugin.json"), []byte(`{"language":`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "broken-plugin", "plugin.yaml"), []byte(`{"language":`), 0o600))
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "no-manifest"), 0o750))
 
 	ctr := newUnitContainer(t)
@@ -818,22 +891,28 @@ func TestLanguageAllowlist(t *testing.T) {
 	}
 }
 
-// FuzzFSStorageManifest feeds arbitrary plugin.json contents to an FS storage. A manifest is rejected with
+// FuzzFSStorageManifest feeds arbitrary plugin.yaml contents to an FS storage. A manifest is rejected with
 // ErrInvalidManifest naming its directory, or yields a descriptor that satisfies every documented constraint
 // and survives re-encoding unchanged.
 func FuzzFSStorageManifest(f *testing.F) {
 	for _, seed := range []string{
-		`{"language":"go","entrypoint":"plugin.go","version":"1.0.0","memoryLimit":67108864}`,
-		`{"language":"lua","entrypoint":"main.lua"}`,
-		`{"language":"typescript","entrypoint":"src/index.ts","memoryLimit":4294967296}`,
-		`{"language":"go","entrypoint":".","memoryLimit":4294967297}`,
-		`{"language":"go","entrypoint":"../x"}`,
-		`{"language":"go","entrypoint":".","extra":true}`,
-		`{"Language":"go","entrypoint":"."}`,
-		`{"language":"go","entrypoint":".","version":"\ud800"}`,
-		`{"language":"go","entrypoint":".","language":"lua"}`,
-		"{\"language\":\"go\",\"entrypoint\":\"\xff\"}",
-		`{"language":"go","entrypoint":"."}}`,
+		"language: go\nentrypoint: plugin.go\nversion: 1.0.0\nmemoryLimit: 67108864\n",
+		"language: lua\nentrypoint: main.lua\n",
+		"{language: typescript, entrypoint: src/index.ts, memoryLimit: 0x100000000}",
+		"language: go\nentrypoint: .\nmemoryLimit: 4294967297\n",
+		"language: go\nentrypoint: .\nmemoryLimit: 65536.0\n",
+		"language: go\nentrypoint: ../x\n",
+		"language: go\nentrypoint: .\nextra: true\n",
+		"Language: go\nentrypoint: .\n",
+		"language: go\nentrypoint: .\nversion: \"\\ud800\"\n",
+		"language: go\nentrypoint: .\nlanguage: lua\n",
+		"language: go\nentrypoint: \"\xff\"\n",
+		"language: &a go\nentrypoint: *a\n",
+		"<<: {language: go}\nentrypoint: .\n",
+		"language: !x go\nentrypoint: .\n",
+		"language: go\nentrypoint: .\n---\n",
+		"a: &a [*a]\n",
+		"version: 2026-01-01\nlanguage: go\nentrypoint: '.'\n",
 		`null`,
 		``,
 	} {
@@ -841,7 +920,7 @@ func FuzzFSStorageManifest(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, manifest []byte) {
-		descs, err := plg.NewFSStorageFromFS("fuzz", fstest.MapFS{"p/plugin.json": {Data: manifest}}).List(t.Context())
+		descs, err := plg.NewFSStorageFromFS("fuzz", fstest.MapFS{"p/plugin.yaml": {Data: manifest}}).List(t.Context())
 		if err != nil {
 			require.ErrorIs(t, err, plg.ErrInvalidManifest)
 			require.ErrorContains(t, err, "plugin directory p")
@@ -865,7 +944,7 @@ func FuzzFSStorageManifest(f *testing.F) {
 			fields["memoryLimit"] = desc.MemoryLimit
 		}
 
-		reencoded, err := sonic.Marshal(fields)
+		reencoded, err := yaml.Marshal(fields)
 		require.NoError(t, err)
 
 		again, err := manifestStorage(string(reencoded)).List(t.Context())
@@ -874,7 +953,7 @@ func FuzzFSStorageManifest(f *testing.F) {
 	})
 }
 
-// BenchmarkFSStorageList measures what Register pays per FS storage before loading: reading every plugin.json.
+// BenchmarkFSStorageList measures what Register pays per FS storage before loading: reading every plugin.yaml.
 func BenchmarkFSStorageList(b *testing.B) {
 	sub, err := fs.Sub(storagesFS, "testdata/storages/disk")
 	require.NoError(b, err)

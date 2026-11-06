@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -112,8 +113,16 @@ func files(contents ...string) fstest.MapFS {
 	return fsys
 }
 
+// luaManifest is the plugin.yaml of the Lua plugins the tests put.
+const luaManifest = "language: lua\nentrypoint: main.lua\n"
+
+// luaFiles returns files, as files does, with luaManifest as plugin.yaml.
+func luaFiles(contents ...string) fstest.MapFS {
+	return files(append([]string{"plugin.yaml", luaManifest}, contents...)...)
+}
+
 func luaPlugin(key string) pgstorage.Plugin {
-	return pgstorage.Plugin{Key: key, Language: plg.LanguageLua, Entrypoint: "main.lua", Enabled: true}
+	return pgstorage.Plugin{Key: key, Enabled: true}
 }
 
 func list(t *testing.T, store *pgstorage.Storage) []plg.Descriptor {
@@ -128,7 +137,8 @@ func list(t *testing.T, store *pgstorage.Storage) []plg.Descriptor {
 func TestMigrateIsIdempotentAndSafeConcurrently(t *testing.T) {
 	t.Parallel()
 
-	pool := startPostgres(t).pool
+	server := startPostgres(t)
+	pool := server.pool
 
 	var wg sync.WaitGroup
 
@@ -159,11 +169,73 @@ func TestMigrateIsIdempotentAndSafeConcurrently(t *testing.T) {
 	}
 
 	require.NoError(t, rows.Err())
-	assert.Equal(t, []string{"001_plugins.sql"}, versions, "each migration applied once")
+	assert.Equal(t, []string{"001_plugins.sql", "002_manifest_file.sql"}, versions, "each migration applied once")
 
 	store := pgstorage.New(pool, "fresh")
-	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "")))
+	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "")))
 	assert.Len(t, list(t, store), 1, "the migrated tables work")
+
+	t.Run("002 moves the manifest columns into plugin.yaml files", func(t *testing.T) {
+		t.Parallel()
+
+		testManifestMigration(t, server.newDatabase(t))
+	})
+}
+
+// testManifestMigration brings an empty database to migration 001, as an earlier pgstorage did, fills it the way
+// that version did (manifests as columns), then migrates it: every plugin lists as before, with a plugin.yaml
+// made from its columns, or the one it already had.
+func testManifestMigration(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	migration001, err := os.ReadFile(filepath.Join("migrations", "001_plugins.sql"))
+	require.NoError(t, err)
+
+	_, err = pool.Exec(t.Context(), `CREATE TABLE plg_schema_migrations (
+		version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+		INSERT INTO plg_schema_migrations (version) VALUES ('001_plugins.sql');`)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(t.Context(), string(migration001))
+	require.NoError(t, err)
+
+	_, err = pool.Exec(t.Context(), `
+		INSERT INTO plg_plugins (registration, key, language, entrypoint, memory_limit, enabled) VALUES
+			('r', 'plain', 'lua', 'main.lua', 0, true),
+			('r', 'limited', 'typescript', 'src/odd: name''s "entry".ts', 65536, true),
+			('r', 'off', 'go', '.', 0, false),
+			('r', 'has-yaml', 'go', '.', 0, true);
+		INSERT INTO plg_plugin_files VALUES
+			('r', 'plain', 'main.lua', 'return 1'),
+			('r', 'has-yaml', 'plugin.yaml', convert_to(E'language: lua\nentrypoint: init.lua\n', 'UTF8'))`)
+	require.NoError(t, err)
+
+	require.NoError(t, pgstorage.Migrate(t.Context(), pool))
+
+	store := pgstorage.New(pool, "r")
+	descs := list(t, store)
+
+	for i := range descs {
+		descs[i].Version = ""
+	}
+
+	assert.Equal(t, []plg.Descriptor{
+		{Key: "has-yaml", Language: plg.LanguageLua, Entrypoint: "init.lua"},
+		{
+			Key:         "limited",
+			Language:    plg.LanguageTypeScript,
+			Entrypoint:  `src/odd: name's "entry".ts`,
+			MemoryLimit: 64 << 10,
+		},
+		{Key: "plain", Language: plg.LanguageLua, Entrypoint: "main.lua"},
+	}, descs, "the columns became plugin.yaml files; an existing plugin.yaml is kept")
+
+	require.NoError(t, store.SetEnabled(t.Context(), "off", true))
+	assert.Len(t, list(t, store), 4, "a disabled plugin got its plugin.yaml too")
+
+	files, err := store.Open(t.Context(), plg.Descriptor{Key: "plain"})
+	require.NoError(t, err)
+	require.NoError(t, fstest.TestFS(files, "main.lua", "plugin.yaml"), "the plugin's files are kept")
 }
 
 func TestMigrateFailsAsAWhole(t *testing.T) {
@@ -219,17 +291,19 @@ func TestStorageListsOnlyEnabledPlugins(t *testing.T) {
 	assert.Equal(t, "postgres:"+registration, store.Name())
 
 	other := pgstorage.New(database, newRegistration())
-	require.NoError(t, other.Put(t.Context(), luaPlugin("elsewhere"), files("main.lua", "")))
+	require.NoError(t, other.Put(t.Context(), luaPlugin("elsewhere"), luaFiles("main.lua", "")))
 
 	limited := luaPlugin("c")
-	limited.MemoryLimit = 32 << 20
 
 	disabled := luaPlugin("b")
 	disabled.Enabled = false
 
-	for _, p := range []pgstorage.Plugin{limited, disabled, luaPlugin("a"), luaPlugin("B")} {
-		require.NoError(t, store.Put(t.Context(), p, files("main.lua", "")))
+	for _, p := range []pgstorage.Plugin{disabled, luaPlugin("a"), luaPlugin("B")} {
+		require.NoError(t, store.Put(t.Context(), p, luaFiles("main.lua", "")))
 	}
+
+	require.NoError(t, store.Put(t.Context(), limited,
+		files("plugin.yaml", luaManifest+"memoryLimit: 33554432\nversion: ignored\n", "main.lua", "")))
 
 	descs := list(t, store)
 	require.Len(t, descs, 3)
@@ -261,8 +335,8 @@ func TestStorageVersionsFollowTheRows(t *testing.T) {
 	database := migratedDatabase(t)
 	registration := newRegistration()
 	store := pgstorage.New(database, registration)
-	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "return 1", "lib/x.lua", "")))
-	require.NoError(t, store.Put(t.Context(), luaPlugin("q"), files("main.lua", "")))
+	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "return 1", "lib/x.lua", "")))
+	require.NoError(t, store.Put(t.Context(), luaPlugin("q"), luaFiles("main.lua", "")))
 
 	version := func() string {
 		t.Helper()
@@ -296,16 +370,15 @@ func TestStorageVersionsFollowTheRows(t *testing.T) {
 			`INSERT INTO plg_plugin_files VALUES ($1, 'p', 'lib/y.lua', '')`)},
 		{name: "a file removed", change: sql(
 			`DELETE FROM plg_plugin_files WHERE registration = $1 AND key = 'p' AND path = 'lib/x.lua'`)},
-		{name: "the entrypoint changed", change: sql(
-			`UPDATE plg_plugins SET entrypoint = 'lib/y.lua' WHERE registration = $1 AND key = 'p'`)},
-		{name: "the memory limit changed", change: sql(
-			`UPDATE plg_plugins SET memory_limit = 65536 WHERE registration = $1 AND key = 'p'`)},
+		{name: "the manifest edited", change: sql(`UPDATE plg_plugin_files
+			SET content = convert_to(E'language: lua\nentrypoint: lib/y.lua\n', 'UTF8')
+			WHERE registration = $1 AND key = 'p' AND path = 'plugin.yaml'`)},
 		{name: "put again, unchanged", change: func() {
-			require.NoError(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "")))
+			require.NoError(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "")))
 		}},
 		{name: "deleted and put again", change: func() {
 			require.NoError(t, store.Delete(t.Context(), "p"))
-			require.NoError(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "")))
+			require.NoError(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "")))
 		}},
 	}
 
@@ -320,7 +393,7 @@ func TestStorageVersionsFollowTheRows(t *testing.T) {
 
 	before := version()
 
-	sql(`UPDATE plg_plugins SET entrypoint = entrypoint, enabled = false WHERE registration = $1 AND key = 'q'`)()
+	sql(`UPDATE plg_plugins SET enabled = false WHERE registration = $1 AND key = 'q'`)()
 	sql(`UPDATE plg_plugins SET enabled = true WHERE registration = $1 AND key = 'q'`)()
 	sql(`UPDATE plg_plugins SET enabled = enabled WHERE registration = $1 AND key = 'p'`)()
 	assert.Equal(t, before, version(), "enabling, disabling and rewriting the same values change nothing")
@@ -333,7 +406,7 @@ func TestStorageOpen(t *testing.T) {
 	registration := newRegistration()
 	store := pgstorage.New(database, registration)
 
-	want := files("main.lua", "return require('lib.x')", "lib/x.lua", "return 1", "README", "binary\x00\xff")
+	want := luaFiles("main.lua", "return require('lib.x')", "lib/x.lua", "return 1", "README", "binary\x00\xff")
 	disabled := luaPlugin("p")
 	disabled.Enabled = false
 	require.NoError(t, store.Put(t.Context(), disabled, want))
@@ -361,45 +434,66 @@ func TestStorageOpen(t *testing.T) {
 func TestStorageRefusesInvalidPlugins(t *testing.T) {
 	t.Parallel()
 
-	store := pgstorage.New(migratedDatabase(t), newRegistration())
+	database := migratedDatabase(t)
+	store := pgstorage.New(database, newRegistration())
 
-	tests := map[string]pgstorage.Plugin{
-		"empty key":         {Language: plg.LanguageLua, Entrypoint: "main.lua"},
-		"key with a slash":  {Key: "a/b", Language: plg.LanguageLua, Entrypoint: "main.lua"},
-		"dot key":           {Key: ".", Language: plg.LanguageLua, Entrypoint: "main.lua"},
-		"dot-dot key":       {Key: "..", Language: plg.LanguageLua, Entrypoint: "main.lua"},
-		"unknown language":  {Key: "p", Language: "python", Entrypoint: "main.py"},
-		"no entrypoint":     {Key: "p", Language: plg.LanguageLua},
-		"memory over 4 GiB": {Key: "p", Language: plg.LanguageLua, Entrypoint: "main.lua", MemoryLimit: 4<<30 + 1},
+	tests := map[string]struct {
+		want   error
+		files  fstest.MapFS
+		plugin pgstorage.Plugin
+	}{
+		"empty key":        {plugin: pgstorage.Plugin{}, files: luaFiles("main.lua", "")},
+		"key with a slash": {plugin: luaPlugin("a/b"), files: luaFiles("main.lua", "")},
+		"dot key":          {plugin: luaPlugin("."), files: luaFiles("main.lua", "")},
+		"dot-dot key":      {plugin: luaPlugin(".."), files: luaFiles("main.lua", "")},
+		"no plugin.yaml": {
+			plugin: luaPlugin("p"), files: files("main.lua", "", "lib/plugin.yaml", luaManifest),
+			want: plg.ErrInvalidManifest,
+		},
+		"plugin.json only": {
+			plugin: luaPlugin("p"),
+			files:  files("main.lua", "", "plugin.json", `{"language": "lua", "entrypoint": "main.lua"}`),
+			want:   plg.ErrInvalidManifest,
+		},
+		"unknown language": {
+			plugin: luaPlugin("p"), files: files("plugin.yaml", "language: python\nentrypoint: main.py\n"),
+			want: plg.ErrInvalidManifest,
+		},
+		"memory over 4 GiB": {
+			plugin: luaPlugin("p"), files: files("plugin.yaml", luaManifest+"memoryLimit: 4294967297\n"),
+			want: plg.ErrInvalidManifest,
+		},
+		"an alias": {
+			plugin: luaPlugin("p"), files: files("plugin.yaml", "language: &l lua\nentrypoint: *l\n"),
+			want: plg.ErrInvalidManifest,
+		},
 	}
 
-	for name, p := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			err := store.Put(t.Context(), p, files("main.lua", ""))
-			require.Error(t, err)
-			assert.ErrorContains(t, err, "pgstorage: putting")
+			err := store.Put(t.Context(), tc.plugin, tc.files)
+			require.ErrorContains(t, err, "pgstorage: putting")
+
+			if tc.want != nil {
+				require.ErrorIs(t, err, tc.want)
+			}
 		})
 	}
 
 	err := store.Put(t.Context(), luaPlugin("p"), os.DirFS(filepath.Join(t.TempDir(), "none")))
 	require.ErrorIs(t, err, fs.ErrNotExist, "files that cannot be read")
 
-	at4GiB := luaPlugin("p")
-	at4GiB.MemoryLimit = 4 << 30
-	require.NoError(t, store.Put(t.Context(), at4GiB, files("main.lua", "")), "4 GiB is the limit")
+	at4GiB := files("plugin.yaml", luaManifest+"memoryLimit: 4294967296\n", "main.lua", "")
+	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), at4GiB), "4 GiB is the limit")
 
-	err = store.Put(
-		t.Context(),
-		pgstorage.Plugin{Key: "p", Language: "python", Entrypoint: "x"},
-		files("main.lua", "-"),
-	)
-	require.Error(t, err)
+	err = store.Put(t.Context(), luaPlugin("p"), files("plugin.yaml", "language: python\n", "main.lua", "-"))
+	require.ErrorIs(t, err, plg.ErrInvalidManifest)
 
 	descs := list(t, store)
 	require.Len(t, descs, 1)
-	assert.Equal(t, plg.LanguageLua, descs[0].Language, "a failed Put changes nothing")
+	assert.Equal(t, uint64(4<<30), descs[0].MemoryLimit, "a failed Put changes nothing")
 
 	got, err := store.Open(t.Context(), descs[0])
 	require.NoError(t, err)
@@ -416,6 +510,34 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 
 	_, err = store.Open(t.Context(), descs[0])
 	require.ErrorIs(t, err, fs.ErrNotExist, "its files went with it")
+
+	// Manifests written with plain SQL are checked by List: the plugin is named, and an oversized manifest's
+	// content never leaves the database.
+	received := new(atomic.Int64)
+
+	for name, manifest := range map[string]string{
+		"no plugin.yaml": "",
+		"malformed":      "convert_to(E'language: lua\\nentrypoint: main.lua\\nlanguage: go\\n', 'UTF8')",
+		"oversized": fmt.Sprintf("convert_to(E'language: lua\\nentrypoint: main.lua\\n' || repeat('#', %d), 'UTF8')",
+			plg.MaxManifestSize),
+	} {
+		other := newRegistration()
+		_, err = database.Exec(t.Context(), "INSERT INTO plg_plugins (registration, key) VALUES ($1, 'bad')", other)
+		require.NoError(t, err)
+
+		if manifest != "" {
+			_, err = database.Exec(t.Context(),
+				"INSERT INTO plg_plugin_files VALUES ($1, 'bad', 'plugin.yaml', "+manifest+")", other)
+			require.NoError(t, err)
+		}
+
+		received.Store(0)
+
+		_, err = pgstorage.New(countingDB{Pool: database, received: received}, other).List(t.Context())
+		require.ErrorIs(t, err, plg.ErrInvalidManifest, name)
+		require.ErrorContains(t, err, "plugin bad", name)
+		assert.Less(t, received.Load(), int64(1<<10), "%s: the manifest was not transferred", name)
+	}
 }
 
 // countingDB is a pgstorage.DB counting the bytes of the values its queries return, in transactions too.
@@ -484,7 +606,7 @@ func TestStorageOpenRefusesOversizedPluginsBeforeReadingThem(t *testing.T) {
 	insert := func(key string, sizes ...int) {
 		t.Helper()
 
-		require.NoError(t, store.Put(t.Context(), luaPlugin(key), files("main.lua", "")))
+		require.NoError(t, store.Put(t.Context(), luaPlugin(key), luaFiles("main.lua", "")))
 
 		for i, size := range sizes {
 			_, err := database.Exec(t.Context(), `INSERT INTO plg_plugin_files
@@ -509,7 +631,7 @@ func TestStorageOpenRefusesOversizedPluginsBeforeReadingThem(t *testing.T) {
 			limit = plg.MaxPluginPathBytes
 		}
 
-		require.NoError(t, store.Put(t.Context(), luaPlugin(key), files("main.lua", "")))
+		require.NoError(t, store.Put(t.Context(), luaPlugin(key), luaFiles("main.lua", "")))
 
 		_, err := database.Exec(t.Context(), sql, registration, limit)
 		require.NoError(t, err)
@@ -610,10 +732,10 @@ func TestStorageReportsDatabaseFailures(t *testing.T) {
 	pool.Close()
 
 	require.ErrorContains(t, pgstorage.Migrate(t.Context(), pool), "pgstorage: migrating", "a closed pool")
-	require.ErrorContains(t, store.Put(t.Context(), luaPlugin("p"), files("main.lua", "")), "pgstorage: putting r/p")
+	require.ErrorContains(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "")), "pgstorage: putting r/p")
 }
 
-// putPlugins puts every plugin directory of fsys, described by its plugin.json, into the storage.
+// putPlugins puts every plugin directory of fsys, its plugin.yaml included, into the storage.
 func putPlugins(t *testing.T, store *pgstorage.Storage, fsys fs.FS) {
 	t.Helper()
 
@@ -621,20 +743,10 @@ func putPlugins(t *testing.T, store *pgstorage.Storage, fsys fs.FS) {
 	require.NoError(t, err)
 
 	for _, dir := range dirs {
-		manifest, err := fs.ReadFile(fsys, dir.Name()+"/plugin.json")
-		require.NoError(t, err)
-
-		desc, err := plg.ParseManifest(manifest)
-		require.NoError(t, err)
-
 		sub, err := fs.Sub(fsys, dir.Name())
 		require.NoError(t, err)
 
-		p := pgstorage.Plugin{
-			Key: dir.Name(), Language: desc.Language, Entrypoint: desc.Entrypoint, MemoryLimit: desc.MemoryLimit,
-			Enabled: true,
-		}
-		require.NoError(t, store.Put(t.Context(), p, sub))
+		require.NoError(t, store.Put(t.Context(), pgstorage.Plugin{Key: dir.Name(), Enabled: true}, sub))
 	}
 }
 
@@ -659,15 +771,14 @@ func TestStorageServesThePricingRules(t *testing.T) {
 
 	changed := fstest.MapFS{"coupons.ts": {Data: bytes.Replace(coupons, []byte("500"), []byte("700"), 1)}}
 
-	for _, name := range []string{"plugin.json", "rule.ts"} {
+	for _, name := range []string{"plugin.yaml", "rule.ts"} {
 		data, readErr := fs.ReadFile(coupon, name)
 		require.NoError(t, readErr)
 
 		changed[name] = &fstest.MapFile{Data: data}
 	}
 
-	ts := pgstorage.Plugin{Key: "coupon", Language: plg.LanguageTypeScript, Entrypoint: "rule.ts", Enabled: true}
-	require.NoError(t, store.Put(t.Context(), ts, changed))
+	require.NoError(t, store.Put(t.Context(), pgstorage.Plugin{Key: "coupon", Enabled: true}, changed))
 	require.NoError(t, container.Reload(t.Context()))
 
 	want := pricingtest.Discounts()

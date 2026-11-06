@@ -202,13 +202,13 @@ type pair interface {
 	M(ctx context.Context) (string, int8, error)
 }
 
-// TestManifestMemoryLimitsMatchRegister checks that a plugin.json's memoryLimit parses exactly when Register
+// TestManifestMemoryLimitsMatchRegister checks that a plugin.yaml's memoryLimit parses exactly when Register
 // accepts it in a descriptor: from one wasm page to 4 GiB.
 func TestManifestMemoryLimitsMatchRegister(t *testing.T) {
 	t.Parallel()
 
 	for _, limit := range []uint64{1, engine.PageSize - 1, engine.PageSize, engine.PageSize + 1, 4 << 30, 4<<30 + 1} {
-		manifest := fmt.Sprintf(`{"language":"go","entrypoint":".","memoryLimit":%d}`, limit)
+		manifest := fmt.Sprintf("language: go\nentrypoint: .\nmemoryLimit: %d\n", limit)
 		desc, parseErr := ParseManifest([]byte(manifest))
 		desc.Key = "k"
 		desc.MemoryLimit = limit

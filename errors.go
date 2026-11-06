@@ -42,9 +42,9 @@ var (
 	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, or whose MemoryLimit is under
 	// one 64 KiB page or over 4 GiB.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
-	// ErrInvalidManifest reports a plugin.json that is missing or malformed: in a plugin directory of an
+	// ErrInvalidManifest reports a plugin.yaml that is missing or malformed: in a plugin directory of an
 	// [FSStorage], or given to [ParseManifest].
-	ErrInvalidManifest = errors.New("plg: invalid plugin.json")
+	ErrInvalidManifest = errors.New("plg: invalid plugin.yaml")
 	// ErrPluginTooLarge reports a plugin with a file over [MaxPluginFileSize] bytes, files over [MaxPluginSize]
 	// bytes together, more than [MaxPluginEntries] entries or entry paths over [MaxPluginPathBytes] bytes together;
 	// the message names the file or entry.

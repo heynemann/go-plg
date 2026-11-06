@@ -108,15 +108,15 @@ func versioned(version, api string) string {
 	return strings.NewReplacer("{{VERSION}}", version, "{{API}}", api).Replace(versionedTemplate)
 }
 
-// writePlugin writes a plugin directory of an FS storage: plugin.go holding source and a plugin.json without a
+// writePlugin writes a plugin directory of an FS storage: plugin.go holding source and a plugin.yaml without a
 // version, so the plugin's version is the hash of its files.
 func writePlugin(tb testing.TB, root, key, source string) {
 	tb.Helper()
 
 	dir := filepath.Join(root, key)
 	require.NoError(tb, os.MkdirAll(dir, 0o750))
-	require.NoError(tb, os.WriteFile(filepath.Join(dir, "plugin.json"),
-		[]byte(`{"language": "go", "entrypoint": "plugin.go"}`), 0o600))
+	require.NoError(tb, os.WriteFile(filepath.Join(dir, "plugin.yaml"),
+		[]byte("language: go\nentrypoint: plugin.go\n"), 0o600))
 	require.NoError(tb, os.WriteFile(filepath.Join(dir, "plugin.go"), []byte(source), 0o600))
 }
 
@@ -322,7 +322,7 @@ func TestReloadKeepsTheLastGoodVersionOfABrokenUpdate(t *testing.T) {
 		require.ErrorIs(t, err, plg.ErrNotFound, "%s: the new plugin is skipped", name)
 	}
 
-	require.NoError(t, os.WriteFile(filepath.Join(root, "p", "plugin.json"), []byte(`{"language": "go"`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "p", "plugin.yaml"), []byte(`{"language": "go"`), 0o600))
 	require.ErrorIs(t, ctr.Reload(t.Context()), plg.ErrInvalidManifest, "a storage that cannot be listed")
 	assert.Same(t, good, plg.Generation(ctr, "broken/p"), "changes nothing")
 

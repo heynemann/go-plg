@@ -87,11 +87,12 @@ type Greeter interface {
 }
 ```
 
-Write the plugins, one directory each, with a `plugin.json` naming the language and the entrypoint. In Go:
+Write the plugins, one directory each, with a `plugin.yaml` naming the language and the entrypoint. In Go:
 
-<!-- quickstart:file plugins/hello-go/plugin.json -->
-```json
-{"language": "go", "entrypoint": "."}
+<!-- quickstart:file plugins/hello-go/plugin.yaml -->
+```yaml
+language: go
+entrypoint: .
 ```
 
 <!-- quickstart:file plugins/hello-go/hello.go -->
@@ -118,9 +119,10 @@ func (hello) Greet(_ context.Context, name string) (string, error) {
 
 In Lua:
 
-<!-- quickstart:file plugins/hello-lua/plugin.json -->
-```json
-{"language": "lua", "entrypoint": "plugin.lua"}
+<!-- quickstart:file plugins/hello-lua/plugin.yaml -->
+```yaml
+language: lua
+entrypoint: plugin.lua
 ```
 
 <!-- quickstart:file plugins/hello-lua/plugin.lua -->
@@ -136,9 +138,10 @@ end
 
 In TypeScript:
 
-<!-- quickstart:file plugins/hello-ts/plugin.json -->
-```json
-{"language": "typescript", "entrypoint": "plugin.ts"}
+<!-- quickstart:file plugins/hello-ts/plugin.yaml -->
+```yaml
+language: typescript
+entrypoint: plugin.ts
 ```
 
 <!-- quickstart:file plugins/hello-ts/plugin.ts -->
@@ -432,20 +435,26 @@ a plugin over the entry or path limit.
 Built in:
 
 - `plg.NewFSStorage(dir)` and `plg.NewFSStorageFromFS(name, fsys)` (any `fs.FS`: an `embed.FS`, `fs.Sub` of one,
-  …). Each top-level directory is a plugin, its name the key, with a `plugin.json`:
+  …). Each top-level directory is a plugin, its name the key, with a `plugin.yaml`:
 
-  ```json
-  {"language": "go", "entrypoint": "plugin.go", "version": "1.4.0", "memoryLimit": 67108864}
+  ```yaml
+  language: go
+  entrypoint: plugin.go
+  version: 1.4.0
+  memoryLimit: 67108864
   ```
 
   `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
   `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes, from 65536 — one wasm page — to 4 GiB) may only lower
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
-  drops a limit. A `plugin.json` must be a regular file of at most `plg.MaxManifestSize` (64 KiB) bytes, else
+  drops a limit. The file is one YAML document in a strict subset: anchors, aliases, merge keys (`<<`), tags
+  other than YAML's core types, a second document and duplicate keys are errors too, and string values take the
+  scalar verbatim (`version: 1.10` is `"1.10"`). A `plugin.json` is never read: a directory with one but no
+  `plugin.yaml` fails the listing with a hint to convert it. A `plugin.yaml` must be a regular file of at most `plg.MaxManifestSize` (64 KiB) bytes, else
   it is `plg.ErrInvalidManifest` too (a FIFO or a link to a device is never read). Top-level files, links and dot-directories are ignored. `NewFSStorage` reads `dir` through an
   `os.Root`, so no path or link leads it out of `dir`, and it copies a plugin directory entry by entry, each opened
   relative to its parent and checked to be that very entry: a file or directory swapped for a link mid-copy is
-  never followed, out of the plugin or inside it. Its opens never wait: a `plugin.json`, file or directory swapped
+  never followed, out of the plugin or inside it. Its opens never wait: a `plugin.yaml`, file or directory swapped
   for a FIFO (whose ordinary open waits for a writer) fails the listing or the copy at once. `NewFSStorageFromFS`,
   `MemoryStorage.Put` and your own storages are copied through the `fs.FS` interface, which opens a file by name:
   a tree that follows links (an `os.DirFS`, anywhere on the host) can be led out of the plugin by a link swapped in
@@ -454,12 +463,12 @@ Built in:
 - `plg.NewMemoryStorage(name)` with `Put(desc, files)` and `Delete(key)`: plugins a program builds itself, and
   tests.
 
-Your own: implement the three methods. `plg.ParseManifest` parses a `plugin.json` exactly like the FS storage, for
+Your own: implement the three methods. `plg.ParseManifest` parses a `plugin.yaml` exactly like the FS storage, for
 storages that keep the same layout elsewhere; read at most `plg.MaxManifestSize`+1 bytes of it, as it rejects more. A `Version` that changes exactly when the plugin changes lets
 reloads skip unchanged plugins (an empty one makes plg hash the files on every reload). Two complete storages,
-kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.json
-layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, only enabled plugins listed,
-versions maintained by triggers, a migration included).
+kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.yaml
+layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, the plugin.yaml stored as one of
+the plugin's file rows, only enabled plugins listed, versions maintained by triggers, migrations included).
 
 ## Limits, pools and the memory budget
 

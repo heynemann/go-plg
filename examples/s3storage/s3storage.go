@@ -1,10 +1,10 @@
 // Package s3storage is a [plg.Storage] over an S3 bucket (or any S3-compatible store, such as MinIO), built on
 // aws-sdk-go-v2. It keeps plg's built-in layout under a key prefix: one "directory" per plugin, named after the
-// plugin's key, holding the plugin's files and a plugin.json manifest read by [plg.ParseManifest]:
+// plugin's key, holding the plugin's files and a plugin.yaml manifest read by [plg.ParseManifest]:
 //
-//	plugins/bulk/plugin.json      {"language": "go", "entrypoint": "."}
+//	plugins/bulk/plugin.yaml      {language: go, entrypoint: .}
 //	plugins/bulk/bulk.go
-//	plugins/loyalty/plugin.json   {"language": "lua", "entrypoint": "rule.lua"}
+//	plugins/loyalty/plugin.yaml   {language: lua, entrypoint: rule.lua}
 //	plugins/loyalty/rule.lua
 //
 // Objects directly under the prefix and "directories" whose names start with a dot are not plugins and are
@@ -46,7 +46,7 @@ type Client interface {
 const (
 	// DefaultMaxPluginSize bounds the bytes of one plugin's objects that Open downloads.
 	DefaultMaxPluginSize = 32 << 20
-	manifestName         = "plugin.json"
+	manifestName         = "plugin.yaml"
 	// listPageSize is S3's largest page of a listing.
 	listPageSize = 1000
 	// readOnly is the mode of the files Open returns.
@@ -56,7 +56,7 @@ const (
 // Storage is a [plg.Storage] over the plugins under a prefix of an S3 bucket. It is safe for concurrent use.
 type Storage struct {
 	client Client
-	// manifests caches each parsed plugin.json by its object key, with the ETag it was parsed at.
+	// manifests caches each parsed plugin.yaml by its object key, with the ETag it was parsed at.
 	manifests     *xsync.Map[string, manifest]
 	bucket        string
 	prefix        string
@@ -64,7 +64,7 @@ type Storage struct {
 	pageSize      int32
 }
 
-// manifest is a parsed plugin.json and the ETag of the object it was read from.
+// manifest is a parsed plugin.yaml and the ETag of the object it was read from.
 type manifest struct {
 	etag string
 	desc plg.Descriptor
@@ -126,7 +126,7 @@ type object struct {
 }
 
 // List lists the prefix and returns its plugins, sorted by key. It fails with [plg.ErrInvalidManifest], naming
-// the plugin, if a plugin directory has no plugin.json or a malformed one, and with [plg.ErrPluginTooLarge] as soon
+// the plugin, if a plugin directory has no plugin.yaml or a malformed one, and with [plg.ErrPluginTooLarge] as soon
 // as the listing brings a plugin directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of
 // object paths, which Register would refuse to copy (see [Storage.Open]).
 func (s *Storage) List(ctx context.Context) ([]plg.Descriptor, error) {
@@ -312,7 +312,7 @@ func (s *Storage) describe(ctx context.Context, dir string, objects []object) (p
 	return desc, nil
 }
 
-// manifest returns the parsed plugin.json at key, from the cache while its ETag is unchanged.
+// manifest returns the parsed plugin.yaml at key, from the cache while its ETag is unchanged.
 func (s *Storage) manifest(ctx context.Context, key string, obj object) (plg.Descriptor, error) {
 	if cached, ok := s.manifests.Load(key); ok && cached.etag == obj.etag {
 		return cached.desc, nil

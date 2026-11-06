@@ -1,5 +1,0 @@
-{
-  "language": "go",
-  "entrypoint": "plugin.go",
-  "version": "1.2.3"
-}

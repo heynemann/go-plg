@@ -1,5 +1,5 @@
 // Package plugins holds the example pricing rules, one directory per plugin in plg's built-in storage layout (a
-// plugin.json next to the plugin's files), one rule per language:
+// plugin.yaml next to the plugin's files), one rule per language:
 //
 //   - bulk (Go): 10% off orders of at least 10 items;
 //   - loyalty (Lua): a percentage off by the customer's tier, which it asks the service for;

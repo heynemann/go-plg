@@ -120,9 +120,9 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 	upload(t, client, bucket, "plugins/", plugins.FS)
 	put(t, client, bucket, "plugins/README.md", "objects directly under the prefix are not plugins")
 	put(t, client, bucket, "plugins/.git/config", "neither are dot directories")
-	put(t, client, bucket, "plugins/empty/", "") // a directory marker, with no plugin.json under it
+	put(t, client, bucket, "plugins/empty/", "") // a directory marker, with no plugin.yaml under it
 	put(t, client, bucket, "plugins/bulk/docs/", "")
-	put(t, client, bucket, "elsewhere/x/plugin.json", "{malformed: outside the prefix")
+	put(t, client, bucket, "elsewhere/x/plugin.yaml", "{malformed: outside the prefix")
 
 	store := s3storage.New(client, bucket, s3storage.WithPrefix("plugins"))
 	assert.Equal(t, "s3://"+bucket+"/plugins/", store.Name())
@@ -143,9 +143,9 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 
 	files, err := store.Open(t.Context(), descs[2])
 	require.NoError(t, err)
-	require.NoError(t, fstest.TestFS(files, "plugin.json", "rule.lua", "tiers.lua"), "Open serves the plugin's files")
+	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "rule.lua", "tiers.lua"), "Open serves the plugin's files")
 
-	for _, name := range []string{"plugin.json", "rule.lua", "tiers.lua"} {
+	for _, name := range []string{"plugin.yaml", "rule.lua", "tiers.lua"} {
 		want, readErr := fs.ReadFile(plugins.FS, "loyalty/"+name)
 		require.NoError(t, readErr)
 
@@ -166,7 +166,7 @@ func TestStorageAtTheBucketRoot(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua","version":"7"}`)
+	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\nversion: \"7\"\n")
 	put(t, client, bucket, "p/main.lua", "")
 
 	store := s3storage.New(client, bucket)
@@ -187,9 +187,9 @@ func TestStorageVersionsFollowTheObjects(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 	put(t, client, bucket, "p/main.lua", "return 1")
-	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 	put(t, client, bucket, "q/main.lua", "return 1")
 
 	store := s3storage.New(client, bucket)
@@ -272,9 +272,9 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 	put(t, client, bucket, "p/main.lua", "")
-	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 
 	counting := &countingClient{Client: client}
 	store := s3storage.New(counting, bucket)
@@ -294,16 +294,16 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 	list()
 	assert.Equal(t, int64(2), counting.gets.Load(), "a poll with nothing changed downloads nothing")
 
-	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"init.lua"}`)
+	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: init.lua\n")
 
 	descs := list()
 
 	assert.Equal(t, int64(3), counting.gets.Load(), "only the changed manifest")
 	assert.Equal(t, "init.lua", descs[0].Entrypoint, "the new manifest is read")
 
-	remove(t, client, bucket, "q/plugin.json")
+	remove(t, client, bucket, "q/plugin.yaml")
 	list()
-	put(t, client, bucket, "q/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 	list()
 	assert.Equal(t, int64(4), counting.gets.Load(), "a plugin that comes back is read again")
 }
@@ -315,12 +315,12 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 
 	tests := map[string]map[string]string{
 		"no manifest": {"p/main.lua": ""},
-		"malformed":   {"p/plugin.json": `{"language":"lua"`},
-		"unknown key": {"p/plugin.json": `{"language":"lua","entrypoint":"main.lua","memory_limit":1}`},
+		"malformed":   {"p/plugin.yaml": `{"language":"lua"`},
+		"unknown key": {"p/plugin.yaml": "language: lua\nentrypoint: main.lua\nmemory_limit: 1\n"},
 		"too large": {
-			"p/plugin.json": `{"language":"lua","entrypoint":"main.lua"}` + strings.Repeat(" ", 64<<10),
+			"p/plugin.yaml": "language: lua\nentrypoint: main.lua\n" + strings.Repeat(" ", 64<<10),
 		},
-		"one bad of many": {"a/plugin.json": `{"language":"lua","entrypoint":"main.lua"}`, "p/plugin.json": `[]`},
+		"one bad of many": {"a/plugin.yaml": "language: lua\nentrypoint: main.lua\n", "p/plugin.yaml": `[]`},
 	}
 
 	for name, objects := range tests {
@@ -344,8 +344,8 @@ func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	manifest := `{"language":"lua","entrypoint":"main.lua"}`
-	put(t, client, bucket, "p/plugin.json", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
+	manifest := "language: lua\nentrypoint: main.lua\n"
+	put(t, client, bucket, "p/plugin.yaml", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
 
 	descs, err := s3storage.New(client, bucket).List(t.Context())
 	require.NoError(t, err)
@@ -357,17 +357,17 @@ func TestStorageOpenFailures(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	manifest := `{"language":"lua","entrypoint":"main.lua"}`
-	put(t, client, bucket, "big/plugin.json", manifest)
+	manifest := "language: lua\nentrypoint: main.lua\n"
+	put(t, client, bucket, "big/plugin.yaml", manifest)
 	put(t, client, bucket, "big/main.lua", strings.Repeat("-", 100-len(manifest))) // 100 bytes together, main.lua first
-	put(t, client, bucket, "odd/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "odd/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 	put(t, client, bucket, "odd/a/main.lua", "")
 
 	store := s3storage.New(client, bucket, s3storage.WithMaxPluginSize(100))
 
 	files, err := store.Open(t.Context(), plg.Descriptor{Key: "big"})
 	require.NoError(t, err, "exactly at the limit")
-	require.NoError(t, fstest.TestFS(files, "plugin.json", "main.lua"))
+	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "main.lua"))
 
 	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(99)).
 		Open(t.Context(), plg.Descriptor{Key: "big"})
@@ -375,7 +375,7 @@ func TestStorageOpenFailures(t *testing.T) {
 
 	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(int64(101-len(manifest)))).
 		Open(t.Context(), plg.Descriptor{Key: "big"})
-	require.ErrorContains(t, err, "too large", "main.lua fits, plugin.json no longer does")
+	require.ErrorContains(t, err, "too large", "main.lua fits, plugin.yaml no longer does")
 
 	_, err = s3storage.New(&oddKeysClient{Client: client}, bucket).Open(t.Context(), plg.Descriptor{Key: "odd"})
 	require.ErrorContains(t, err, `"a//main.lua"`, "an object key that is not a path")
@@ -430,7 +430,7 @@ func TestStorageReadsEveryPageOfAListing(t *testing.T) {
 
 	files, err := store.Open(t.Context(), plg.Descriptor{Key: "coupon"})
 	require.NoError(t, err)
-	require.NoError(t, fstest.TestFS(files, "plugin.json", "rule.ts", "coupons.ts"))
+	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "rule.ts", "coupons.ts"))
 }
 
 // generatingClient lists a real client's objects, then makes up pages of objects of the plugin directory dir,
@@ -494,13 +494,13 @@ func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "many/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "many/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 
 	const (
 		pages    = 100
 		pageSize = 1000
 		nameSize = 1000
-		// the objects that bring a plugin over each limit (made-up ones; plugin.json only adds to them)
+		// the objects that bring a plugin over each limit (made-up ones; plugin.yaml only adds to them)
 		entries = plg.MaxPluginEntries + 1
 		named   = plg.MaxPluginPathBytes/nameSize + 1
 	)
@@ -556,7 +556,7 @@ func TestStorageDownloadFailures(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.json", `{"language":"lua","entrypoint":"main.lua"}`)
+	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
 
 	failing := &failingClient{Client: client}
 	store := s3storage.New(failing, bucket)
@@ -598,7 +598,7 @@ func TestStorageServesThePricingRules(t *testing.T) {
 	require.NoError(t, err)
 	put(t, client, bucket, "rules/coupon/coupons.ts", string(bytes.Replace(coupons, []byte("500"), []byte("700"), 1)))
 
-	for _, key := range []string{"plugin.json", "rule.lua", "tiers.lua"} {
+	for _, key := range []string{"plugin.yaml", "rule.lua", "tiers.lua"} {
 		remove(t, client, bucket, "rules/loyalty/"+key)
 	}
 
