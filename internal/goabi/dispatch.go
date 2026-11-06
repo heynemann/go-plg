@@ -1,6 +1,7 @@
 package goabi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -8,13 +9,16 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/heynemann/go-plg/plugin"
 )
 
 // initTemplate renders [InitFunc], which creates the plugin instance and binds its methods to the
-// [CallPrefix]+<Method> variables and its optional Close to [CloseVar]. yaegi's run-time interface assertions
-// are unreliable, so Create is assigned to a variable of the exact expected type: yaegi rejects a Create with
-// any other signature when it compiles the dispatcher. A nil instance is reported as a problem (a load
-// failure), apart from Create's own error. With a Host, Create takes the dispatcher's Host stubs.
+// [CallPrefix]+<Method> variables, its optional Close to [CloseVar] and, when the plugins validate, its Validate
+// to [ValidateVar]. yaegi's run-time interface assertions are unreliable, so Create is assigned to a variable of
+// the exact expected type: yaegi rejects a Create with any other signature when it compiles the dispatcher. A nil
+// instance is reported as a problem (a load failure), apart from Create's own error. With a Host, Create takes the
+// dispatcher's Host stubs.
 //
 // The guest calls the bound method values directly: a forwarding function per method would cost a second
 // interpreted call and a dynamic method lookup on every call, about half of a small call's time in the guest.
@@ -33,7 +37,7 @@ func %[3]s() (string, error) {
 
 %[6]s
 	%[9]s = plgBindClose(v)
-
+%[10]s
 	return "", nil
 }
 `
@@ -94,6 +98,32 @@ func plgBindPlainCloser(v %[1]s) (f func()) {
 }
 `
 
+// validateTemplate renders the binder of the instance's Validate, bound the way Close is: yaegi's interface
+// assertions compare method names only, so an instance whose Validate has another signature passes them and then
+// panics when the method is assigned to the variable of the exact type, and the binder recovers and reports no
+// Validate, as Go's assertion would. That includes a Validate with one parameter more in front, which yaegi's
+// assertion lets through as if it were the receiver (the same happens with Close). Type switches never match
+// interpreted types in yaegi, so the assertion is the way to ask.
+const validateTemplate = `
+var %[2]s %[3]s
+
+type plgValidator interface{ %[4]s%[5]s }
+
+func plgBindValidate(v %[1]s) (f %[3]s) {
+	defer func() {
+		if recover() != nil {
+			f = nil
+		}
+	}()
+
+	if c, ok := v.(plgValidator); ok {
+		f = c.%[4]s
+	}
+
+	return f
+}
+`
+
 // bindTemplate renders the binder of one method. Binding a method that the instance promotes from a nil
 // embedded interface (a plugin implementing only part of the interface) panics in yaegi, where Go panics only
 // when the method is called: the binder then forwards each call instead, which panics like Go on the call.
@@ -129,10 +159,11 @@ var ErrRender = errors.New("goabi: cannot render dispatcher")
 // RenderDispatcher returns the Go source of the dispatcher package for the named interface iface: its
 // [InitFunc] calls the plugin package's Create and binds each method of the instance to a variable
 // [CallPrefix]+<Method> of the method's type. With a non-nil host interface, Create takes a value of the
-// dispatcher's type implementing host, whose methods call the variables [HostCallPrefix]+<Method>. Every package
-// a signature refers to is imported under a generated alias, so the output does not depend on package names. The
-// output is deterministic.
-func RenderDispatcher(iface, host reflect.Type) ([]byte, error) {
+// dispatcher's type implementing host, whose methods call the variables [HostCallPrefix]+<Method>. With a non-nil
+// validate type V (a named type), it also binds the instance's Validate(context.Context, V) ([]plugin.Issue,
+// error), if it has one, to [ValidateVar]. Every package a signature refers to is imported under a generated
+// alias, so the output does not depend on package names. The output is deterministic.
+func RenderDispatcher(iface, host, validate reflect.Type) ([]byte, error) {
 	rnd := renderer{aliases: map[string]string{}, embedded: map[string]reflect.Type{}}
 
 	err := rnd.collectInterface(iface)
@@ -143,13 +174,28 @@ func RenderDispatcher(iface, host reflect.Type) ([]byte, error) {
 		}
 	}
 
+	if err == nil && validate != nil {
+		err = rnd.collectFunc(ValidateType(validate))
+		if err != nil {
+			err = fmt.Errorf("validate: %w", err)
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
 	rnd.assignAliases()
 
-	return rnd.render(iface, host), nil
+	return rnd.render(iface, host, validate), nil
+}
+
+// ValidateType returns the type of the Validate method of plugins validated with an input of type validate:
+// func(context.Context, validate) ([]plugin.Issue, error).
+func ValidateType(validate reflect.Type) reflect.Type {
+	return reflect.FuncOf(
+		[]reflect.Type{reflect.TypeFor[context.Context](), validate},
+		[]reflect.Type{reflect.TypeFor[[]plugin.Issue](), reflect.TypeFor[error]()}, false)
 }
 
 type renderer struct {
@@ -301,7 +347,7 @@ func embeddedType(typ reflect.Type) reflect.Type {
 
 // reservedName reports whether the dispatcher declares name, or may for some method.
 func reservedName(name string) bool {
-	return name == InitFunc || name == CloseVar || strings.HasPrefix(name, CallPrefix) ||
+	return name == InitFunc || name == CloseVar || name == ValidateVar || strings.HasPrefix(name, CallPrefix) ||
 		strings.HasPrefix(name, HostCallPrefix)
 }
 
@@ -333,7 +379,7 @@ func (r *renderer) renderEmbedded() {
 	}
 }
 
-func (r *renderer) render(iface, host reflect.Type) []byte {
+func (r *renderer) render(iface, host, validate reflect.Type) []byte {
 	r.printf("// Code generated by plg for %s. DO NOT EDIT.\n\npackage dispatch\n\nimport (\n", iface)
 
 	for _, p := range r.sortedPaths() {
@@ -361,10 +407,21 @@ func (r *renderer) render(iface, host reflect.Type) []byte {
 		hostParam, hostArg = r.typeExpr(host), hostStubType+"{}"
 	}
 
+	bindValidate := ""
+	if validate != nil {
+		bindValidate = "\t" + ValidateVar + " = plgBindValidate(v)\n"
+	}
+
 	r.printf(initTemplate, ifaceExpr, CreateFunc, InitFunc,
 		strconv.Quote(CreateFunc+" returned a nil "+iface.String()), vars.String(), binds.String(), hostParam, hostArg,
-		CloseVar)
+		CloseVar, bindValidate)
 	r.printf(closeTemplate, ifaceExpr, CloseVar)
+
+	if validate != nil {
+		sig := r.signature(ValidateType(validate))
+		r.printf(validateTemplate, ifaceExpr, ValidateVar, sig.funcExpr(), ValidateMethod,
+			strings.TrimPrefix(sig.funcExpr(), "func"))
+	}
 
 	for i, sig := range sigs {
 		ret := ""

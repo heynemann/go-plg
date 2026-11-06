@@ -55,7 +55,7 @@ func overlay(t *testing.T, plugin string) *memfs.FS {
 	require.NoError(t, tree.AddTree(path.Join("src", goabi.PluginImportPath),
 		os.DirFS(filepath.Join("..", "..", "testdata", "plugins", "go", plugin)), "."))
 
-	dispatcher, err := goabi.RenderDispatcher(fooerType(), nil)
+	dispatcher, err := goabi.RenderDispatcher(fooerType(), nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, tree.Add(path.Join("src", goabi.DispatchImportPath, "dispatch.go"), dispatcher))
 

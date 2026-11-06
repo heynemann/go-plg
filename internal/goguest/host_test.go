@@ -82,7 +82,7 @@ func hostedPayload(t *testing.T, root string, hostMethods []string) []byte {
 func hostedDispatcher(t *testing.T) string {
 	t.Helper()
 
-	src, err := goabi.RenderDispatcher(hostedType(), hostType())
+	src, err := goabi.RenderDispatcher(hostedType(), hostType(), nil)
 	require.NoError(t, err)
 
 	return string(src)

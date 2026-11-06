@@ -28,15 +28,22 @@ func TestGuestSymbolsMatchTheAllowlist(t *testing.T) {
 	var extracted []string
 
 	for _, file := range files {
-		name := filepath.Base(file)
-		if name == "symbols.go" { // the hand-written registry
-			continue
+		if name := filepath.Base(file); name != "symbols.go" { // the hand-written registry
+			extracted = append(extracted, name)
 		}
-
-		extracted = append(extracted, strings.ReplaceAll(strings.TrimSuffix(name, ".go"), "-", "/"))
 	}
 
-	want := slices.DeleteFunc(goallow.Packages(), func(pkg string) bool { return pkg == "cmp" })
+	// yaegi extract names a package's file after its import path, with / as - and . as _.
+	fileName := strings.NewReplacer("/", "-", ".", "_").Replace
+
+	var want []string
+
+	for _, pkg := range goallow.Packages() {
+		if pkg != "cmp" {
+			want = append(want, fileName(pkg)+".go")
+		}
+	}
+
 	slices.Sort(want)
 	slices.Sort(extracted)
 	assert.Equal(t, want, extracted)

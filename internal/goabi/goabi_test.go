@@ -36,6 +36,7 @@ func TestInitPayloadRoundTrip(t *testing.T) {
 			GoPath: "/gopath", Dispatch: "d", Methods: []string{"Foo"}, Host: "contract.Host",
 			HostPath: "example.com/contract", HostMethods: []string{"Lookup", "Sum"},
 		},
+		{GoPath: "/gopath", Dispatch: "d", Methods: []string{"Foo"}, HostMethods: []string{}, Validate: true},
 	} {
 		b, err := payload.Append(nil)
 		require.NoError(t, err)
@@ -58,12 +59,15 @@ func TestDecodeInitPayloadRejectsMalformedInput(t *testing.T) {
 	hostOffset := countOffset + 8 + 2*(4+1)           // the method count and the two methods
 	hostCountOffset := hostOffset + (4 + 3) + (4 + 1) // the host and its path
 	methodsEnd := hostOffset                          // where the methods end
-	hostMethodsEnd := len(valid)                      // where the host methods end
+	hostMethodsEnd := len(valid) - 8                  // where the host methods end, before the validate flag
 	hugeCount := bytes.Clone(valid)
 	copy(hugeCount[countOffset:], wire.AppendUint(nil, 1<<40))
 
 	hugeHostCount := bytes.Clone(valid)
 	copy(hugeHostCount[hostCountOffset:], wire.AppendUint(nil, 1<<40))
+
+	badFlag := bytes.Clone(valid)
+	copy(badFlag[hostMethodsEnd:], wire.AppendUint(nil, 2))
 
 	tests := []struct {
 		name string
@@ -80,7 +84,9 @@ func TestDecodeInitPayloadRejectsMalformedInput(t *testing.T) {
 		{"truncated host method count", "host method count", valid[:hostCountOffset+3]},
 		{"host method count beyond the payload", "host method count exceeds the payload", hugeHostCount},
 		{"truncated host method", "host method 0", valid[:hostMethodsEnd-1]},
-		{"trailing bytes", "after host methods: wire: trailing", append(bytes.Clone(valid), 0)},
+		{"truncated validate flag", "validate flag: wire", valid[:len(valid)-1]},
+		{"validate flag neither 0 nor 1", "validate flag 2: a flag is 0 or 1", badFlag},
+		{"trailing bytes", "after the validate flag: wire: trailing", append(bytes.Clone(valid), 0)},
 	}
 
 	for _, tc := range tests {
@@ -117,7 +123,7 @@ func FuzzDecodeInitPayload(f *testing.F) {
 func TestRenderDispatcherForTheTestContract(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil)
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil, nil)
 	require.NoError(t, err)
 
 	file := parse(t, src)
@@ -153,7 +159,7 @@ func TestRenderDispatcherForTheTestContract(t *testing.T) {
 
 	assert.NotContains(t, string(src), "plgHost", "without a Host, there are no stubs")
 
-	again, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil)
+	again, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, src, again, "rendering is deterministic")
 }
@@ -161,7 +167,11 @@ func TestRenderDispatcherForTheTestContract(t *testing.T) {
 func TestRenderDispatcherWithAHost(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Hosted](), reflect.TypeFor[testcontract.Host]())
+	src, err := goabi.RenderDispatcher(
+		reflect.TypeFor[testcontract.Hosted](),
+		reflect.TypeFor[testcontract.Host](),
+		nil,
+	)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -179,7 +189,7 @@ func TestRenderDispatcherWithAHost(t *testing.T) {
 	}
 
 	// A Host from another package is imported too; a method without results is forwarded without return.
-	src, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), reflect.TypeFor[Shapes]())
+	src, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), reflect.TypeFor[Shapes](), nil)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -225,7 +235,7 @@ type (
 func TestRenderDispatcherTypeExpressions(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[Shapes](), nil)
+	src, err := goabi.RenderDispatcher(reflect.TypeFor[Shapes](), nil, nil)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -251,8 +261,9 @@ type (
 	Pair   = struct{ A, B int }
 	Time   = time.Time // named as its type: embedded as p.Time
 	// Embedded is another alias of the name testcontract.Embedded has.
-	Embedded = Point
-	PlgClose = Point
+	Embedded    = Point
+	PlgClose    = Point
+	PlgValidate = Point
 
 	PlgHostCall_Point = Point //nolint:revive,staticcheck // var-naming, ST1003: the name of a Host stub variable
 	aliasShapes       interface {
@@ -272,6 +283,9 @@ type (
 	reservedPrefixAlias interface {
 		M(ctx context.Context, s struct{ PlgHostCall_Point }) error
 	}
+	reservedValidateAlias interface {
+		M(ctx context.Context, s struct{ PlgValidate }) error
+	}
 )
 
 // TestRenderDispatcherKeepsEmbeddedAliases checks embedded fields whose name is not their type's: reflection
@@ -280,8 +294,11 @@ type (
 func TestRenderDispatcherKeepsEmbeddedAliases(t *testing.T) {
 	t.Parallel()
 
-	src, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Aliased](),
-		reflect.TypeFor[testcontract.AliasHost]())
+	src, err := goabi.RenderDispatcher(
+		reflect.TypeFor[testcontract.Aliased](),
+		reflect.TypeFor[testcontract.AliasHost](),
+		nil,
+	)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -297,7 +314,7 @@ func TestRenderDispatcherKeepsEmbeddedAliases(t *testing.T) {
 		assert.Contains(t, text, want)
 	}
 
-	src, err = goabi.RenderDispatcher(reflect.TypeFor[aliasShapes](), nil)
+	src, err = goabi.RenderDispatcher(reflect.TypeFor[aliasShapes](), nil, nil)
 	require.NoError(t, err)
 	parse(t, src)
 
@@ -375,16 +392,66 @@ func TestRenderDispatcherRejects(t *testing.T) {
 			"alias named as a Host stub variable", reflect.TypeFor[reservedPrefixAlias](),
 			"embedded field PlgHostCall_Point (of type goabi_test.Point) has a name the dispatcher declares",
 		},
+		{
+			"alias named as the dispatcher's Validate variable", reflect.TypeFor[reservedValidateAlias](),
+			"embedded field PlgValidate (of type goabi_test.Point) has a name the dispatcher declares",
+		},
 	}
 
 	for _, tc := range tests {
-		_, err := goabi.RenderDispatcher(tc.typ, nil)
+		_, err := goabi.RenderDispatcher(tc.typ, nil, nil)
 		require.ErrorIs(t, err, goabi.ErrRender, tc.name)
 		require.ErrorContains(t, err, tc.msg, tc.name)
 
-		_, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), tc.typ)
+		_, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), tc.typ, nil)
 		require.ErrorIs(t, err, goabi.ErrRender, tc.name+" as the host")
 		require.ErrorContains(t, err, "host: ", tc.name+" as the host")
 		require.ErrorContains(t, err, tc.msg, tc.name+" as the host")
 	}
+}
+
+// TestRenderDispatcherWithValidation renders the dispatcher of validating plugins: PlgInit binds the instance's
+// Validate, taking the input type and returning plugin.Issue values, to PlgValidate through a recovering binder.
+// Without a validation input there is no Validate binding; a generic input cannot be rendered.
+func TestRenderDispatcherWithValidation(t *testing.T) {
+	t.Parallel()
+
+	src, err := goabi.RenderDispatcher(
+		reflect.TypeFor[testcontract.Fooer](),
+		nil,
+		reflect.TypeFor[testcontract.Check](),
+	)
+	require.NoError(t, err)
+
+	file := parse(t, src)
+	imports := map[string]string{}
+
+	for _, imp := range file.Imports {
+		imports[strings.Trim(imp.Path.Value, `"`)] = imp.Name.Name
+	}
+
+	assert.Equal(t, map[string]string{
+		"context": "p0",
+		reflect.TypeFor[testcontract.Fooer]().PkgPath(): "p1",
+		"github.com/heynemann/go-plg/plugin":            "p2",
+		goabi.PluginImportPath:                          "plugin",
+	}, imports, "the plugin package is imported under an alias: plugin names the plugin's own package")
+
+	for _, want := range []string{
+		"var PlgValidate func(p0.Context, p1.Check) ([]p2.Issue, error)\n",
+		"\tPlgValidate = plgBindValidate(v)\n",
+		"type plgValidator interface{ Validate(p0.Context, p1.Check) ([]p2.Issue, error) }",
+		"func plgBindValidate(v p1.Fooer) (f func(p0.Context, p1.Check) ([]p2.Issue, error)) {",
+		"\t\tf = c.Validate\n",
+	} {
+		assert.Contains(t, string(src), want)
+	}
+
+	plain, err := goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, string(plain), "Validate")
+
+	_, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil, reflect.TypeFor[generic[int]]())
+	require.ErrorIs(t, err, goabi.ErrRender)
+	require.ErrorContains(t, err, "validate: goabi: cannot render dispatcher: generic type")
 }

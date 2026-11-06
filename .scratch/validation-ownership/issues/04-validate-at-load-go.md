@@ -10,12 +10,12 @@ At load, after Create succeeds, plg starts a separate throwaway instance (charge
 
 **Blocked by:** 03 (Ownership checks and load reports)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Integration tests with real Go plugins: valid, warnings only, error issues (blocked Register, kept-last-good reload), Validate returning an error, panicking, looping past the timeout, missing `Validate`, wrong signatures (each with a clear message), the extra-leading-parameter case
-- [ ] Validation runs in its own instance (serving instances' state untouched; asserted) and is charged to and released from the budget; no budget room fails with `ErrMemoryBudget` without waiting
-- [ ] Host and HTTP work during validation and Host methods see `plg.IsValidation(ctx)`
-- [ ] Contract validation rejects a `V` that is not a data type or not from the contract package
-- [ ] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] Integration tests with real Go plugins: valid, warnings only, error issues (blocked Register, kept-last-good reload), Validate returning an error, panicking, looping past the timeout, missing `Validate`, wrong signatures (each with a clear message), the extra-leading-parameter case
+- [x] Validation runs in its own instance (serving instances' state untouched; asserted) and is charged to and released from the budget; no budget room fails with `ErrMemoryBudget` without waiting
+- [x] Host and HTTP work during validation and Host methods see `plg.IsValidation(ctx)`
+- [x] Contract validation rejects a `V` that is not a data type or not from the contract package
+- [x] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

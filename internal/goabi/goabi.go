@@ -37,6 +37,12 @@ const (
 	// CloseVar is the dispatcher variable [InitFunc] binds to the plugin instance's optional Close (a method
 	// Close() error or Close()); it stays nil when the instance has none.
 	CloseVar = "PlgClose"
+	// ValidateVar is the dispatcher variable [InitFunc] binds, when the plugins validate ([InitPayload.Validate]),
+	// to the plugin instance's method Validate(context.Context, V) ([]plugin.Issue, error); it stays nil when the
+	// instance has no method of that type. The guest calls it as the method of index len([InitPayload.Methods]).
+	ValidateVar = "PlgValidate"
+	// ValidateMethod is the name of the plugin instance's validation method.
+	ValidateMethod = "Validate"
 )
 
 // ErrPayload reports a malformed init payload.
@@ -57,6 +63,9 @@ type InitPayload struct {
 	HostPath string
 	// HostMethods lists the Host interface's method names; a host_call's method index refers to this order.
 	HostMethods []string
+	// Validate tells the guest that the dispatcher binds [ValidateVar], which it serves as the method of index
+	// len(Methods).
+	Validate bool
 }
 
 // Append appends the encoding of p. It fails only for a string over 4 GiB.
@@ -74,7 +83,17 @@ func (p *InitPayload) Append(dst []byte) ([]byte, error) {
 		return dst, err
 	}
 
-	return appendStrings(wire.AppendUint(dst, uint64(len(p.HostMethods))), p.HostMethods...)
+	dst, err = appendStrings(wire.AppendUint(dst, uint64(len(p.HostMethods))), p.HostMethods...)
+	if err != nil {
+		return dst, err
+	}
+
+	validate := uint64(0)
+	if p.Validate {
+		validate = 1
+	}
+
+	return wire.AppendUint(dst, validate), nil
 }
 
 func appendStrings(dst []byte, strs ...string) ([]byte, error) {
@@ -93,7 +112,10 @@ func appendStrings(dst []byte, strs ...string) ([]byte, error) {
 // minStringSize is the encoded size of an empty string; it bounds how many methods a payload can describe.
 const minStringSize = 4
 
-var errCount = errors.New("count exceeds the payload")
+var (
+	errCount = errors.New("count exceeds the payload")
+	errFlag  = errors.New("a flag is 0 or 1")
+)
 
 // DecodeInitPayload decodes what [InitPayload.Append] wrote. It never allocates more than the input justifies.
 func DecodeInitPayload(b []byte) (InitPayload, error) {
@@ -138,13 +160,23 @@ func decodePayload(reader *wire.Reader) (InitPayload, error) {
 		return InitPayload{}, err
 	}
 
+	validate, err := reader.Uint64()
+	if err != nil {
+		return InitPayload{}, fmt.Errorf("validate flag: %w", err)
+	}
+
+	if validate > 1 {
+		return InitPayload{}, fmt.Errorf("validate flag %d: %w", validate, errFlag)
+	}
+
 	err = reader.End()
 	if err != nil {
-		return InitPayload{}, fmt.Errorf("after host methods: %w", err)
+		return InitPayload{}, fmt.Errorf("after the validate flag: %w", err)
 	}
 
 	return InitPayload{
 		GoPath: goPath, Dispatch: dispatch, Methods: methods, Host: host, HostPath: hostPath, HostMethods: hostMethods,
+		Validate: validate == 1,
 	}, nil
 }
 

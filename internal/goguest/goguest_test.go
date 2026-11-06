@@ -52,7 +52,7 @@ func methodNames() []string {
 func gopath(t *testing.T, plugin map[string]string) string {
 	t.Helper()
 
-	dispatcher, err := goabi.RenderDispatcher(fooerType(), nil)
+	dispatcher, err := goabi.RenderDispatcher(fooerType(), nil, nil)
 	require.NoError(t, err)
 
 	return gopathWith(t, plugin, string(dispatcher))

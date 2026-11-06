@@ -23,6 +23,9 @@ type Hooks struct {
 	// Attr is logged with every request, after the key (the plugin's owner); a zero Attr, or an empty group, is
 	// left out by slog's handlers.
 	Attr slog.Attr
+	// Mark, when not nil, returns an attribute logged with a request after Attr, from the request's context (the
+	// plugin call's); a zero Attr is left out.
+	Mark func(ctx context.Context) slog.Attr
 }
 
 // Outcome is how a request ended.
@@ -98,14 +101,14 @@ func (c *Client) answer(ctx context.Context, key string, hooks Hooks, start time
 
 	out, err := c.do(ctx, &xch, dst, req, n)
 	if err != nil {
-		c.log(ctx, key, hooks.Attr, &xch, err)
+		c.log(ctx, key, &hooks, &xch, err)
 		hooks.Done(ctx, Report{Duration: time.Since(start), Sent: xch.sent, Outcome: outcome(err)})
 
 		return httpabi.AppendFailure(out[:head], message(err))
 	}
 
 	xch.received = len(out) - head
-	c.log(ctx, key, hooks.Attr, &xch, nil)
+	c.log(ctx, key, &hooks, &xch, nil)
 	hooks.Done(ctx, Report{
 		Duration: time.Since(start), Status: xch.status, Sent: xch.sent, Received: xch.received, Outcome: OutcomeOK,
 	})
@@ -280,10 +283,17 @@ func message(err error) string {
 	return err.Error()
 }
 
-func (c *Client) log(ctx context.Context, key string, extra slog.Attr, xch *exchange, err error) {
+func (c *Client) log(ctx context.Context, key string, hooks *Hooks, xch *exchange, err error) {
+	var mark slog.Attr
+
+	if hooks.Mark != nil {
+		mark = hooks.Mark(ctx)
+	}
+
 	attrs := []slog.Attr{
 		slog.String("key", key),
-		extra,
+		hooks.Attr,
+		mark,
 		slog.String("method", xch.method),
 		slog.String("url", xch.target),
 		slog.Duration("duration", time.Since(xch.start)),

@@ -27,11 +27,13 @@ const (
 )
 
 var (
-	errNoCreate   = errors.New("plugin package must declare Create")
-	errCreateType = errors.New("plugin Create has the wrong type")
-	errCallType   = errors.New("dispatcher function has the wrong type; want func(context.Context, ...) (..., error)")
-	errAnswer     = errors.New("malformed host answer")
-	errCloseType  = errors.New("dispatcher close variable has the wrong type; want func() error")
+	errNoCreate     = errors.New("plugin package must declare Create")
+	errCreateType   = errors.New("plugin Create has the wrong type")
+	errCallType     = errors.New("dispatcher function has the wrong type; want func(context.Context, ...) (..., error)")
+	errAnswer       = errors.New("malformed host answer")
+	errCloseType    = errors.New("dispatcher close variable has the wrong type; want func() error")
+	errValidateType = errors.New("dispatcher validate variable has the wrong type; want " +
+		"func(context.Context, V) ([]plugin.Issue, error)")
 )
 
 // HostFunc sends the encoded arguments of a call to the Host method with the given index (the order of
@@ -51,9 +53,12 @@ type Guest struct {
 	hostArgs   []byte        // encoded arguments of the current host call
 	hostAnswer []byte        // the host's answer to it
 	methods    []method
-	started    bool // Init ran; it runs at most once
-	ready      bool // Init succeeded
-	closed     bool
+	// validate is the dispatcher's [goabi.ValidateVar], served as the method of index len(methods) when the plugins
+	// validate; its fn is the zero Value otherwise, and nil when the instance has no Validate of the right type.
+	validate method
+	started  bool // Init ran; it runs at most once
+	ready    bool // Init succeeded
+	closed   bool
 }
 
 type method struct {
@@ -88,7 +93,8 @@ func (g *Guest) Init(size uint32) []byte {
 }
 
 // Call invokes method index with the arguments encoded in the first size bytes of the input buffer. It returns
-// a status-prefixed result buffer.
+// a status-prefixed result buffer. When the plugins validate, index len(Methods) of the init payload calls the
+// instance's Validate, answering [wire.StatusLoad] when the instance has none of the expected type.
 func (g *Guest) Call(index, size uint32) []byte {
 	return g.guarded(func() []byte { return g.invoke(index, size) })
 }
@@ -194,11 +200,14 @@ func (g *Guest) invoke(index, size uint32) []byte {
 		return g.fail(wire.StatusABI, "guest not initialized")
 	}
 
-	if int(index) >= len(g.methods) {
+	meth, ok := g.method(index)
+	if !ok {
 		return g.fail(wire.StatusABI, "unknown method index "+strconv.FormatUint(uint64(index), 10))
 	}
 
-	meth := &g.methods[index]
+	if meth.fn.IsNil() { // the plugins validate, but the instance has no Validate of the expected type
+		return g.fail(wire.StatusLoad, "plugin instance has no method "+goabi.ValidateMethod+" of the expected type")
+	}
 
 	err := meth.decodeArgs(payload)
 	if err != nil {
@@ -255,29 +264,55 @@ func (g *Guest) load(payload *goabi.InitPayload) (reflect.Value, wire.Status, er
 		return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
 	}
 
-	var planner wire.Planner // shared by the methods, so each type is planned once
-
-	for i, name := range payload.HostMethods {
-		err = g.bindHost(interpreter, &planner, i, name)
-		if err != nil {
-			return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
-		}
-	}
-
-	g.methods = make([]method, len(payload.Methods))
-	for i, name := range payload.Methods {
-		err = g.methods[i].resolve(interpreter, &planner, name)
-		if err != nil {
-			return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
-		}
-	}
-
-	g.closer, err = resolveCloser(interpreter)
+	err = g.resolve(interpreter, payload)
 	if err != nil {
 		return reflect.Value{}, wire.StatusABI, fmt.Errorf("dispatcher: %w", err)
 	}
 
 	return initFn, 0, nil
+}
+
+// resolve resolves the dispatcher's functions: the Host methods' stubs, the interface's methods, the instance's
+// Close and, when the plugins validate, its Validate.
+func (g *Guest) resolve(interpreter *interp.Interpreter, payload *goabi.InitPayload) error {
+	var planner wire.Planner // shared by the methods, so each type is planned once
+
+	for i, name := range payload.HostMethods {
+		err := g.bindHost(interpreter, &planner, i, name)
+		if err != nil {
+			return err
+		}
+	}
+
+	g.methods = make([]method, len(payload.Methods))
+	for i, name := range payload.Methods {
+		err := g.methods[i].resolve(interpreter, &planner, name)
+		if err != nil {
+			return err
+		}
+	}
+
+	var err error
+
+	g.closer, err = resolveCloser(interpreter)
+	if err != nil || !payload.Validate {
+		return err
+	}
+
+	return g.validate.resolveValidate(interpreter, &planner)
+}
+
+// method returns the method of the given index: one of the interface's, or Validate at index len(methods) when
+// the plugins validate.
+func (g *Guest) method(index uint32) (*method, bool) {
+	switch {
+	case int(index) < len(g.methods):
+		return &g.methods[index], true
+	case int(index) == len(g.methods) && g.validate.fn.IsValid():
+		return &g.validate, true
+	default:
+		return nil, false
+	}
 }
 
 // resolveCloser looks up the dispatcher's variable holding the instance's optional Close, bound by
@@ -293,6 +328,24 @@ func resolveCloser(interpreter *interp.Interpreter) (reflect.Value, error) {
 	}
 
 	return closer, nil
+}
+
+// resolveValidate looks up the dispatcher's variable holding the instance's Validate, bound by [goabi.InitFunc]
+// (nil when the instance has none of the expected type), and builds its codecs.
+func (m *method) resolveValidate(interpreter *interp.Interpreter, planner *wire.Planner) error {
+	fn, err := interpreter.Eval(dispatchAlias + "." + goabi.ValidateVar)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", goabi.ValidateVar, err)
+	}
+
+	typ := fn.Type()
+	if !methodShaped(typ) || typ.NumIn() != 2 || typ.NumOut() != 2 {
+		return fmt.Errorf("%w: %s has type %s", errValidateType, goabi.ValidateVar, typ)
+	}
+
+	m.name, m.fn = goabi.ValidateMethod, fn
+
+	return m.buildCodecs(planner, typ)
 }
 
 // checkCreate imports the plugin package and checks that it declares func Create() (T, error), or

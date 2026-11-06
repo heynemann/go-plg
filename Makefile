@@ -31,14 +31,14 @@ GOLANGCI_LINT_VERSION := v2.14.0
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)/golangci-lint
 export GOLANGCI_LINT_CACHE := $(BIN)/golangci-lint-cache
 
-# The Go guest's standard library allowlist (PLAN.md) has one source, internal/goallow/packages.txt, which
-# `plg gen` and the tests read too. Symbol tables are extracted for every package except cmp (yaegi compiles it
-# from source) and two extracted separately: encoding/json, whose Options interface has a method on an internal
-# type, so its wrapper cannot be generated and is excluded; and net/http, whose client side only is allowlisted
-# (requests go through the host transport; the guest has no sockets), so the server-side symbols in
-# GUEST_HTTP_SERVER are left out.
+# The Go guest's import allowlist (PLAN.md: the standard library packages plugins may import and plg's plugin
+# package) has one source, internal/goallow/packages.txt, which `plg gen` and the tests read too. Symbol tables
+# are extracted for every package except cmp (yaegi compiles it from source) and two extracted separately:
+# encoding/json, whose Options interface has a method on an internal type, so its wrapper cannot be generated
+# and is excluded; and net/http, whose client side only is allowlisted (requests go through the host transport;
+# the guest has no sockets), so the server-side symbols in GUEST_HTTP_SERVER are left out.
 GUEST_ALLOWLIST := $(shell sed -e 's/#.*//' internal/goallow/packages.txt)
-GUEST_STDLIB := $(filter-out cmp encoding/json net/http,$(GUEST_ALLOWLIST))
+GUEST_EXTRACTED := $(filter-out cmp encoding/json net/http,$(GUEST_ALLOWLIST))
 GUEST_HTTP_SERVER := AllowQuerySemicolons CloseNotifier ConnState CrossOriginProtection DefaultServeMux Dir \
 	Error ErrAbortHandler ErrBodyNotAllowed ErrHandlerTimeout ErrHijacked ErrServerClosed ErrSkipAltProtocol \
 	ErrWriteAfterFlush FS File FileServer FileServerFS FileSystem Flusher Handle HandleFunc Handler HandlerFunc \
@@ -188,10 +188,10 @@ bench:
 $(BIN)/yaegi: go.mod go.sum
 	go build -o $@ github.com/traefik/yaegi/cmd/yaegi
 
-# Regenerate the guest's stdlib symbol tables with yaegi extract, for the wasip1 target.
+# Regenerate the guest's symbol tables of the allowlist with yaegi extract, for the wasip1 target.
 symbols: $(BIN)/yaegi
 	find $(GUEST_SYMBOLS) -name '*.go' ! -name symbols.go -delete
-	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols $(GUEST_STDLIB)
+	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols $(GUEST_EXTRACTED)
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 

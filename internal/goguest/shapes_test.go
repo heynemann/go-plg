@@ -24,7 +24,7 @@ func shaperType() reflect.Type { return reflect.TypeFor[testcontract.Shaper]() }
 func loadShaper(t *testing.T) *goguest.Guest {
 	t.Helper()
 
-	dispatcher, err := goabi.RenderDispatcher(shaperType(), nil)
+	dispatcher, err := goabi.RenderDispatcher(shaperType(), nil, nil)
 	require.NoError(t, err)
 
 	names := make([]string, shaperType().NumMethod())

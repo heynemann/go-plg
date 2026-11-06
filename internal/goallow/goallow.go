@@ -1,6 +1,6 @@
-// Package goallow is the Go guest's standard library allowlist: the packages Go plugins and contract packages
-// may import. The list lives in packages.txt, which the Makefile also reads to extract the guest's symbol tables,
-// so the guest, `plg gen` and the tests agree on one list.
+// Package goallow is the Go guest's import allowlist: the packages Go plugins and contract packages may import
+// (standard library packages and plg's plugin package). The list lives in packages.txt, which the Makefile also
+// reads to extract the guest's symbol tables, so the guest, `plg gen` and the tests agree on one list.
 package goallow
 
 import (

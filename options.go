@@ -96,22 +96,24 @@ const (
 )
 
 type registerConfig struct {
-	http          *HTTPPolicy     // nil: HTTP refused
-	httpRoots     *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
-	goGuest       *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
-	ownership     Severity        // of a missing-ownership issue: a warning, an error with WithRequiredOwnership
-	storages      []Storage
-	languages     []Language    // enabled languages; empty enables every language
-	hosts         []hostSpec    // WithHost options; at most one is valid
-	goGuests      [][]byte      // WithGoGuest options; at most one is valid
-	memoryLimit   uint64        // per-instance limit, whole pages
-	pollInterval  time.Duration // zero: no polling
-	poolMin       int
-	poolMax       int
-	concurrent    int // WithConcurrentCalls
-	poolSet       bool
-	limitSet      bool
-	concurrentSet bool
+	http              *HTTPPolicy     // nil: HTTP refused
+	httpRoots         *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
+	goGuest           *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
+	ownership         Severity        // of a missing-ownership issue: a warning, an error with WithRequiredOwnership
+	storages          []Storage
+	languages         []Language       // enabled languages; empty enables every language
+	hosts             []hostSpec       // WithHost options; at most one is valid
+	goGuests          [][]byte         // WithGoGuest options; at most one is valid
+	validations       []validationSpec // WithValidation options; at most one is valid
+	memoryLimit       uint64           // per-instance limit, whole pages
+	pollInterval      time.Duration    // zero: no polling
+	validationTimeout time.Duration    // WithValidationTimeout
+	poolMin           int
+	poolMax           int
+	concurrent        int // WithConcurrentCalls
+	poolSet           bool
+	limitSet          bool
+	concurrentSet     bool
 }
 
 // enabled reports whether the Register runs plugins in lang.
@@ -122,7 +124,7 @@ func (c *registerConfig) enabled(lang Language) bool {
 // registerOptions applies a Register call's options and checks them: at least one non-nil storage, valid pool
 // and memory options, whose defaults it fills in, and a poll interval that is not negative.
 func registerOptions(name string, opts []RegisterOption) (*registerConfig, error) {
-	cfg := &registerConfig{ownership: SeverityWarning}
+	cfg := &registerConfig{ownership: SeverityWarning, validationTimeout: defaultValidationTimeout}
 
 	for _, opt := range opts {
 		opt(cfg)

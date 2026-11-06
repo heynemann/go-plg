@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"io/fs"
 	"path"
+	"reflect"
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/engine"
@@ -29,6 +30,8 @@ func (goLoader) memoryLimit() uint64 { return goMemoryLimit }
 
 func (goLoader) multiplexes() bool { return false }
 
+func (goLoader) validates() bool { return true }
+
 func (goLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,
 ) {
@@ -44,6 +47,114 @@ var (
 	errEntrypointPath = errors.New("entrypoint is not a valid path")
 	errEntrypointFile = errors.New("entrypoint is neither a directory nor a .go file")
 )
+
+// renderGo renders the Go dispatcher of the registration's plugins and their init payload for the contract with
+// its Host, if any, and its validation, if any. A dispatcher that cannot be rendered (embedded aliases the Host's
+// types clash with) fails with [ErrInvalidHost], or [ErrInvalidOption] without a Host: the validation input is a
+// named type, which renders as its name.
+func (r *registration) renderGo() error {
+	payload := goabi.InitPayload{
+		GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath, Validate: r.validation != nil,
+	}
+	for _, meth := range r.contr.methods {
+		payload.Methods = append(payload.Methods, meth.name)
+	}
+
+	var hostIface, input reflect.Type
+
+	if r.host != nil {
+		hostIface, payload.Host, payload.HostPath = r.host.iface, r.host.iface.String(), r.host.iface.PkgPath()
+		for _, meth := range r.host.methods {
+			payload.HostMethods = append(payload.HostMethods, meth.name)
+		}
+	}
+
+	if r.validation != nil {
+		input = r.validation.typ
+	}
+
+	dispatcher, err := goabi.RenderDispatcher(r.contr.iface, hostIface, input)
+	if err != nil && r.host != nil {
+		return fmt.Errorf("%w %s: rendering the Go dispatcher: %w", ErrInvalidHost, r.host.iface, err)
+	}
+
+	if err != nil {
+		return fmt.Errorf("%w: rendering the Go dispatcher: %w", ErrInvalidOption, err)
+	}
+
+	encoded, err := payload.Append(nil)
+	if err != nil { // the interfaces passed validation, so their names encode
+		return fmt.Errorf("%w: encoding the Go init payload: %w", ErrInvalidOption, err)
+	}
+
+	r.dispatcher, r.goPayload = dispatcher, encoded
+
+	return nil
+}
+
+// goExt is the extension of Go source files.
+const goExt = ".go"
+
+// isGoSource reports whether the entry named name is a Go source file a plugin instance receives: a regular .go
+// file that is not a test.
+func isGoSource(name string, entry fs.DirEntry) bool {
+	return entry.Type().IsRegular() && path.Ext(name) == goExt && !strings.HasSuffix(name, "_test.go")
+}
+
+// goValidateMissing explains a Go plugin version whose instance has no method want (Validate of the expected
+// signature), from the plugin's package source (the directory of its entrypoint): the Validate methods it
+// declares, with their positions, or that it declares none. yaegi binds a Validate of another signature as no
+// method at all, so the source is the way to show what the plugin has instead.
+func goValidateMissing(files fs.FS, entrypoint, want string) string {
+	dir, err := goPackageDir(files, entrypoint)
+	if err != nil { // the version loaded from this entrypoint
+		return "the plugin instance has no method " + want
+	}
+
+	var declared []string
+
+	entries, _ := fs.ReadDir(files, dir) //nolint:errcheck // the version loaded from this directory
+	fset := token.NewFileSet()
+
+	for _, entry := range entries {
+		name := path.Join(dir, entry.Name())
+		if isGoSource(name, entry) {
+			declared = append(declared, declaredValidates(files, fset, name)...)
+		}
+	}
+
+	if len(declared) == 0 {
+		return "the plugin instance has no method " + want + ", and the plugin declares no method Validate"
+	}
+
+	return "the plugin instance has no method " + want + "; the plugin declares " + strings.Join(declared, ", ")
+}
+
+// declaredValidates returns the Validate methods the Go source file name declares, each as its signature
+// followed by its position; none when the file cannot be read or parsed.
+func declaredValidates(files fs.FS, fset *token.FileSet, name string) []string {
+	src, err := fs.ReadFile(files, name)
+	if err != nil {
+		return nil
+	}
+
+	file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil
+	}
+
+	var declared []string
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Recv != nil && fn.Name.Name == goabi.ValidateMethod {
+			head := string(src[fset.Position(fn.Pos()).Offset:fset.Position(fn.Type.End()).Offset])
+			declared = append(declared, head+" ("+fset.Position(fn.Pos()).String()+")")
+		}
+	}
+
+	return declared
+}
 
 // goSourceTree returns the tree a Go plugin instance mounts at [goabi.GoPath]: the contract package's source
 // at its import path, the plugin's package directory at [goabi.PluginImportPath] and the dispatcher at
@@ -97,7 +208,7 @@ func goPackageDir(files fs.FS, entrypoint string) (string, error) {
 	switch {
 	case info.IsDir():
 		return entrypoint, nil
-	case info.Mode().IsRegular() && path.Ext(entrypoint) == ".go":
+	case info.Mode().IsRegular() && path.Ext(entrypoint) == goExt:
 		return path.Dir(entrypoint), nil
 	default:
 		return "", fmt.Errorf("%w: %q", errEntrypointFile, entrypoint)
@@ -114,7 +225,7 @@ func checkNoGoStatements(files fs.FS, dir string) error {
 	var found []string
 
 	err := fs.WalkDir(files, dir, func(name string, entry fs.DirEntry, err error) error {
-		if err != nil || !entry.Type().IsRegular() || path.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+		if err != nil || !isGoSource(name, entry) {
 			return err
 		}
 

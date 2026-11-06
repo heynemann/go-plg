@@ -7,7 +7,6 @@ import (
 	"reflect"
 
 	"github.com/heynemann/go-plg/internal/engine"
-	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -40,14 +39,11 @@ type hostSpec struct {
 }
 
 // host is a Register call's Host, prepared once: the call plans of its methods (shared with the plugin
-// methods' code: arguments after the context, results before the error), impl's bound methods, and the Go
-// dispatcher and init payload rendered for the contract with this Host.
+// methods' code: arguments after the context, results before the error) and impl's bound methods.
 type host struct {
-	iface      reflect.Type
-	methods    []*method
-	funcs      []reflect.Value // impl's method values, in iface's method order
-	dispatcher []byte
-	payload    []byte
+	iface   reflect.Type
+	methods []*method
+	funcs   []reflect.Value // impl's method values, in iface's method order
 }
 
 var (
@@ -87,11 +83,6 @@ func newHost(contr *contract, specs []hostSpec) (*host, error) {
 			ErrInvalidHost, spec.iface, errHostPackage, contr.iface.PkgPath(), contr.iface, spec.iface.PkgPath())
 	}
 
-	err = prepared.renderGo(contr)
-	if err != nil {
-		return nil, fmt.Errorf("%w %s: %w", ErrInvalidHost, spec.iface, err)
-	}
-
 	return prepared, nil
 }
 
@@ -115,34 +106,6 @@ func planHost(spec hostSpec) (*host, error) {
 	}
 
 	return prepared, nil
-}
-
-// renderGo renders the dispatcher of the contract's Go plugins with this Host's stubs, and their init payload.
-func (h *host) renderGo(contr *contract) error {
-	var err error
-
-	h.dispatcher, err = goabi.RenderDispatcher(contr.iface, h.iface)
-	if err != nil {
-		return fmt.Errorf("rendering the Go dispatcher: %w", err)
-	}
-
-	payload := goabi.InitPayload{
-		GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath, Host: h.iface.String(), HostPath: h.iface.PkgPath(),
-	}
-	for _, meth := range contr.methods {
-		payload.Methods = append(payload.Methods, meth.name)
-	}
-
-	for _, meth := range h.methods {
-		payload.HostMethods = append(payload.HostMethods, meth.name)
-	}
-
-	h.payload, err = payload.Append(nil)
-	if err != nil {
-		return fmt.Errorf("encoding the Go init payload: %w", err)
-	}
-
-	return nil
 }
 
 var (

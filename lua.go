@@ -33,6 +33,8 @@ func (luaLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
 func (luaLoader) multiplexes() bool { return true }
 
+func (luaLoader) validates() bool { return false }
+
 func (luaLoader) prepare(_ context.Context, _ *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,
 ) {

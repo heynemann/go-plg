@@ -56,12 +56,17 @@ var (
 	// ErrGuestNotLinked reports a plugin whose language guest package is not imported by the program.
 	ErrGuestNotLinked = errors.New("plg: guest not linked")
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not
-	// compile, or its Create failed.
+	// compile, its Create failed, or it failed its checks (ownership, validation).
 	ErrLoad = errors.New("plg: plugin failed to load")
 	// ErrBlockingIssue reports a plugin version whose load found an [Issue] of [SeverityError] (or of a severity
-	// plg does not know), such as missing ownership under [WithRequiredOwnership]; the message gives each such
-	// issue's code and message. It is wrapped in [ErrLoad].
+	// plg does not know), such as missing ownership under [WithRequiredOwnership] or one its Validate returned
+	// ([WithValidation]); the message gives each such issue's code and message. It is wrapped in [ErrLoad].
 	ErrBlockingIssue = errors.New("plg: load blocked by an error issue")
+	// ErrValidation reports a plugin version that could not be validated ([WithValidation]): its instance has no
+	// Validate of the expected signature (the message shows the one the plugin declares), or Validate returned
+	// an error, panicked, trapped or ran past the validation timeout, or the plugin's language cannot validate.
+	// It is wrapped in [ErrLoad].
+	ErrValidation = errors.New("plg: plugin validation failed")
 	// ErrGoStatement reports a Go plugin whose source contains go statements; the message names the file, line
 	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
 	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance

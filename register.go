@@ -72,16 +72,17 @@ type registration struct {
 	cfg        *registerConfig
 	http       *httpcap.Client             // enforces the call's HTTP policy; shared by its plugins
 	host       *host                       // the WithHost option's; nil without one
+	validation *validation                 // the WithValidation option's; nil without one
 	reloads    *reloader                   // set once the registration is published
 	rejections *xsync.Map[string, *Report] // by key: a reload's rejected load, until a later load succeeds
 	name       string
-	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host's stubs
+	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host and the validation
 	goPayload  []byte // the Go init payload, likewise
 	schema     []byte // the script guests' wire.Schema: the interface's methods, then the Host's
 }
 
 // prepare checks a Register call's arguments and returns the interface's contract, the Register options (with
-// their defaults), the HTTP client of its policy and its Host.
+// their defaults), the HTTP client of its policy, its Host and its validation.
 func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOption) (*registration, error) {
 	if c.closed.Load() {
 		return nil, ErrClosed
@@ -106,25 +107,41 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
-	hst, err := newHost(contr, cfg.hosts)
-	if err != nil {
-		return nil, err
-	}
+	return c.newRegistration(contr, cfg, name)
+}
 
-	client, err := httpClient(cfg.http, cfg.httpRoots, c.logger)
-	if err != nil {
-		return nil, err
-	}
-
+// newRegistration prepares the registration of a Register call whose contract and options were checked: its Host,
+// its validation, the Go dispatcher rendered for them, its HTTP client and the script guests' schema.
+func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name string) (*registration, error) {
 	reg := &registration{
-		contr: contr, cfg: cfg, http: client, host: hst, name: name, rejections: xsync.NewMap[string, *Report](),
+		contr: contr, cfg: cfg, name: name, rejections: xsync.NewMap[string, *Report](),
+		dispatcher: contr.dispatcher, goPayload: contr.payload,
 	}
-	reg.dispatcher, reg.goPayload = contr.dispatcher, contr.payload
+
+	var err error
+
+	reg.host, err = newHost(contr, cfg.hosts)
+	if err == nil {
+		reg.validation, err = newValidation(contr, cfg)
+	}
+
+	if err == nil && (reg.host != nil || reg.validation != nil) {
+		err = reg.renderGo()
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	reg.http, err = httpClient(cfg.http, cfg.httpRoots, c.logger)
+	if err != nil {
+		return nil, err
+	}
 
 	var hostMethods []*method
 
-	if hst != nil {
-		reg.dispatcher, reg.goPayload, hostMethods = hst.dispatcher, hst.payload, hst.methods
+	if reg.host != nil {
+		hostMethods = reg.host.methods
 	}
 
 	reg.schema = scriptSchema(contr.methods, hostMethods)
@@ -497,11 +514,13 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 	return files, nil
 }
 
-// launch checks an opened plugin, adding its issues to report, and starts the minimum instances of its pool
-// (running Create in each); it returns the generation they serve. An issue that blocks the load fails it before
-// any instance starts. Its adapter, its memory reservation and its report are the caller's to set. A panic once
-// the instances started closes them before going on, nothing else owning them yet (the logger is guarded, so its
-// handler's panic is not one).
+// launch checks an opened plugin, adding its issues to report, with [WithValidation] validates it in an
+// instance of its own, and starts the minimum instances of its pool (running Create in each); it returns the
+// generation the pool's instances serve. An issue that blocks the load (or a failed validation) fails it before
+// any pool instance starts: the validation instance runs, and is closed, before the pool warms, so it fits in
+// the version's memory reservation. Its adapter, its memory reservation and its report are the caller's to set.
+// A panic once the instances started closes them before going on, nothing else owning them yet (the logger is
+// guarded, so its handler's panic is not one).
 func (c *Container) launch(ctx context.Context, reg *registration, key string, src *source, files *memfs.FS,
 	report *Report,
 ) (*plugin, error) {
@@ -513,9 +532,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
 	}
 
-	checkOwnership(report, src.desc.owner(), reg.cfg.ownership)
-
-	err := report.blocking()
+	err := checkLoad(reg, src, report)
 	if err != nil {
 		return nil, err
 	}
@@ -532,6 +549,12 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 
 	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
 	launch := c.newLauncher(reg, key, src, owner, spec, mod, meters)
+
+	err = c.validate(ctx, reg, src, files, launch, report)
+	if err != nil {
+		return nil, err
+	}
+
 	instances := c.pluginPool(reg, key, src, owner, meters, launch.start, launch.opts.HTTP)
 
 	err = instances.warm(ctx)
@@ -554,6 +577,20 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
 
 	return gen, nil
+}
+
+// checkLoad checks a plugin about to launch, adding the issues found to report: it fails when one blocks the
+// load, or when the Register validates its plugins and the plugin's language cannot validate yet.
+func checkLoad(reg *registration, src *source, report *Report) error {
+	checkOwnership(report, src.desc.owner(), reg.cfg.ownership)
+
+	err := report.blocking()
+	if err == nil && reg.validation != nil && !src.loader.validates() {
+		err = fmt.Errorf("%w: %s plugins cannot validate yet; register them without WithValidation",
+			ErrValidation, src.desc.Language)
+	}
+
+	return err
 }
 
 // newLauncher returns the launcher of a plugin version's instances, which start from spec.

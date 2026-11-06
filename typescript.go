@@ -53,6 +53,8 @@ func (tsLoader) memoryLimit() uint64 { return scriptMemoryLimit }
 
 func (tsLoader) multiplexes() bool { return true }
 
+func (tsLoader) validates() bool { return false }
+
 func (tsLoader) prepare(ctx context.Context, c *Container, reg *registration, src *source, files *memfs.FS) (
 	launchSpec, error,
 ) {

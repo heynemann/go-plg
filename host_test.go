@@ -49,13 +49,20 @@ func (h *testHost) Lookup(_ context.Context, id string) (testcontract.User, erro
 	return user, nil
 }
 
+// Value returns the value withHostValue put in ctx, prefixed with "validating " when ctx is a validation's
+// (plg.IsValidation).
 func (*testHost) Value(ctx context.Context) (string, error) {
-	v, ok := ctx.Value(hostCtxKey{}).(string)
-	if !ok {
-		return "", nil
+	var value string
+
+	if v, ok := ctx.Value(hostCtxKey{}).(string); ok {
+		value = v
 	}
 
-	return v, nil
+	if plg.IsValidation(ctx) {
+		value = "validating " + value
+	}
+
+	return value, nil
 }
 
 func (*testHost) Fail(_ context.Context, msg string) error {

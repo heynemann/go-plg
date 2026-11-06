@@ -1,4 +1,5 @@
-# The Go guest's standard library allowlist: the only packages Go plugins and contract packages may import.
+# The Go guest's import allowlist: the only packages Go plugins and contract packages may import, the standard
+# library packages below and plg's own plugin package (the Issue a plugin's Validate returns).
 # Single source of truth: the Makefile extracts the guest's yaegi symbol tables from this list, `plg gen` checks
 # contract packages against it. After editing it, run `make symbols guests`.
 #
@@ -33,3 +34,4 @@ time
 unicode
 unicode/utf16
 unicode/utf8
+github.com/heynemann/go-plg/plugin

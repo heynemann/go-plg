@@ -26,6 +26,7 @@ HTTP allowlist).
 - [Writing plugins](#writing-plugins) ([Go](#go-plugins), [Lua](#lua-plugins), [TypeScript](#typescript-plugins))
 - [Guests and blank imports](#guests-and-blank-imports)
 - [Storages](#storages)
+- [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
 - [HTTP](#http)
 - [Calling back into the service: the Host interface](#calling-back-into-the-service-the-host-interface)
@@ -315,8 +316,9 @@ func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[gre
 - **Standard library allowlist:** `bufio bytes cmp context encoding/base64 encoding/hex encoding/json errors fmt io
   maps math math/big math/bits math/cmplx math/rand math/rand/v2 net/http (client side, through the host) net/url
   regexp slices sort strconv strings sync sync/atomic time unicode unicode/utf16 unicode/utf8`, plus the contract
-  package. Anything else fails Register with `plg.ErrLoad`. To allow more packages (`encoding/xml`, a pure-Go
-  library), build a custom guest with [`plg build-guest`](#deployment-plg-warm-and-plg-build-guest).
+  package and `github.com/heynemann/go-plg/plugin` (the `Issue` a [`Validate`](#validation) returns). Anything
+  else fails Register with `plg.ErrLoad`. To allow more packages (`encoding/xml`, a pure-Go library), build a
+  custom guest with [`plg build-guest`](#deployment-plg-warm-and-plg-build-guest).
 - **No goroutines:** a `go` statement fails Register with `plg.ErrGoStatement` (file:line:col). A WebAssembly
   instance has a single thread, and guest goroutines would be paused between calls; parallelism comes from the
   instance pool.
@@ -527,6 +529,61 @@ it loaded, or, when a reload rejects an update or a new plugin, as that key's re
 the plugin or finds it unchanged. Every issue is logged as a `plg: plugin issue` record at its severity's level
 (Error, Warn, Info) with the plugin's `key`, `version` and `owner` group and the issue's `severity`, `code`,
 `field` and `issue` (its message). The reports become readable through the inspection API (planned).
+
+## Validation
+
+A registration can make its plugins validate themselves before they go live. Declare the validation input as a
+data type in the contract package (the rules of [the interface](#the-interface)), and say how each plugin gets
+its input:
+
+```go
+// in package pricing
+type Limits struct {
+	MaxDiscount float64
+}
+
+plg.Register[pricing.Rule](ctx, c, "pricing", plg.WithStorage(store),
+	plg.WithValidation(func(ctx context.Context, info plg.PluginInfo) (pricing.Limits, error) {
+		return limitsFor(info.Owner.Team.Name), nil // info: Key, Version, Language, Storage, Owner
+	}),
+	plg.WithValidationTimeout(5*time.Second), // default 10 s
+)
+```
+
+Register fails with `plg.ErrInvalidOption` when the input type is not a named data type declared in the contract
+package. Every Go plugin's instance (what `Create` returns) must then have a `Validate` method beside the
+interface's, returning `plugin.Issue` values from `github.com/heynemann/go-plg/plugin`, a package compiled into
+the Go guest (custom guests from `plg build-guest` included):
+
+```go
+import "github.com/heynemann/go-plg/plugin"
+
+func (r *rule) Validate(ctx context.Context, in pricing.Limits) ([]plugin.Issue, error) {
+	if r.discount > in.MaxDiscount {
+		return []plugin.Issue{{Severity: plugin.Error, Code: "rule.discount", Message: "over the limit", Field: "discount"}}, nil
+	}
+
+	return nil, nil
+}
+```
+
+On every load (at Register and on each reload), before any of the plugin's pool instances starts, plg starts a
+separate, throwaway instance, runs its `Create`, calls `Validate` with the function's input under the validation
+timeout (never past the load's `ctx`) and closes it, so the serving instances' state never sees validation. It
+has the Register's Host and HTTP policy; Host methods called from that `Create` or `Validate` can tell with
+`plg.IsValidation(ctx)`, and its HTTP requests are logged with `validation=true`. Its issues go into the load
+report and the log like the ownership check's. The load is blocked (Register fails with `plg.ErrLoad`; a reload
+keeps the last good version) by:
+
+- an issue of severity `plugin.Error` (wrapping `plg.ErrBlockingIssue`); warnings and info are only recorded;
+- the function returning an error or panicking (a `plg.validation.input` error issue, `plg.CodeValidationInput`);
+- `Validate` returning an error, panicking or running past the timeout, and an instance without a `Validate` of
+  exactly that signature, the message showing the one the plugin declares (all wrapping `plg.ErrValidation`).
+
+The validation instance is charged to the memory budget within the plugin version's own reservation
+(`max × limit`): it is closed before the pool's instances start, so a budget sized exactly to the plugins' worst
+case still validates them. Lua and TypeScript plugins cannot validate yet: with `WithValidation` their loads fail
+with `plg.ErrValidation`.
 
 ## Limits, pools and the memory budget
 
