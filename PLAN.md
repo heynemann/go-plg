@@ -284,6 +284,49 @@ It is:
 - **CLI:** `cmd/plg` (`gen`, `warm`, `build-guest`).
 - **Examples:** `examples/` (S3 storage, Postgres storage, an end-to-end service).
 
+## Validation and ownership (planned)
+
+Agreed in a design session after the second adversarial review; tickets in `.scratch/validation-ownership/issues/`. Plugin authors, users and administrators need to tell when a plugin has problems and who to talk to about it.
+
+### Validation
+
+- **Registration:** `plg.WithValidation[V any](func(ctx context.Context, info plg.PluginInfo) (V, error))`. `V` is a data type declared in the contract package (so Go plugins can name it), checked at Register like Host types. `PluginInfo` carries the plugin's key, version, language, storage and owner, so each plugin can get its own input. An error from the function counts as an error-severity issue.
+- **Plugin side:** a `Validate` method on the instance `Create` returns, beside the contract's methods and not part of the user's interface; required once `WithValidation` is set:
+  - Go: `Validate(ctx context.Context, in contract.V) ([]plugin.Issue, error)`. `plugin` is `github.com/heynemann/go-plg/plugin`, compiled into the Go guest's symbol tables (allowlisted; custom guests from `plg build-guest` include it), so `Issue` has an exact type identity.
+  - Lua: `inst:Validate(v)` returns a list of issue tables, or `nil, msg`; `error(...)` is a failure.
+  - TypeScript: `inst.Validate(v)` returns an array of issues (or a Promise of one); a throw is a failure.
+- **Detection in Go plugins** (spike `ValidateSpike`, yaegi v0.16.1): an interface assertion in the dispatcher, built like the existing `Close` binder (`v.(plgValidator)` then assigning the method to a typed variable under `recover`). Type switches never match interpreted types in yaegi, generic interfaces don't compile, and host-side reflect sees no methods. yaegi accepts a `Validate` with one extra leading parameter (its `stripReceiverFromArgs` bug, which also explains the `Close` behaviour), so the bind's recover must catch it. A signature that doesn't match looks like an absent method, so a host-side `go/parser` pass (like the one for `Create`'s Host parameter) reports the plugin's actual signature against the expected one.
+- **Report:** `plg.Issue{Severity (error | warning | info), Code, Message, Field}`; an unknown severity counts as error. `plg.Report{Key, Version, Owner, Issues, Err, At, Duration}`.
+- **Missing or wrong `Validate`:** with `WithValidation` set, both block the load.
+- **When it runs:** at Register and on every reload, before a version is published; on demand through `plg.Validate(ctx, c, key)` and `plg.ValidateAll(ctx, c)`; and for an unpublished candidate through `plg.Check(ctx, c, name, Descriptor, fs.FS)`, which loads it against an existing registration's contract, Host, limits and validation, runs Create and Validate, returns the Report and publishes nothing (no events).
+- **Where it runs:** always in a separate, throwaway instance with the same sandbox, Host and HTTP policy as a call (Host methods can tell with `plg.IsValidation(ctx)`), under `WithValidationTimeout` (default 10 s, never later than the caller's ctx). The instance is charged to the memory budget and never waits for room: no room fails the validation with `ErrMemoryBudget`.
+- **Failure:** at load, error-severity issues block (Register fails; a reload keeps the last good version) and warnings are recorded. On demand, `WithOnDemandValidationPolicy(plg.Report | plg.Unpublish)` per Register; the default, `Report`, marks the plugin `degraded` until a later validation passes.
+
+### Ownership
+
+- **Source: the manifest only.** `plugin.json` is replaced by `plugin.yaml` in a clean cutover (no fallback). Every storage, built-in or custom, keeps `plugin.yaml` beside the plugin's files and parses it with `plg.ParseManifest`, which fills the whole `Descriptor`, owner included (the Postgres example stores the manifest as a file row instead of columns). There is no resolver at Register.
+- **Parser:** `go.yaml.in/yaml/v3` (the maintained successor of the archived `gopkg.in/yaml.v3`), in a strict subset: the file (still capped at `MaxManifestSize`) is parsed into a node tree that must have no anchors, aliases, merge keys, custom tags or multiple documents, then decoded with unknown fields disallowed; duplicate keys are errors.
+- **Schema:**
+  ```yaml
+  owner:
+    maintainers: [{name, email, handle}]   # the first is primary
+    team: {name, department}
+    org: ...
+    company: ...
+    contact: {oncall, channel, email}
+    links: {repository, docs, runbook, issues}
+    labels: {key: value}
+  ```
+  Owner strings and labels have length and count limits.
+- **Required ownership:** a plugin without `team.name` and at least one of `contact.oncall`, `contact.channel`, `contact.email` gets a warning issue on every load, whether or not validation is configured; `plg.WithRequiredOwnership()` makes it an error that blocks the load.
+- **Where it shows up:** `PanicError` and `PluginError` gain an `Owner` field; every log record about a plugin carries the owner's fields; every plugin metric gains `team`, `org` and `company` labels (never person names, emails or free-form labels).
+
+### Managing the environment
+
+- **Events:** `plg.WithOnEvent(func(ctx context.Context, e plg.Event))` with Loaded, Rejected (load, validation or ownership failure, with the Report or error), Retired, Panicked, Validated and Skipped, each carrying key, version, language, storage and owner. Delivered asynchronously by one goroutine per container from a bounded queue (1024); when full, events are dropped and counted (`plg.events.dropped` and a warning). The callback is guarded like every other user callback; `Close` delivers what is queued, bounded by its ctx.
+- **Inspection:** `plg.Info(c, key)` and `plg.Plugins(c)` list every plugin a registration's storages hold: `serving`, `degraded`, `serving_last_good` (an update was rejected, with that version's report), `rejected` (never loaded, with the reason and the owner if the manifest parsed) or `retired`, with owner, versions, last reports, panic counts and pool stats.
+- **Admin page:** `plg.AdminHandler(c)` serves the same as read-only JSON. The service mounts and protects it (it shows owner emails); validation, reload and Check stay Go calls behind the service's own auth.
+
 ## Milestones
 
 Each milestone is implemented, tested with `go test -race`, smoke-run against real plugins, and committed separately.
