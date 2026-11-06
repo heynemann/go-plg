@@ -8,4 +8,4 @@
 
 - [x] Tests: a good candidate passes, a broken one (load error, validation error, missing ownership with `WithRequiredOwnership`) reports why, the catalogue and events are untouched, an unknown registration name is an error
 - [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket — CI run 42172681687 for `4b3d18e`: success

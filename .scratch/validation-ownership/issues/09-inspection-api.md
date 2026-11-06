@@ -9,4 +9,4 @@
 - [x] Tests drive each status through real loads, rejections, on-demand validation and reloads, and check every field
 - [x] Get/All stay at 0 allocations; Plugins is safe under concurrent reloads (-race)
 - [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket — CI run 42179245820 for `728e9de`: success

@@ -18,4 +18,4 @@ At load, after Create succeeds, plg starts a separate throwaway instance (charge
 - [x] Contract validation rejects a `V` that is not a data type or not from the contract package
 - [x] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
 - [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket — CI run 42171502827 for `bbf7d8c`: success

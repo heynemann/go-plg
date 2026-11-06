@@ -12,4 +12,4 @@
 - [x] ValidateAll covers several registrations and skips those without validation
 - [x] Metrics for runs and issue counts observed via the SDK ManualReader
 - [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket — CI run 42174876561 for `2b7cae4`: success (re-run of the same commit; the first attempt failed the bundling time-limit test, fixed by 133278c)
