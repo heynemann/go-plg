@@ -947,6 +947,90 @@ keeps nothing. Both read what the container keeps, never waiting for a load or a
 `Get` and `All` are unchanged (still no allocation). The reports and `PanicError`s are the container's own: treat
 them as read-only.
 
+### The admin handler: `plg.AdminHandler`
+
+Dashboards can read the same over HTTP. `plg.AdminHandler(c)` is an `http.Handler` serving read-only JSON:
+
+```go
+// requireAdmin is your own authentication and authorization middleware.
+mux.Handle("/admin/plg/", requireAdmin(http.StripPrefix("/admin/plg", plg.AdminHandler(c))))
+```
+
+> **Mount it behind your service's own auth, never on a public listener.** The answers hold every plugin's owner
+> (maintainers' names and emails, on-call rotations and channels included), its errors and its panics' guest
+> output and host stacks. plg does no authentication of its own.
+
+| Request | Answer |
+|---|---|
+| `GET /plugins` | `200` `{"plugins": [<plugin>, …]}`: what `plg.Plugins` says, in key order |
+| `GET /plugins/{key}` | `200` `<plugin>`: what `plg.Info` says of the key, `<name>/<descriptor key>` (its slash may stay as is; escape anything else a URL path cannot hold); `404` for a key it does not know |
+| any other method on those paths (`HEAD` included) | `405`, with `Allow: GET` |
+| any other path | `404` |
+| any path, once the container is closed | `503` |
+
+Errors answer `{"error": "<message>"}`. Every answer is `application/json` with `Cache-Control: no-store`. The
+handler reads what the container keeps, like `plg.Info`, never waiting for a load or a call; it runs no plugin
+code, and it changes nothing: validating, reloading and `plg.Check` stay Go calls behind your own endpoints.
+
+A `<plugin>` (here, one serving its last good version beside an update its validation rejected):
+
+```json
+{
+  "key": "pricing/discounts",
+  "registration": "pricing",
+  "storage": "rules",
+  "language": "lua",
+  "status": "serving_last_good",
+  "version": "1",
+  "rejectedVersion": "2",
+  "loadedAt": "2026-11-06T09:14:03.48823171Z",
+  "owner": {
+    "team": {"name": "payments", "department": "finance"},
+    "org": "commerce",
+    "company": "Acme Inc.",
+    "contact": {"oncall": "payments-oncall", "channel": "#payments", "email": "payments@example.com"},
+    "links": {"repository": "https://git.example.com/payments/rules", "docs": "", "runbook": "", "issues": ""},
+    "maintainers": [{"name": "Ana Lima", "email": "ana@example.com", "handle": "@ana"}],
+    "labels": {"tier": "1"}
+  },
+  "pool": {
+    "min": 1, "max": 4, "instances": 2, "inUse": 1, "callsInFlight": 1, "idleSlots": 1, "waiting": 0,
+    "refills": 0, "grows": 1, "memoryLimitBytes": 67108864, "memoryBytes": 2228224
+  },
+  "panics": 1,
+  "lastPanic": {
+    "time": "2026-11-06T09:20:11.002301Z",
+    "phase": "call",
+    "method": "Discount",
+    "message": "plg: pricing/discounts: call Discount failed: not enough memory",
+    "value": "not enough memory",
+    "guest": "",
+    "stack": ""
+  },
+  "load": {
+    "key": "pricing/discounts", "version": "1", "at": "2026-11-06T09:14:03.30154402Z", "durationNs": 186778190,
+    "error": null, "owner": {"…": "as above"}, "issues": []
+  },
+  "validation": null,
+  "rejection": {
+    "key": "pricing/discounts", "version": "2", "at": "2026-11-06T09:31:40.1207749Z", "durationNs": 201338471,
+    "error": "plg: plugin failed to load: storage rules: plg: load blocked by an error issue: rule.max: the discount exceeds 50%",
+    "owner": {"…": "as above"},
+    "issues": [{"severity": "error", "code": "rule.max", "message": "the discount exceeds 50%", "field": "max"}]
+  }
+}
+```
+
+- **Every key is always present.** `loadedAt` and `pool` are `null` when no version serves; `load`, `validation`,
+  `rejection` and `lastPanic` are `null` when the state has none (the fields of `plg.PluginState` of the same
+  names); a report's `error` is `null` when it has none. Lists and `labels` are empty, never `null`.
+- **Errors are their messages** (`err.Error()`), never Go values: a report's `error`, a panic's `message` (the
+  `PanicError`'s) and `value` (the recovered value, the guest's panic message or the trap, printed).
+- **Times** are RFC 3339 strings with nanoseconds, in UTC; **durations** (`durationNs`) are integer nanoseconds;
+  **memory** is in bytes. `status`, `language`, `severity` and `phase` are the values of `plg.Status`,
+  `plg.Language`, `plg.Severity` and `plg.Phase`.
+- Key order and whitespace are not part of the format.
+
 ## Deployment: `plg warm` and `plg build-guest`
 
 Guests are compiled to machine code at startup and cached on disk (default `$PLG_CACHE_DIR`, else

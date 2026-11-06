@@ -4,9 +4,9 @@
 
 **Blocked by:** 09 (Inspection API: plg.Info and plg.Plugins)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] httptest-based tests for both endpoints, unknown keys (404), non-GET methods (405), and that a request runs no plugin code
-- [ ] The JSON shape is documented and pinned by tests on fields that matter to consumers (not formatting)
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] httptest-based tests for both endpoints, unknown keys (404), non-GET methods (405), and that a request runs no plugin code
+- [x] The JSON shape is documented and pinned by tests on fields that matter to consumers (not formatting)
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

@@ -136,9 +136,16 @@ func Info(ctr *Container, key string) (PluginState, error) {
 // Plugins describes every plugin the storages of the container's registrations list, as [Info] does, in key
 // order. It returns nothing once the container is closed. It is safe for concurrent use.
 func Plugins(ctr *Container) []PluginState {
-	snap := ctr.catalogue.Load()
+	states, _ := ctr.plugins()
+
+	return states
+}
+
+// plugins is [Plugins], reporting false once the container is closed.
+func (c *Container) plugins() ([]PluginState, bool) {
+	snap := c.catalogue.Load()
 	if snap.closed {
-		return nil
+		return nil, false
 	}
 
 	states := make([]PluginState, 0, len(snap.plugins))
@@ -149,7 +156,7 @@ func Plugins(ctr *Container) []PluginState {
 		states = append(states, state)
 	}
 
-	for _, reg := range ctr.regs.All() {
+	for _, reg := range c.regs.All() {
 		for key, entry := range reg.keys.All() {
 			if snap.plugins[key] != nil {
 				continue // described above
@@ -163,7 +170,7 @@ func Plugins(ctr *Container) []PluginState {
 
 	slices.SortFunc(states, func(a, b PluginState) int { return cmp.Compare(a.Key, b.Key) })
 
-	return states
+	return states, true
 }
 
 // stateOf describes the plugin key of reg, served by gen (nil when none is), whose listing is entry (nil when
