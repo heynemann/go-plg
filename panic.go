@@ -74,6 +74,10 @@ type PanicError struct {
 	Guest string
 	// Stack is the host goroutine's stack for failures recovered on the host.
 	Stack []byte
+	// Owner is the owner of the plugin that failed (see [Owner]); it is zero when no plugin is involved, the
+	// plugin has no owner, or the failure is in your own code (the logger's handler, the meter provider, the
+	// WithOnPanic function).
+	Owner Owner
 }
 
 // Error describes the failure: "plg: <key>: <phase> [<method>] failed: <value>".
@@ -206,6 +210,16 @@ func (r *panicReporter) guardedLogger(key string, lang Language) *slog.Logger {
 	return slog.New(&guardedHandler{handler: r.logger.Handler(), panics: r, key: key, lang: lang})
 }
 
+// pluginLogger is guardedLogger for the records about a plugin version: each carries its owner's log group.
+func (r *panicReporter) pluginLogger(key string, lang Language, owner *ownerTags) *slog.Logger {
+	logger := r.guardedLogger(key, lang)
+	if len(owner.log.Value.Group()) > 0 {
+		logger = slog.New(logger.Handler().WithAttrs([]slog.Attr{owner.log}))
+	}
+
+	return logger
+}
+
 // guardedHandler is a slog handler behind the callback boundary; see [panicReporter.guardedLogger].
 type guardedHandler struct {
 	handler slog.Handler
@@ -294,6 +308,10 @@ func (r *panicReporter) log(ctx context.Context, failure *PanicError) {
 
 	if failure.Stack != nil {
 		attrs = append(attrs, slog.String("stack", string(failure.Stack)))
+	}
+
+	if owner := failure.Owner.logAttr(); len(owner.Value.Group()) > 0 {
+		attrs = append(attrs, owner)
 	}
 
 	r.logger.LogAttrs(ctx, slog.LevelError, "plg: plugin failure", attrs...)

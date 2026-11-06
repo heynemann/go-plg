@@ -152,12 +152,12 @@ var (
 
 // handler returns the function serving host_call for the instances of the plugin with the given key and
 // language, reporting panics to panics.
-func (h *host) handler(key string, lang Language, panics *panicReporter) engine.HostFunc {
+func (h *host) handler(key string, lang Language, owner *ownerTags, panics *panicReporter) engine.HostFunc {
 	if h == nil {
 		return nil
 	}
 
-	caller := &hostCaller{host: h, panics: panics, key: key, lang: lang}
+	caller := &hostCaller{host: h, panics: panics, owner: owner, key: key, lang: lang}
 
 	return caller.serve
 }
@@ -166,6 +166,7 @@ func (h *host) handler(key string, lang Language, panics *panicReporter) engine.
 type hostCaller struct {
 	host   *host
 	panics *panicReporter
+	owner  *ownerTags
 	key    string
 	lang   Language
 }
@@ -192,6 +193,7 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
 				failure := &PanicError{
 					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.iface.String() + "." + meth.name,
+					Owner: hc.owner.owner,
 				}
 				hc.panics.recovered(ctx, failure, v)
 

@@ -309,7 +309,7 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Contai
 		return nil, err
 	}
 
-	return hst.handler(key, LanguageGo, ctr.panics), nil
+	return hst.handler(key, LanguageGo, noOwner, ctr.panics), nil
 }
 
 // UseGenericBinder makes c serve every contract with the generic binder, ignoring the fast paths plg gen

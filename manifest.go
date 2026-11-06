@@ -25,6 +25,7 @@ const MaxManifestSize = 64 << 10
 // manifest is the content of a plugin.yaml.
 type manifest struct {
 	MemoryLimit *manifestInt `yaml:"memoryLimit"`
+	Owner       *Owner       `yaml:"owner"`
 	Language    Language     `yaml:"language"`
 	Entrypoint  string       `yaml:"entrypoint"`
 	Version     string       `yaml:"version"`
@@ -226,6 +227,15 @@ func checkManifest(parsed manifest) (Descriptor, error) {
 		}
 
 		desc.MemoryLimit = limit
+	}
+
+	if parsed.Owner != nil {
+		err := parsed.Owner.check()
+		if err != nil {
+			return Descriptor{}, err
+		}
+
+		desc.Owner = parsed.Owner
 	}
 
 	return desc, nil

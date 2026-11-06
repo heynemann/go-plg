@@ -90,6 +90,8 @@ type PluginError struct {
 	Method string
 	// Message is the plugin error's message.
 	Message string
+	// Owner is the plugin's owner (see [Owner]), zero when it has none.
+	Owner Owner
 }
 
 // Error returns the plugin's message.

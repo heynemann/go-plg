@@ -60,15 +60,27 @@ func (r *metricsReader) collect(t *testing.T) collected {
 	return out
 }
 
+// pointSet is the attribute set of a data point: attrs, plus the empty team, org and company attributes of a
+// plugin without an owner when attrs name a plugin key but no team.
+func pointSet(attrs []attribute.KeyValue) attribute.Set {
+	set := attribute.NewSet(attrs...)
+	if set.HasValue("key") && !set.HasValue("team") {
+		set = attribute.NewSet(append(slices.Clone(attrs), attribute.String("team", ""), attribute.String("org", ""),
+			attribute.String("company", ""))...)
+	}
+
+	return set
+}
+
 // int64Value returns the value of the data point of an int64 sum (a counter or an up-down counter) with exactly
-// the given attributes, failing the test if there is none.
+// the given attributes (see pointSet), failing the test if there is none.
 func (c collected) int64Value(t *testing.T, name string, attrs ...attribute.KeyValue) int64 {
 	t.Helper()
 
 	sum, ok := c[name].Data.(metricdata.Sum[int64])
 	require.True(t, ok, "%s is an int64 sum", name)
 
-	want := attribute.NewSet(attrs...)
+	want := pointSet(attrs)
 	for _, dp := range sum.DataPoints {
 		if dp.Attributes.Equals(&want) {
 			return dp.Value
@@ -87,14 +99,15 @@ func (c collected) int64Value(t *testing.T, name string, attrs ...attribute.KeyV
 	return 0
 }
 
-// histogramCount returns the count of the data point of a float64 histogram with exactly the given attributes.
+// histogramCount returns the count of the data point of a float64 histogram with exactly the given attributes (see
+// pointSet).
 func (c collected) histogramCount(t *testing.T, name string, attrs ...attribute.KeyValue) uint64 {
 	t.Helper()
 
 	hist, ok := c[name].Data.(metricdata.Histogram[float64])
 	require.True(t, ok, "%s is a float64 histogram", name)
 
-	want := attribute.NewSet(attrs...)
+	want := pointSet(attrs)
 	for _, dp := range hist.DataPoints {
 		if dp.Attributes.Equals(&want) {
 			assert.Positive(t, dp.Sum, "%s: latencies are positive", name)

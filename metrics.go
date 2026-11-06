@@ -24,7 +24,9 @@ const meterName = "github.com/heynemann/go-plg"
 // installed later is picked up as the OpenTelemetry API delegates to it.
 //
 // Instruments (attributes in braces; key is the plugin key, "<name>/<descriptor key>", or the Register name
-// where no plugin is involved):
+// where no plugin is involved). Every instrument with a key also has the attributes team, org and company: the
+// plugin's [Owner] Team.Name, Org and Company, empty when not set or when no plugin is involved. People's names,
+// addresses and labels never become attributes:
 //   - plg.plugin.calls {key, language, method, outcome}: calls to a plugin method, outcome being ok, error (the
 //     plugin's own), conversion ([ErrConversion]), panic (a [PanicError]) or unavailable (no instance: the
 //     call's context ended while waiting for one, the container closed);
@@ -220,8 +222,9 @@ func (p *pool) called(ctx context.Context, index uint32, elapsed time.Duration, 
 
 // countPanic counts a reported PanicError; the panic reporter guards it.
 func (i *instruments) countPanic(ctx context.Context, pe *PanicError) {
+	owner := pe.Owner.metricAttrs()
 	i.panics.Add(ctx, 1, metric.WithAttributes(attribute.String("key", pe.Key),
-		attribute.String("phase", string(pe.Phase))))
+		attribute.String("phase", string(pe.Phase)), owner[0], owner[1], owner[2]))
 }
 
 // The lifecycle measurements below report a panic in their instrument as a [PanicError] in [PhaseCallback], as
@@ -229,31 +232,40 @@ func (i *instruments) countPanic(ctx context.Context, pe *PanicError) {
 // has an owner that cleans it up: a version counted as loaded is already the Register's, or its round's, to
 // close.
 
-// countLoad counts a plugin version loaded, or failing to load when err is not nil.
-func (c *Container) countLoad(ctx context.Context, key string, lang Language, err error) {
+// countLoad counts a version of the plugin key, owned by owner, loaded, or failing to load when err is not nil.
+func (c *Container) countLoad(ctx context.Context, key string, lang Language, owner *Owner, err error) {
 	outcome := "ok"
 	if err != nil {
 		outcome = "failed"
 	}
 
+	tags := owner.metricAttrs()
+
 	c.panics.callback(ctx, key, lang, meterMethod, func() {
 		c.meters.loads.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-			attribute.String("language", string(lang)), attribute.String("outcome", outcome)))
+			attribute.String("language", string(lang)), attribute.String("outcome", outcome), tags[0], tags[1],
+			tags[2]))
 	})
 }
 
-// countReloadFailure counts a plugin, or a whole reload (key being the Register name), a reload failed to load.
-func (c *Container) countReloadFailure(ctx context.Context, key string) {
+// countReloadFailure counts a plugin, owned by owner, or a whole reload (key being the Register name, owner an
+// empty one), a reload failed to load.
+func (c *Container) countReloadFailure(ctx context.Context, key string, owner *Owner) {
+	tags := owner.metricAttrs()
+
 	c.panics.callback(ctx, key, "", meterMethod, func() {
-		c.meters.reloadFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key)))
+		c.meters.reloadFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key), tags[0], tags[1],
+			tags[2]))
 	})
 }
 
-// countSkipped counts a listed plugin skipped for its language.
-func (c *Container) countSkipped(ctx context.Context, key string, lang Language) {
+// countSkipped counts a listed plugin, owned by owner, skipped for its language.
+func (c *Container) countSkipped(ctx context.Context, key string, lang Language, owner *Owner) {
+	tags := owner.metricAttrs()
+
 	c.panics.callback(ctx, key, lang, meterMethod, func() {
 		c.meters.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-			attribute.String("language", string(lang))))
+			attribute.String("language", string(lang)), tags[0], tags[1], tags[2]))
 	})
 }
 
@@ -312,8 +324,8 @@ func measureOf(attrs ...attribute.KeyValue) measure {
 // pluginMeters are the attribute sets of one plugin version's measurements, built when it is loaded so that
 // recording them allocates nothing. It is immutable but for the cache of HTTP status codes, an xsync.Map.
 type pluginMeters struct {
-	keyAttr      attribute.KeyValue
 	inst         *instruments
+	plugin       []attribute.KeyValue                // {key, team, org, company}, in every set below
 	statuses     *xsync.Map[int, []metric.AddOption] // {key, outcome=ok, status}, by status code
 	key          []metric.AddOption                  // {key}
 	observe      []metric.ObserveOption              // {key}
@@ -324,15 +336,19 @@ type pluginMeters struct {
 }
 
 // newPluginMeters returns the measurements of the version of plugin key in lang serving iface.
-func newPluginMeters(inst *instruments, key string, lang Language, iface reflect.Type) *pluginMeters {
+func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerTags, iface reflect.Type,
+) *pluginMeters {
 	keyAttr, langAttr := attribute.String("key", key), attribute.String("language", string(lang))
+	plugin := []attribute.KeyValue{keyAttr, owner.metrics[0], owner.metrics[1], owner.metrics[2]}
+	with := func(attrs ...attribute.KeyValue) measure { return measureOf(append(attrs, plugin...)...) }
+
 	meters := &pluginMeters{
 		inst:         inst,
-		keyAttr:      keyAttr,
-		key:          measureOf(keyAttr).add,
-		observe:      []metric.ObserveOption{metric.WithAttributeSet(attribute.NewSet(keyAttr))},
-		refillOK:     measureOf(keyAttr, attribute.String("outcome", "ok")).add,
-		refillFailed: measureOf(keyAttr, attribute.String("outcome", "failed")).add,
+		plugin:       plugin,
+		key:          with().add,
+		observe:      []metric.ObserveOption{metric.WithAttributeSet(attribute.NewSet(plugin...))},
+		refillOK:     with(attribute.String("outcome", "ok")).add,
+		refillFailed: with(attribute.String("outcome", "failed")).add,
 		calls:        make([][callOutcomes]measure, iface.NumMethod()),
 		statuses:     xsync.NewMap[int, []metric.AddOption](),
 	}
@@ -340,12 +356,12 @@ func newPluginMeters(inst *instruments, key string, lang Language, iface reflect
 	for i := range meters.calls {
 		methodAttr := attribute.String("method", iface.Method(i).Name)
 		for o := range callOutcomes {
-			meters.calls[i][o] = measureOf(keyAttr, langAttr, methodAttr, attribute.String("outcome", o.String()))
+			meters.calls[i][o] = with(langAttr, methodAttr, attribute.String("outcome", o.String()))
 		}
 	}
 
 	for o, name := range []string{"ok", "refused", "failed"} {
-		meters.http[o] = measureOf(keyAttr, attribute.String("outcome", name))
+		meters.http[o] = with(attribute.String("outcome", name))
 	}
 
 	return meters
@@ -388,7 +404,10 @@ func (m *pluginMeters) status(code int) []metric.AddOption {
 	}
 
 	opts, _ := m.statuses.LoadOrCompute(code, func() ([]metric.AddOption, bool) {
-		return measureOf(m.keyAttr, attribute.String("outcome", "ok"), attribute.Int("status", code)).add, false
+		attrs := append([]attribute.KeyValue{attribute.String("outcome", "ok"), attribute.Int("status", code)},
+			m.plugin...)
+
+		return measureOf(attrs...).add, false
 	})
 
 	return opts

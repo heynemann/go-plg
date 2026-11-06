@@ -210,8 +210,8 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 		key := name + "/" + src.desc.Key
 		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled",
 			slog.String("key", key), slog.String("storage", src.storeName),
-			slog.String("language", string(src.desc.Language)))
-		c.countSkipped(ctx, key, src.desc.Language)
+			slog.String("language", string(src.desc.Language)), src.desc.owner().logAttr())
+		c.countSkipped(ctx, key, src.desc.Language, src.desc.owner())
 
 		return false, nil
 	}
@@ -341,7 +341,18 @@ func checkDescriptor(storeName string, desc *Descriptor) error {
 			"to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, minMemoryLimit)
 	}
 
+	err := desc.owner().check()
+	if err != nil {
+		return fmt.Errorf("%w: storage %s lists %q: %w", ErrInvalidDescriptor, storeName, desc.Key, err)
+	}
+
 	return nil
+}
+
+// sameDescriptor reports whether a and b describe the same plugin version: every field, the owner included.
+func sameDescriptor(a, b *Descriptor) bool {
+	return a.Key == b.Key && a.Language == b.Language && a.Entrypoint == b.Entrypoint && a.Version == b.Version &&
+		a.MemoryLimit == b.MemoryLimit && a.owner().equal(b.owner())
 }
 
 // loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
@@ -364,7 +375,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 
 		plug, err := c.load(ctx, reg, key, &srcs[i])
 		if err != nil {
-			c.countLoad(ctx, key, srcs[i].desc.Language, err)
+			c.countLoad(ctx, key, srcs[i].desc.Language, srcs[i].desc.owner(), err)
 			c.closeUnpublished(ctx, plugins)
 			c.budget.unreserve(reserved)
 
@@ -376,7 +387,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		reserved -= plug.reserved
 		plugins = append(plugins, plug) // the Register's to close from now on
 
-		c.countLoad(ctx, key, srcs[i].desc.Language, nil)
+		c.countLoad(ctx, key, srcs[i].desc.Language, srcs[i].desc.owner(), nil)
 	}
 
 	return plugins, nil
@@ -433,7 +444,7 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 func (c *Container) loadStep(ctx context.Context, key string, src *source, step func() error) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad}
+			failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad, Owner: *src.desc.owner()}
 			c.panics.recovered(ctx, failure, v)
 
 			err = failure
@@ -483,10 +494,11 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	*plugin, error,
 ) {
 	start := time.Now()
+	owner := newOwnerTags(src.desc.owner())
 
 	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
-			slog.String("key", key), slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
+			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
 	}
 
 	spec, err := src.loader.prepare(ctx, c, reg, src, files)
@@ -499,9 +511,9 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		return nil, err
 	}
 
-	meters := newPluginMeters(c.meters, key, src.desc.Language, reg.contr.iface)
-	launch := c.newLauncher(reg, key, src, spec, mod, meters)
-	instances := c.pluginPool(reg, key, src, meters, launch.start, launch.opts.HTTP)
+	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
+	launch := c.newLauncher(reg, key, src, owner, spec, mod, meters)
+	instances := c.pluginPool(reg, key, src, owner, meters, launch.start, launch.opts.HTTP)
 
 	err = instances.warm(ctx)
 	if err != nil {
@@ -517,7 +529,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		}
 	}()
 
-	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key),
+	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key), owner.log,
 		slog.String("language", string(src.desc.Language)), slog.String("version", src.desc.Version),
 		slog.Uint64("memory_limit", src.limit), slog.Int("pool_min", reg.cfg.poolMin),
 		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
@@ -526,19 +538,20 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 }
 
 // newLauncher returns the launcher of a plugin version's instances, which start from spec.
-func (c *Container) newLauncher(reg *registration, key string, src *source, spec launchSpec, mod *engine.Module,
-	meters *pluginMeters,
+func (c *Container) newLauncher(reg *registration, key string, src *source, owner *ownerTags, spec launchSpec,
+	mod *engine.Module, meters *pluginMeters,
 ) *launcher {
 	return &launcher{
 		mod:     mod,
-		output:  c.panics.guardedLogger(key, src.desc.Language),
+		output:  c.panics.pluginLogger(key, src.desc.Language, owner),
 		panics:  c.panics,
+		owner:   owner,
 		payload: spec.payload,
 		opts: engine.InstanceOptions{
 			Mounts:      spec.mounts,
-			HTTP:        c.httpHandler(reg, key, src.desc.Language, meters),
+			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters),
 			HTTPRefuses: reg.http.Refuses,
-			Host:        reg.host.handler(key, src.desc.Language, c.panics),
+			Host:        reg.host.handler(key, src.desc.Language, owner, c.panics),
 		},
 		key:  key,
 		lang: src.desc.Language,
@@ -548,7 +561,7 @@ func (c *Container) newLauncher(reg *registration, key string, src *source, spec
 // pluginPool returns the (not yet warm) pool of a plugin's instances, started by spawn and measured in meters.
 // Instances of a language whose guest multiplexes serve up to the Register's [WithConcurrentCalls] calls at
 // once, making their HTTP requests through httpFn.
-func (c *Container) pluginPool(reg *registration, key string, src *source, meters *pluginMeters,
+func (c *Container) pluginPool(reg *registration, key string, src *source, owner *ownerTags, meters *pluginMeters,
 	spawn func(context.Context) (instance, error), httpFn engine.HTTPFunc,
 ) *pool {
 	lanes := 1
@@ -562,6 +575,7 @@ func (c *Container) pluginPool(reg *registration, key string, src *source, meter
 		http:         httpFn,
 		budget:       &c.budget,
 		meters:       meters,
+		owner:        owner,
 		key:          key,
 		lang:         src.desc.Language,
 		limit:        src.limit,
@@ -600,7 +614,7 @@ func (c *Container) closeUnpublished(ctx context.Context, plugins []*plugin) {
 
 		if err != nil {
 			c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an unpublished plugin failed",
-				slog.String("key", gen.key), slog.String("error", err.Error()))
+				slog.String("key", gen.key), gen.pool.owner.log, slog.String("error", err.Error()))
 		}
 	}
 }

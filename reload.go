@@ -222,7 +222,7 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 		if v := recover(); v != nil {
 			failure := &PanicError{Key: reg.name, Phase: PhasePoll}
 			c.panics.recovered(ctx, failure, v)
-			c.countReloadFailure(ctx, reg.name)
+			c.countReloadFailure(ctx, reg.name, &noOwner.owner)
 
 			err = failure
 		}
@@ -244,7 +244,7 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		err = fmt.Errorf("plg: reloading %s: %w", reg.name, err)
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload failed", slog.String("name", reg.name),
 			slog.String("error", err.Error()))
-		c.countReloadFailure(ctx, reg.name)
+		c.countReloadFailure(ctx, reg.name, &noOwner.owner)
 
 		return err
 	}
@@ -255,7 +255,7 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	for _, p := range problems {
 		key := reg.name + "/" + p.key
 		listed[key] = true
-		errs = append(errs, c.rejected(ctx, key, current[key], p.err))
+		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], p.err))
 	}
 
 	for i := range srcs {
@@ -292,13 +292,13 @@ func (c *Container) reloadOne(ctx context.Context, reg *registration, key string
 	case err != nil && ctx.Err() != nil: // the container is closing: not the plugin's failure
 		return err
 	case err != nil:
-		c.countLoad(ctx, key, src.desc.Language, err)
+		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), err)
 
-		return c.rejected(ctx, key, old, err)
+		return c.rejected(ctx, key, src.desc.owner(), old, err)
 	case gen != old:
 		changes.loaded = append(changes.loaded, gen) // the round's to close until it publishes it
 
-		c.countLoad(ctx, key, src.desc.Language, nil)
+		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), nil)
 
 	default: // unchanged
 	}
@@ -326,7 +326,7 @@ func (c *Container) generations(reg *registration) map[string]*plugin {
 func (c *Container) update(ctx context.Context, reg *registration, key string, src *source, old *plugin) (
 	*plugin, error,
 ) {
-	if old != nil && src.desc.Version != "" && src.desc == old.desc {
+	if old != nil && src.desc.Version != "" && sameDescriptor(&src.desc, &old.desc) {
 		return old, nil
 	}
 
@@ -343,7 +343,7 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 		return nil, fmt.Errorf("%w: storage %s: %w", ErrLoad, src.storeName, err)
 	}
 
-	if old != nil && src.desc == old.desc {
+	if old != nil && sameDescriptor(&src.desc, &old.desc) {
 		return old, nil
 	}
 
@@ -380,18 +380,19 @@ func (c *Container) update(ctx context.Context, reg *registration, key string, s
 	return gen, nil
 }
 
-// rejected logs a plugin that a reload cannot load and returns the failure: a new plugin stays absent, an
-// updated one keeps old, its last good generation.
-func (c *Container) rejected(ctx context.Context, key string, old *plugin, err error) error {
+// rejected logs a plugin, listed as owned by owner, that a reload cannot load and returns the failure: a new
+// plugin stays absent, an updated one keeps old, its last good generation.
+func (c *Container) rejected(ctx context.Context, key string, owner *Owner, old *plugin, err error) error {
 	err = fmt.Errorf("plg: reloading %s: %w", key, err)
-	c.countReloadFailure(ctx, key)
+	c.countReloadFailure(ctx, key, owner)
 
 	if old == nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload skipped a new plugin that failed to load",
-			slog.String("key", key), slog.String("error", err.Error()))
+			slog.String("key", key), owner.logAttr(), slog.String("error", err.Error()))
 	} else {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload kept the last good version of a plugin",
-			slog.String("key", key), slog.String("version", old.desc.Version), slog.String("error", err.Error()))
+			slog.String("key", key), owner.logAttr(), slog.String("version", old.desc.Version),
+			slog.String("error", err.Error()))
 	}
 
 	return err
@@ -430,7 +431,7 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 
 	for _, gen := range changes.removed {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin removed", slog.String("key", gen.key),
-			slog.String("version", gen.desc.Version))
+			gen.pool.owner.log, slog.String("version", gen.desc.Version))
 	}
 
 	return nil
@@ -455,7 +456,12 @@ func (c *Container) retire(ctx context.Context, gen *plugin) {
 func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: gen.key, Language: gen.desc.Language, Phase: PhaseClose}
+			failure := &PanicError{
+				Key:      gen.key,
+				Language: gen.desc.Language,
+				Phase:    PhaseClose,
+				Owner:    *gen.desc.owner(),
+			}
 			c.panics.recovered(ctx, failure, v)
 
 			gen.closeErr = errors.Join(gen.closeErr, failure)
@@ -482,10 +488,10 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 
 	if err != nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a plugin version failed", slog.String("key", gen.key),
-			slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
+			gen.pool.owner.log, slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
 	} else {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin version closed", slog.String("key", gen.key),
-			slog.String("version", gen.desc.Version))
+			gen.pool.owner.log, slog.String("version", gen.desc.Version))
 	}
 }
 

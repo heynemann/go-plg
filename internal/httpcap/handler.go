@@ -20,6 +20,9 @@ type Hooks struct {
 	Panicked func(ctx context.Context, value any)
 	// Done receives the report of every request, made, refused or failed, once it is answered.
 	Done func(ctx context.Context, report Report)
+	// Attr is logged with every request, after the key (the plugin's owner); a zero Attr, or an empty group, is
+	// left out by slog's handlers.
+	Attr slog.Attr
 }
 
 // Outcome is how a request ended.
@@ -81,30 +84,29 @@ func (c *Client) serve(ctx context.Context, key string, hooks Hooks, dst, req []
 			}
 		}()
 
-		out = c.answer(ctx, key, hooks.Done, start, dst, req, n)
+		out = c.answer(ctx, key, hooks, start, dst, req, n)
 	}()
 
 	return out
 }
 
-// answer makes or refuses one request, logs it and reports it to done.
-func (c *Client) answer(ctx context.Context, key string, done func(context.Context, Report), start time.Time,
-	dst, req []byte, n int,
+// answer makes or refuses one request, logs it and reports it to hooks.Done.
+func (c *Client) answer(ctx context.Context, key string, hooks Hooks, start time.Time, dst, req []byte, n int,
 ) []byte {
 	xch := exchange{start: start, sent: len(req)}
 	head := len(dst)
 
 	out, err := c.do(ctx, &xch, dst, req, n)
 	if err != nil {
-		c.log(ctx, key, &xch, err)
-		done(ctx, Report{Duration: time.Since(start), Sent: xch.sent, Outcome: outcome(err)})
+		c.log(ctx, key, hooks.Attr, &xch, err)
+		hooks.Done(ctx, Report{Duration: time.Since(start), Sent: xch.sent, Outcome: outcome(err)})
 
 		return httpabi.AppendFailure(out[:head], message(err))
 	}
 
 	xch.received = len(out) - head
-	c.log(ctx, key, &xch, nil)
-	done(ctx, Report{
+	c.log(ctx, key, hooks.Attr, &xch, nil)
+	hooks.Done(ctx, Report{
 		Duration: time.Since(start), Status: xch.status, Sent: xch.sent, Received: xch.received, Outcome: OutcomeOK,
 	})
 
@@ -278,9 +280,10 @@ func message(err error) string {
 	return err.Error()
 }
 
-func (c *Client) log(ctx context.Context, key string, xch *exchange, err error) {
+func (c *Client) log(ctx context.Context, key string, extra slog.Attr, xch *exchange, err error) {
 	attrs := []slog.Attr{
 		slog.String("key", key),
+		extra,
 		slog.String("method", xch.method),
 		slog.String("url", xch.target),
 		slog.Duration("duration", time.Since(xch.start)),

@@ -22,11 +22,11 @@ Owner changes are picked up by reload like any descriptor change.
 
 **Blocked by:** 01 (plugin.yaml replaces plugin.json)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests cover parsing every owner field, limits being enforced, and owner-less manifests
-- [ ] Integration tests show the owner on a `PanicError` (Go, Lua, TS), on a `PluginError`, in a plugin's log records, and as metric labels via the SDK ManualReader
-- [ ] Reload picks up an owner change without a version change
-- [ ] Get/All stay at 0 allocations and call benchmarks show no added allocations (attribute sets precomputed per plugin version)
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] Tests cover parsing every owner field, limits being enforced, and owner-less manifests
+- [x] Integration tests show the owner on a `PanicError` (Go, Lua, TS), on a `PluginError`, in a plugin's log records, and as metric labels via the SDK ManualReader
+- [x] Reload picks up an owner change without a version change
+- [x] Get/All stay at 0 allocations and call benchmarks show no added allocations (attribute sets precomputed per plugin version)
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

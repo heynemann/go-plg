@@ -544,6 +544,21 @@ func TestRegisterArguments(t *testing.T) {
 			}})},
 		},
 		{
+			name: "desc-owner-too-many-labels",
+			want: plg.ErrInvalidDescriptor,
+			msg:  `"k": owner has too many labels: 33, limit 32`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
+				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", Owner: &plg.Owner{Labels: labelMap(33)}},
+			}})},
+		},
+		{
+			name: "desc-owner-long-string", want: plg.ErrInvalidDescriptor, msg: `"k": team.name: owner strings`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
+				Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go",
+				Owner: &plg.Owner{Team: plg.Team{Name: strings.Repeat("t", plg.MaxOwnerStringBytes+1)}},
+			}}})},
+		},
+		{
 			name: "go-guest-empty", opts: withEmpty(plg.WithGoGuest(nil)), want: plg.ErrInvalidOption,
 			msg: "WithGoGuest: the module is empty",
 		},

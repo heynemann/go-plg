@@ -42,14 +42,29 @@ const contentVersionPrefix = "sha256:"
 //	memoryLimit: 67108864
 //
 // Its keys are:
+//
 //   - language (required): "go", "lua" or "typescript".
+//
 //   - entrypoint (required): a slash-separated path inside the plugin directory; see [Descriptor].
+//
 //   - version (optional): the plugin's revision. Without it, List leaves the Descriptor's Version empty and
 //     Register uses "sha256:" and the hex SHA-256 of the regular files it loads (their paths relative to the
 //     directory and their contents): it is stable, and changes exactly when a file is added, removed, renamed
 //     or edited.
+//
 //   - memoryLimit (optional): the plugin's per-instance memory limit in bytes, from 65536 (one wasm page) to
 //     4 GiB, as Register requires of every descriptor. It can only lower the Register limit.
+//
+//   - owner (optional): who owns the plugin, the [Owner] block:
+//
+//     owner:
+//     maintainers: [{name: Ana, email: ana@example.com, handle: ana}] # the first is the primary one
+//     team: {name: payments, department: finance}
+//     org: commerce
+//     company: Example Inc.
+//     contact: {oncall: payments-oncall, channel: "#payments", email: payments@example.com}
+//     links: {repository: ..., docs: ..., runbook: ..., issues: ...}
+//     labels: {tier: "1"}
 //
 // A plugin.yaml must be a regular file (a link to one is followed only where the tree allows it) of at most
 // [MaxManifestSize] bytes, in the strict subset of YAML [ParseManifest] describes: keys are case sensitive and

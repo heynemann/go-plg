@@ -274,7 +274,9 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, call pl
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name}
+				failure := &PanicError{
+					Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Owner: *p.desc.owner(),
+				}
 				p.pool.panics.recovered(ctx, failure, v)
 
 				discard, err = true, failure
@@ -310,7 +312,7 @@ func (p *plugin) roundTrip(ctx context.Context, held *slot, meth *method, call p
 
 		return false, nil
 	case wire.StatusError:
-		return false, &PluginError{Key: p.key, Method: meth.name, Message: res.Message}
+		return false, &PluginError{Key: p.key, Method: meth.name, Message: res.Message, Owner: *p.desc.owner()}
 	case wire.StatusConvert:
 		return false, fmt.Errorf("%w: %s.%s: %s", ErrConversion, p.key, meth.name, res.Message)
 	case wire.StatusPanic:
@@ -356,7 +358,7 @@ func decodeResults(body []byte, call plgimpl.Call) error {
 func (p *plugin) failed(ctx context.Context, held *slot, meth *method, value any) *PanicError {
 	failure := &PanicError{
 		Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Value: value,
-		Guest: held.inst.Guest(),
+		Guest: held.inst.Guest(), Owner: *p.desc.owner(),
 	}
 	p.pool.panics.report(ctx, failure)
 

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -424,7 +425,7 @@ func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
 	}
 
 	if cfg.meters == nil {
-		cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, reflect.TypeFor[testIface]())
+		cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
 	}
 
 	return newPool(cfg)
@@ -683,9 +684,20 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 
 		// Another pool on the same budget cannot start until an instance is closed.
 		otherCfg := &poolConfig{
-			panics: reporting(slog.DiscardHandler), spawn: spawner.spawn, budget: budget, key: "test/other",
-			meters: newPluginMeters(discardInstruments(), "test/other", LanguageGo, reflect.TypeFor[testIface]()),
-			limit:  testLimit, minSize: 1, maxSize: 1,
+			panics: reporting(slog.DiscardHandler),
+			spawn:  spawner.spawn,
+			budget: budget,
+			key:    "test/other",
+			meters: newPluginMeters(
+				discardInstruments(),
+				"test/other",
+				LanguageGo,
+				noOwner,
+				reflect.TypeFor[testIface](),
+			),
+			limit:   testLimit,
+			minSize: 1,
+			maxSize: 1,
 		}
 		require.ErrorIs(t, newPool(otherCfg).warm(t.Context()), ErrMemoryBudget)
 
@@ -1438,7 +1450,7 @@ func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reporter := reporting(slog.DiscardHandler)
 		budget := &memoryBudget{}
-		meters := newPluginMeters(panickingInstruments(t), "test/k", LanguageGo, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(panickingInstruments(t), "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 		instances := startPool(t, &fakeSpawner{}, &poolConfig{
 			panics: reporter, budget: budget, meters: meters, minSize: 1, maxSize: 1,
 		})
@@ -1469,7 +1481,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		instances := startPool(t, spawner, &poolConfig{
 			panics: reporter, budget: budget, minSize: 1, maxSize: 1,
-			meters: newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]()),
+			meters: newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]()),
 		})
 		<-spawner.attempts // warm's
 
@@ -1521,7 +1533,7 @@ func TestAPanickingMeterProviderNeverFailsAnHTTPRequest(t *testing.T) {
 
 	inst := panickingInstruments(t)
 	reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 4, inst)
-	meters := newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 	done := (&Container{panics: reporter}).httpDone("test/k", LanguageGo, meters)
 
 	assert.NotPanics(t, func() { done(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200}) })
@@ -1760,7 +1772,7 @@ func TestHTTPPanicsArePanicErrors(t *testing.T) {
 
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 
-	ctr.httpPanicked("test/k", LanguageGo)(t.Context(), "transport bug")
+	ctr.httpPanicked("test/k", LanguageGo, noOwner)(t.Context(), "transport bug")
 
 	recent := ctr.RecentPanics()
 	require.Len(t, recent, 1)
@@ -2227,6 +2239,15 @@ func sdkInstruments(tb testing.TB) (*instruments, *sdkmetric.ManualReader, *sdkm
 	return inst, reader, provider
 }
 
+// ownerless is the encoded attribute set encoded with the empty team, org and company attributes of a plugin
+// without an owner (or of what is no plugin) added.
+func ownerless(encoded string) string {
+	attrs := append(strings.Split(encoded, ","), "company=", "org=", "team=")
+	slices.Sort(attrs)
+
+	return strings.Join(attrs, ",")
+}
+
 // histogramPoint is a histogram data point's count and sum.
 type histogramPoint struct {
 	count uint64
@@ -2285,7 +2306,11 @@ func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
 	t.Parallel()
 
 	inst, reader, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "n/k", LanguageLua, reflect.TypeFor[twoMethods]())
+	owner := &Owner{
+		Team: Team{Name: "payments", Department: "finance"}, Org: "commerce", Company: "acme",
+		Maintainers: []Maintainer{{Name: "Ana", Email: "ana@example.com"}}, Labels: map[string]string{"tier": "1"},
+	}
+	meters := newPluginMeters(inst, "n/k", LanguageLua, newOwnerTags(owner), reflect.TypeFor[twoMethods]())
 	ctx := t.Context()
 
 	for _, call := range []struct {
@@ -2304,8 +2329,9 @@ func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
 		meters.called(ctx, call.index, call.elapsed, call.err)
 	}
 
-	set := func(method, outcome string) string {
-		return "key=n/k,language=lua,method=" + method + ",outcome=" + outcome
+	set := func(method, outcome string) string { // team, org and company, never people or labels
+		return "company=acme,key=n/k,language=lua,method=" + method + ",org=commerce,outcome=" + outcome +
+			",team=payments"
 	}
 	got := collect(t, reader)
 
@@ -2331,7 +2357,7 @@ func TestHTTPMeasurements(t *testing.T) {
 	t.Parallel()
 
 	inst, reader, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "web/p", LanguageGo, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "web/p", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 	ctx := t.Context()
 
 	for _, report := range []httpcap.Report{
@@ -2347,16 +2373,21 @@ func TestHTTPMeasurements(t *testing.T) {
 	got := collect(t, reader)
 
 	assert.Equal(t, map[string]int64{
-		"key=web/p,outcome=ok,status=200": 2, "key=web/p,outcome=ok,status=404": 1,
-		"key=web/p,outcome=refused": 1, "key=web/p,outcome=failed": 1,
+		ownerless("key=web/p,outcome=ok,status=200"): 2, ownerless("key=web/p,outcome=ok,status=404"): 1,
+		ownerless("key=web/p,outcome=refused"): 1, ownerless("key=web/p,outcome=failed"): 1,
 	}, got.sums["plg.http.requests"], "responses by status code")
 	assert.Equal(t, map[string]histogramPoint{
-		"key=web/p,outcome=ok":      {count: 3, sum: 0.003},
-		"key=web/p,outcome=refused": {count: 1, sum: 0.000001},
-		"key=web/p,outcome=failed":  {count: 1, sum: 2},
+		ownerless("key=web/p,outcome=ok"):      {count: 3, sum: 0.003},
+		ownerless("key=web/p,outcome=refused"): {count: 1, sum: 0.000001},
+		ownerless("key=web/p,outcome=failed"):  {count: 1, sum: 2},
 	}, got.histograms["plg.http.duration"])
-	assert.Equal(t, map[string]int64{"key=web/p": 150}, got.sums["plg.http.request.size"], "every request sent")
-	assert.Equal(t, map[string]int64{"key=web/p": 350}, got.sums["plg.http.response.size"], "responses only")
+	assert.Equal(
+		t,
+		map[string]int64{ownerless("key=web/p"): 150},
+		got.sums["plg.http.request.size"],
+		"every request sent",
+	)
+	assert.Equal(t, map[string]int64{ownerless("key=web/p"): 350}, got.sums["plg.http.response.size"], "responses only")
 }
 
 // observing registers a callback observing instances' gauges with inst's meter provider.
@@ -2381,19 +2412,24 @@ func TestPoolMeasurements(t *testing.T) {
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		spawner.memory.Store(3 * engine.PageSize)
 
-		meters := newPluginMeters(inst, "test/k", LanguageGo, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 		instances := startPool(t, spawner, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 		observing(t, provider, inst, instances)
 
 		gauges := func() map[string]int64 {
 			got := collect(t, reader)
-			inUse := got.sums["plg.pool.instances.in_use"]["key=test/k"]
-			assert.Equal(t, inUse, got.sums["plg.pool.calls.in_flight"]["key=test/k"], "one call per instance in use")
+			inUse := got.sums["plg.pool.instances.in_use"][ownerless("key=test/k")]
+			assert.Equal(
+				t,
+				inUse,
+				got.sums["plg.pool.calls.in_flight"][ownerless("key=test/k")],
+				"one call per instance in use",
+			)
 
 			return map[string]int64{
-				"instances": got.sums["plg.pool.instances"]["key=test/k"],
+				"instances": got.sums["plg.pool.instances"][ownerless("key=test/k")],
 				"in_use":    inUse,
-				"memory":    got.sums["plg.plugin.memory"]["key=test/k"],
+				"memory":    got.sums["plg.plugin.memory"][ownerless("key=test/k")],
 			}
 		}
 		assert.Equal(t, map[string]int64{"instances": 1, "in_use": 0, "memory": 3 * engine.PageSize}, gauges(),
@@ -2411,7 +2447,7 @@ func TestPoolMeasurements(t *testing.T) {
 		got := acquireLater(t, instances)
 
 		synctest.Wait() // the second caller waits: the pool is at its maximum
-		assert.Equal(t, map[string]int64{"key=test/k": 1}, collect(t, reader).sums["plg.pool.waits"])
+		assert.Equal(t, map[string]int64{ownerless("key=test/k"): 1}, collect(t, reader).sums["plg.pool.waits"])
 
 		spawner.memory.Store(2 * engine.PageSize)
 		instances.discard(t.Context(), held) // the refiller replaces it, for the waiting caller
@@ -2431,10 +2467,18 @@ func TestPoolMeasurements(t *testing.T) {
 		synctest.Wait() // the retry's instance is idle
 
 		measured := collect(t, reader)
-		assert.Equal(t, map[string]int64{"key=test/k,outcome=ok": 2, "key=test/k,outcome=failed": 1},
-			measured.sums["plg.pool.refills"])
-		assert.Equal(t, map[string]int64{"key=test/k": 1}, measured.sums["plg.pool.waits"], "callers that found an "+
-			"instance idle did not wait")
+		assert.Equal(
+			t,
+			map[string]int64{ownerless("key=test/k,outcome=ok"): 2, ownerless("key=test/k,outcome=failed"): 1},
+			measured.sums["plg.pool.refills"],
+		)
+		assert.Equal(
+			t,
+			map[string]int64{ownerless("key=test/k"): 1},
+			measured.sums["plg.pool.waits"],
+			"callers that found an "+
+				"instance idle did not wait",
+		)
 
 		require.NoError(t, instances.close(t.Context()))
 		assert.Equal(t, map[string]int64{"instances": 0, "in_use": 0, "memory": 0}, gauges())
@@ -2449,7 +2493,7 @@ func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
 	cfg := &poolConfig{
 		spawn: func(context.Context) (instance, error) { return guest, nil }, panics: reporting(slog.DiscardHandler),
 		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1, lanes: 3,
-		meters: newPluginMeters(inst, "test/k", LanguageLua, reflect.TypeFor[testIface]()),
+		meters: newPluginMeters(inst, "test/k", LanguageLua, noOwner, reflect.TypeFor[testIface]()),
 	}
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))
@@ -2460,9 +2504,9 @@ func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
 		got := collect(t, reader)
 
 		return map[string]int64{
-			"instances": got.sums["plg.pool.instances"]["key=test/k"],
-			"in_use":    got.sums["plg.pool.instances.in_use"]["key=test/k"],
-			"in_flight": got.sums["plg.pool.calls.in_flight"]["key=test/k"],
+			"instances": got.sums["plg.pool.instances"][ownerless("key=test/k")],
+			"in_use":    got.sums["plg.pool.instances.in_use"][ownerless("key=test/k")],
+			"in_flight": got.sums["plg.pool.calls.in_flight"][ownerless("key=test/k")],
 		}
 	}
 	want := func(inUse, inFlight int64) map[string]int64 {
@@ -2497,8 +2541,8 @@ func TestPanicsAreCountedByKeyAndPhase(t *testing.T) {
 	reporter.recovered(t.Context(), &PanicError{Key: "n", Phase: PhaseStorage}, "storage bug")
 
 	assert.Equal(t, map[string]int64{
-		"key=n/k,phase=call": 1, "key=n,phase=storage": 1,
-		"key=n/k,phase=callback": 1, "key=n,phase=callback": 1, // the callback panicked on both
+		ownerless("key=n/k,phase=call"): 1, ownerless("key=n,phase=storage"): 1,
+		ownerless("key=n/k,phase=callback"): 1, ownerless("key=n,phase=callback"): 1, // the callback panicked on both
 	}, collect(t, reader).sums["plg.plugin.panics"])
 }
 
@@ -2554,13 +2598,13 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	assert.Contains(t, attr(&records[0], "error").String(), errMeter.Error())
 
 	// Every measurement goes to a no-op instrument instead.
-	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 	meters.called(t.Context(), 0, time.Millisecond, errFake)
 	meters.requested(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
-	ctr.countLoad(t.Context(), "n/k", LanguageGo, nil)
-	ctr.countReloadFailure(t.Context(), "n")
-	ctr.countSkipped(t.Context(), "n/k", LanguageLua)
+	ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
+	ctr.countReloadFailure(t.Context(), "n", &Owner{})
+	ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
 
 	assert.Len(t, ctr.RecentPanics(), 1, "the container kept working")
 	require.NoError(t, ctr.Close(t.Context()))
@@ -2637,9 +2681,9 @@ func TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer(t *testing.T) 
 
 			require.NotPanics(t, func() { ctr = New(WithMeterProvider(setupPanicProvider{at: step})) })
 
-			ctr.countLoad(t.Context(), "n/k", LanguageGo, nil)
-			ctr.countReloadFailure(t.Context(), "n")
-			ctr.countSkipped(t.Context(), "n/k", LanguageLua)
+			ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
+			ctr.countReloadFailure(t.Context(), "n", &Owner{})
+			ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
 			ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 
 			require.NotPanics(t, func() { require.NoError(t, ctr.Close(t.Context())) })
@@ -2702,7 +2746,7 @@ func TestMetersDefaultToTheGlobalProvider(t *testing.T) {
 		require.NoError(t, ctr.Close(t.Context()))
 	}
 
-	assert.Equal(t, int64(2), collect(t, reader).sums["plg.plugin.panics"]["key=global/k,phase=load"])
+	assert.Equal(t, int64(2), collect(t, reader).sums["plg.plugin.panics"][ownerless("key=global/k,phase=load")])
 }
 
 // TestMetricsDoNotAllocate: measuring a call, its pool and an HTTP request, each behind its panic boundary,
@@ -2716,7 +2760,7 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 	}
 
 	inst, _, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "n/k", LanguageGo, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 	instances := warmPool(t, &fakeSpawner{}, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 	ctx := t.Context()
 	pluginErr := &PluginError{Key: "n/k", Method: "Do", Message: "no"}
@@ -2910,7 +2954,7 @@ func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFun
 		cfg.panics = reporting(slog.DiscardHandler)
 	}
 
-	cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, reflect.TypeFor[testIface]())
+	cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
 
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))

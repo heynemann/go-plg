@@ -83,6 +83,7 @@ type launcher struct {
 	// ([panicReporter.guardedLogger]), since its records are logged inside the guest's steps.
 	output  *slog.Logger
 	panics  *panicReporter
+	owner   *ownerTags
 	opts    engine.InstanceOptions
 	key     string
 	lang    Language
@@ -169,7 +170,9 @@ func (l *launcher) discardUnstarted(ctx context.Context, inst closer) {
 
 // failed reports a step (Create, Close) the guest failed, with what it wrote to stderr meanwhile.
 func (l *launcher) failed(ctx context.Context, phase Phase, value any, out *guestout.Capture) *PanicError {
-	failure := &PanicError{Key: l.key, Language: l.lang, Phase: phase, Value: value, Guest: out.Guest()}
+	failure := &PanicError{
+		Key: l.key, Language: l.lang, Phase: phase, Value: value, Guest: out.Guest(), Owner: l.owner.owner,
+	}
 	l.panics.report(ctx, failure)
 
 	return failure

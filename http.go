@@ -81,11 +81,12 @@ func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (
 
 // httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
 // Register call's policy, its panics reported and its requests counted in meters.
-func (c *Container) httpHandler(reg *registration, key string, lang Language, meters *pluginMeters) engine.HTTPFunc {
-	return reg.http.Handler(
-		key,
-		httpcap.Hooks{Panicked: c.httpPanicked(key, lang), Done: c.httpDone(key, lang, meters)},
-	)
+func (c *Container) httpHandler(reg *registration, key string, lang Language, owner *ownerTags,
+	meters *pluginMeters,
+) engine.HTTPFunc {
+	return reg.http.Handler(key, httpcap.Hooks{
+		Panicked: c.httpPanicked(key, lang, owner), Done: c.httpDone(key, lang, meters), Attr: owner.log,
+	})
 }
 
 // httpDone returns the function the HTTP capability reports each request to: it counts the request in meters, a
@@ -98,8 +99,8 @@ func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) fu
 
 // httpPanicked returns the function the HTTP capability passes its panics to: they become reported
 // PanicErrors in [PhaseHTTP], and the plugin's request fails with an internal error.
-func (c *Container) httpPanicked(key string, lang Language) func(context.Context, any) {
+func (c *Container) httpPanicked(key string, lang Language, owner *ownerTags) func(context.Context, any) {
 	return func(ctx context.Context, value any) {
-		c.panics.recovered(ctx, &PanicError{Key: key, Language: lang, Phase: PhaseHTTP}, value)
+		c.panics.recovered(ctx, &PanicError{Key: key, Language: lang, Phase: PhaseHTTP, Owner: owner.owner}, value)
 	}
 }

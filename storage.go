@@ -93,6 +93,10 @@ const (
 
 // Descriptor describes one plugin of a [Storage].
 type Descriptor struct {
+	// Owner says who owns the plugin (see [Owner]), nil when no one is named; Register checks its limits. A change
+	// of owner is a change of descriptor: a reload loads the plugin again, whether or not its Version changed.
+	// Register keeps it: do not modify it once listed.
+	Owner *Owner
 	// Key identifies the plugin within its Register call; its catalogue key is "<name>/<Key>".
 	Key string
 	// Language is the plugin's source language.
@@ -106,6 +110,15 @@ type Descriptor struct {
 	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit. It can only
 	// lower that limit.
 	MemoryLimit uint64
+}
+
+// owner returns d's owner, an empty one when it has none.
+func (d *Descriptor) owner() *Owner {
+	if d.Owner == nil {
+		return &noOwner.owner
+	}
+
+	return d.Owner
 }
 
 // MemoryStorage is a [Storage] holding plugins in memory, for tests and for plugins a program builds itself.

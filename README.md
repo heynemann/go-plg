@@ -444,6 +444,8 @@ Built in:
   memoryLimit: 67108864
   ```
 
+  An optional `owner` block says who owns the plugin (see [Ownership](#ownership)).
+
   `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
   `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes, from 65536 — one wasm page — to 4 GiB) may only lower
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
@@ -469,6 +471,39 @@ reloads skip unchanged plugins (an empty one makes plg hash the files on every r
 kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.yaml
 layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, the plugin.yaml stored as one of
 the plugin's file rows, only enabled plugins listed, versions maintained by triggers, migrations included).
+
+
+## Ownership
+
+A plugin's `plugin.yaml` may say who owns it, so whoever meets a problem with the plugin knows who to talk to:
+
+```yaml
+owner:
+  maintainers:                      # the first is the primary one
+    - {name: Ana Lima, email: ana@example.com, handle: "@ana"}
+  team: {name: payments, department: finance}
+  org: commerce
+  company: Acme Inc.
+  contact: {oncall: payments-oncall, channel: "#payments", email: payments@example.com}
+  links: {repository: https://git.example.com/rules, docs: ..., runbook: ..., issues: ...}
+  labels: {tier: "1"}
+```
+
+Every field is optional. It is parsed into a `*plg.Owner` on `Descriptor.Owner`, nil without an `owner` block
+(custom storages set it themselves,
+or get it from `plg.ParseManifest`), with limits that Register checks for every storage: strings of at most
+`plg.MaxOwnerStringBytes` (256) bytes, at most `plg.MaxOwnerMaintainers` (16) maintainers, each with a name, email
+or handle, and at most `plg.MaxOwnerLabels` (32) labels with non-empty keys. The owner then shows up:
+
+- on the plugin's `*plg.PanicError` and `*plg.PluginError` values, as their `Owner` field (messages unchanged);
+- on every log record plg writes about the plugin (loads, failures, its guest output, its HTTP requests, its
+  pool), as an `owner` group of the fields that are set: `team`, `department`, `org`, `company`, the primary
+  `maintainer`, `maintainer_email` and `maintainer_handle`, `oncall`, `channel`, `email`, `repository`, `docs`,
+  `runbook`, `issues` and a `labels` group;
+- on every plugin metric, as the `team`, `org` and `company` attributes (empty when not set). Names, addresses and
+  labels never become metric attributes, so they cannot blow up cardinality or leak into dashboards.
+
+An owner change is a descriptor change: the next reload loads the plugin again even when its version is the same.
 
 ## Limits, pools and the memory budget
 

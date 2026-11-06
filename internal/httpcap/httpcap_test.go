@@ -341,6 +341,27 @@ func TestDisabledRefusesEverything(t *testing.T) {
 	assert.Zero(t, srv.hits.Load())
 }
 
+// TestRequestLogsCarryTheHooksAttr: the Attr of a handler's hooks (the plugin's owner) is logged with every
+// request after the key, a refusal's included.
+func TestRequestLogsCarryTheHooksAttr(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	client := httpcap.Disabled(slog.New(slog.NewJSONHandler(&logs, nil)))
+	client.Close()
+
+	handler := client.Handler("web/p", httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(context.Context, httpcap.Report) {},
+		Attr:     slog.Group("owner", slog.String("team", "payments")),
+	})
+	handler(t.Context(), nil, request("GET", "https://a.example/", nil, ""), 1)
+
+	assert.Contains(t, logs.String(), `"msg":"plg: http request refused or failed","key":"web/p",`+
+		`"owner":{"team":"payments"},"method":`)
+}
+
 func TestPrivateNetworksAreBlockedAtDialTime(t *testing.T) {
 	t.Parallel()
 

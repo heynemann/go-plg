@@ -50,6 +50,7 @@ type poolConfig struct {
 	http         engine.HTTPFunc                         // makes the requests of multiplexed instances
 	budget       *memoryBudget
 	meters       *pluginMeters
+	owner        *ownerTags // the plugin version's owner, on its reports and log records
 	key          string
 	lang         Language
 	limit        uint64 // memory limit of each instance, charged to the budget while it lives
@@ -82,6 +83,7 @@ type pool struct {
 	http         engine.HTTPFunc
 	budget       *memoryBudget
 	meters       *pluginMeters
+	owner        *ownerTags
 	beforeGrow   func()             // test hook: runs in await between its check for closure and its reservation
 	stop         context.CancelFunc // ends the refiller's context
 	idle         chan *slot
@@ -110,8 +112,14 @@ type pool struct {
 func newPool(cfg *poolConfig) *pool {
 	lanes := max(cfg.lanes, 1)
 
+	owner := cfg.owner
+	if owner == nil {
+		owner = noOwner
+	}
+
 	return &pool{
-		logger:       cfg.panics.guardedLogger(cfg.key, cfg.lang),
+		logger:       cfg.panics.pluginLogger(cfg.key, cfg.lang, owner),
+		owner:        owner,
 		panics:       cfg.panics,
 		spawn:        cfg.spawn,
 		http:         cfg.http,
@@ -313,7 +321,7 @@ func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	defer p.retire()
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose}
+			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose, Owner: p.owner.owner}
 			p.panics.recovered(ctx, failure, v)
 
 			err = failure
@@ -439,7 +447,7 @@ func (p *pool) spawnGuarded(ctx context.Context, phase Phase) (instance, error) 
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase}
+				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase, Owner: p.owner.owner}
 				p.panics.recovered(ctx, failure, v)
 
 				inst, err = nil, failure
@@ -493,7 +501,11 @@ func (p *pool) refillStep(ctx context.Context, delay *time.Duration) bool {
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				p.panics.recovered(ctx, &PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill}, v)
+				p.panics.recovered(
+					ctx,
+					&PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill, Owner: p.owner.owner},
+					v,
+				)
 			}
 		}()
 
