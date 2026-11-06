@@ -38,6 +38,11 @@ type Runtime struct {
 	logger *slog.Logger
 	hosts  *xsync.Map[string, *hostState] // by instance module name
 	names  atomic.Uint64                  // instance name sequence
+	// running counts the instances Close stopped while their guest ran, less those whose run has ended since:
+	// Close adds the ones it found, and each run subtracts itself as it ends, before Close counted it or after, so
+	// it is zero once, when Close has counted them all and the last has ended. Whoever makes it zero closes rt.
+	running atomic.Int64
+	closing atomic.Bool // set by Close before it stops the instances: none starts afterwards
 }
 
 // NewRuntime returns a runtime sharing the engine's compilation cache, with WASI preview 1 and the plg host
@@ -73,18 +78,28 @@ func limitPages(limit uint64) uint32 {
 
 // Close closes the runtime and every instance it created. It stops each instance first: what an instance still
 // does fails with [ErrStopped], including a host function it waits in (a sleep, an HTTP request, a Host method),
-// which closing its module alone would not end.
+// which closing its module alone would not end. A guest still running is stopped through the context it runs
+// under, as a deadline stops it, and never freed under it: wazero frees a module's WASI state as it closes it, so
+// the runtime closes once the last such run has ended, in the goroutine of that run, and Close returns before
+// then. Closing it again does nothing.
 func (r *Runtime) Close(ctx context.Context) error {
+	if r.closing.Swap(true) {
+		return nil
+	}
+
+	var running int64
+
 	for _, state := range r.hosts.All() {
-		state.stop()
+		if state.stop() {
+			running++
+		}
 	}
 
-	err := r.rt.Close(ctx)
-	if err != nil {
-		return fmt.Errorf("closing runtime: %w", err)
+	if r.running.Add(running) != 0 {
+		return nil
 	}
 
-	return nil
+	return r.closeWazero(ctx)
 }
 
 // Instances returns how many of the runtime's instances are open: instantiated and their module not closed.
@@ -122,6 +137,25 @@ func (r *Runtime) Compile(ctx context.Context, name string, wasm []byte) (*Modul
 	return &Module{rt: r, cm: cm, name: name}, nil
 }
 
+// left tells the runtime that a guest run Close stopped has ended, under ctx: the last one closes the runtime
+// (see Close).
+func (r *Runtime) left(ctx context.Context) {
+	if r.running.Add(-1) == 0 {
+		//nolint:errcheck // nobody waits for this close, and closing stopped modules' files reports nothing useful
+		_ = r.closeWazero(ctx)
+	}
+}
+
+// closeWazero closes the wazero runtime and every module still open in it.
+func (r *Runtime) closeWazero(ctx context.Context) error {
+	err := r.rt.Close(ctx)
+	if err != nil {
+		return fmt.Errorf("closing runtime: %w", err)
+	}
+
+	return nil
+}
+
 // Mount is a read-only file tree visible to an instance at GuestPath.
 type Mount struct {
 	FS        fs.FS
@@ -144,10 +178,11 @@ type InstanceOptions struct {
 	Mounts []Mount
 }
 
-// Instantiate creates an instance of the module and runs the guest's reactor initialization. Instances have
-// clocks, sleeps that end with the context of the call in progress or the instance's stop (see
-// [Runtime.pollOneoff]), a cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP
-// only through opts.HTTP; no environment and no sockets.
+// Instantiate creates an instance of the module and runs the guest's reactor initialization, which the instance's
+// stop ends as it ends a call ([Runtime.Close]: it then fails with [ErrStopped]). Instances have clocks, sleeps
+// that end with the context of the call in progress or the instance's stop (see [Runtime.pollOneoff]), a
+// cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP only through opts.HTTP; no
+// environment and no sockets.
 func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Instance, error) {
 	fsCfg := wazero.NewFSConfig()
 	for _, mnt := range opts.Mounts {
@@ -156,8 +191,23 @@ func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Insta
 
 	// The host imports find the instance's state by its module name, unique within the runtime.
 	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := newHostState(opts)
+	state := newHostState(opts, m.rt)
 	m.rt.hosts.Store(name, state)
+
+	// The state is stored before closing is read, and Close sets closing before it looks for the instances to
+	// stop: either Close finds this one, or this one sees closing and never starts.
+	guestCtx, cancel, ok := state.enter(ctx)
+	if ok && m.rt.closing.Load() {
+		state.leave(ctx, cancel)
+
+		ok = false
+	}
+
+	if !ok {
+		m.rt.hosts.Delete(name)
+
+		return nil, fmt.Errorf("instantiating guest %s: %w", m.name, ErrStopped)
+	}
 
 	cfg := wazero.NewModuleConfig().
 		WithName(name).
@@ -170,7 +220,19 @@ func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Insta
 		WithStdout(orDiscard(opts.Stdout)).
 		WithStderr(orDiscard(opts.Stderr))
 
-	mod, err := m.rt.rt.InstantiateModule(ctx, m.cm, cfg)
+	mod, err := m.rt.rt.InstantiateModule(guestCtx, m.cm, cfg)
+
+	state.leave(ctx, cancel)
+
+	if state.isStopped() { // stopped during the initialization: it fails, whatever the guest did
+		if err == nil {
+			//nolint:errcheck // as in poll: closing a stopped module's files reports nothing useful
+			_ = mod.Close(ctx)
+		}
+
+		err = ErrStopped
+	}
+
 	if err != nil {
 		m.rt.hosts.Delete(name)
 

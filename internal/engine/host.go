@@ -34,23 +34,23 @@ const keepPending = 64 << 10
 // ErrHTTPDisabled is the refusal instances created without an [HTTPFunc] answer every request with.
 var ErrHTTPDisabled = errors.New("plg: HTTP is not enabled for this plugin")
 
-// ErrStopped fails what an instance does once its runtime closes ([Runtime.Close]): the call, init or step in
-// progress (the host function it waits in sees its context end with ErrStopped as the cause) and every later
-// one. The instance is broken.
+// ErrStopped fails what an instance does once its runtime closes ([Runtime.Close]): the initialization, call or
+// step in progress (its context, which the host function it waits in has, ends with ErrStopped as the cause) and
+// every later one. The instance is broken.
 var ErrStopped = errors.New("engine: instance stopped: its runtime closed")
 
 // HTTPFunc serves a guest's http_roundtrip: it makes (or refuses) the [httpabi]-encoded request req and appends
 // the encoded answer to dst. req aliases guest memory and is valid only until it returns. ctx is the context of
-// the plg_init or plg_call in progress and n counts that call's requests, from 1. One HTTPFunc serves every
-// instance created with it, so it must be safe for concurrent use.
+// the plg_init or plg_call in progress, which the instance's stop ends too, and n counts that call's requests,
+// from 1. One HTTPFunc serves every instance created with it, so it must be safe for concurrent use.
 type HTTPFunc func(ctx context.Context, dst, req []byte, n int) []byte
 
 // HostFunc serves a guest's host_call: it calls the Host method with the given index with the wire-encoded
 // arguments args and appends the status-prefixed answer to dst (the encoded results for [wire.StatusOK],
 // otherwise a message). args aliases guest memory and is valid only until it returns. ctx is the context of the
-// plg_init or plg_call in progress. An error means the request itself is invalid (an unknown method, malformed
-// arguments): the guest broke the ABI and the instance breaks. One HostFunc serves every instance created with
-// it, so it must be safe for concurrent use.
+// plg_init or plg_call in progress, which the instance's stop ends too. An error means the request itself is
+// invalid (an unknown method, malformed arguments): the guest broke the ABI and the instance breaks. One HostFunc
+// serves every instance created with it, so it must be safe for concurrent use.
 type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) ([]byte, error)
 
 // hostState is what the host imports know about one instance. Only the goroutine calling the instance touches
@@ -60,7 +60,8 @@ type hostState struct {
 	http        HTTPFunc
 	refuses     func(n, size int) bool // see InstanceOptions.HTTPRefuses
 	host        HostFunc
-	cancel      context.CancelCauseFunc // ends the context of the host function waiting (stage hostBusy)
+	runtime     *Runtime                // the instance's, told when a guest run its stop found leaves
+	cancel      context.CancelCauseFunc // ends the context of the guest run in progress (stage hostBusy)
 	calls       map[uint32]int          // the multiplexed calls in flight: the requests each started with http_start
 	stopped     chan struct{}           // closed once the instance is stopped
 	pending     []byte                  // the result take_result hands over
@@ -72,17 +73,19 @@ type hostState struct {
 	stepping    bool                    // a multiplexed step is running: http_start is allowed
 }
 
-// The stages of a hostState: whether a host function that waits (http_roundtrip, host_call) runs, and whether
-// the instance was stopped. Only the calling goroutine moves it between hostIdle and hostBusy; only stop moves it
-// to hostStopped, for good.
+// The stages of a hostState: whether the guest runs (its initialization, an ABI export or a step, host functions
+// included), and whether the instance was stopped. Only the calling goroutine moves it between hostIdle and
+// hostBusy; only stop moves it to hostStopped, for good.
 const (
 	hostIdle int32 = iota
 	hostBusy
 	hostStopped
 )
 
-func newHostState(opts *InstanceOptions) *hostState {
-	return &hostState{http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host, stopped: make(chan struct{})}
+func newHostState(opts *InstanceOptions, rt *Runtime) *hostState {
+	return &hostState{
+		http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host, runtime: rt, stopped: make(chan struct{}),
+	}
 }
 
 // begin resets the per-call state before a plg_init or plg_call.
@@ -90,39 +93,49 @@ func (st *hostState) begin() {
 	st.requests, st.ready = 0, false
 }
 
-// enter starts a host function that waits, returning the context it runs under, ended too with [ErrStopped] when
-// the instance is stopped (already, or before leave), and the cancel to hand leave. The calling goroutine hands
-// the cancel over to stop through the stage: it writes st.cancel only while the stage is not hostStopped, then
-// moves the stage to hostBusy, and stop reads st.cancel only when it finds hostBusy, so the write happens before
-// the read; once the stage is hostStopped, st.cancel is never written again.
-func (st *hostState) enter(ctx context.Context) (context.Context, context.CancelCauseFunc) {
+// enter starts a run of the guest under ctx, returning the context it runs under, ended too with [ErrStopped] as
+// the cause when the instance is stopped before leave, and the cancel to hand leave; or false when the instance
+// is stopped already: the guest must not run. The calling goroutine hands the cancel over to stop through the
+// stage: it writes st.cancel only while the stage is not hostStopped, then moves the stage to hostBusy, and stop
+// reads st.cancel only when it finds hostBusy, so the write happens before the read; once the stage is
+// hostStopped, st.cancel is never written again.
+//
+// The context is how a stop reaches a running guest safely: wazero's close-on-context-done marks the module
+// closed, so the guest stops at its next check, and leaves freeing its resources to the goroutine running it,
+// whereas closing the module from another goroutine frees its WASI state under the guest.
+func (st *hostState) enter(ctx context.Context) (context.Context, context.CancelCauseFunc, bool) {
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	if st.stage.Load() != hostStopped {
 		st.cancel = cancel
 
 		if st.stage.CompareAndSwap(hostIdle, hostBusy) {
-			return ctx, cancel
+			return ctx, cancel, true
 		}
 	}
 
-	cancel(ErrStopped)
+	cancel(nil)
 
-	return ctx, cancel
+	return nil, nil, false
 }
 
-// leave ends the host function enter started, releasing its context.
-func (st *hostState) leave(cancel context.CancelCauseFunc) {
-	st.stage.CompareAndSwap(hostBusy, hostIdle) // fails once stopped: the stage stays hostStopped
-	cancel(nil)                                 // no effect once stop cancelled it
+// leave ends the guest run enter started under ctx, releasing the run's context. A run stop found is one its
+// runtime's close waits for: leave tells the runtime it has ended.
+func (st *hostState) leave(ctx context.Context, cancel context.CancelCauseFunc) {
+	cancel(nil) // no effect once stop cancelled it
+
+	if !st.stage.CompareAndSwap(hostBusy, hostIdle) { // stopped during the run
+		st.runtime.left(ctx)
+	}
 }
 
-// stop stops the instance: the host function waiting, if any, sees its context end with [ErrStopped], and so does
-// every later one; poll_oneoff returns at once; stopped is closed. It is safe for concurrent use.
-func (st *hostState) stop() {
+// stop stops the instance, reporting whether its guest was running: the run's context then ends with
+// [ErrStopped], and with it the host function the guest waits in, if any, and a sleep in poll_oneoff; later runs
+// are refused; stopped is closed. It is safe for concurrent use.
+func (st *hostState) stop() bool {
 	previous := st.stage.Swap(hostStopped)
 	if previous == hostStopped {
-		return
+		return false
 	}
 
 	if previous == hostBusy {
@@ -130,6 +143,8 @@ func (st *hostState) stop() {
 	}
 
 	close(st.stopped)
+
+	return previous == hostBusy
 }
 
 // isStopped reports whether the instance was stopped.
@@ -169,7 +184,8 @@ func (r *Runtime) state(mod api.Module) *hostState {
 }
 
 // httpRoundTrip serves http_roundtrip. A host function panic traps the call, so ABI violations panic: the
-// instance is then broken and discarded. The request runs under a context the instance's stop ends.
+// instance is then broken and discarded. The request runs under the call's context, which the instance's stop
+// ends.
 func (r *Runtime) httpRoundTrip(ctx context.Context, mod api.Module, stack []uint64) {
 	state := r.state(mod)
 
@@ -183,24 +199,16 @@ func (r *Runtime) httpRoundTrip(ctx context.Context, mod api.Module, stack []uin
 	if state.http == nil {
 		state.pending = httpabi.AppendFailure(state.pending[:0], ErrHTTPDisabled.Error())
 	} else {
-		state.pending = state.roundTrip(ctx, req)
+		state.pending = state.http(ctx, state.pending[:0], req, state.requests)
 	}
 
 	state.ready = true
 	stack[0] = api.EncodeU32(uint32(len(state.pending))) //nolint:gosec // G115: answers are bounded far below 4 GiB
 }
 
-// roundTrip makes the request req through http, under ctx ended too by the instance's stop.
-func (st *hostState) roundTrip(ctx context.Context, req []byte) []byte {
-	ctx, cancel := st.enter(ctx)
-	defer st.leave(cancel)
-
-	return st.http(ctx, st.pending[:0], req, st.requests)
-}
-
 // hostCall serves host_call. As in httpRoundTrip, ABI violations panic, which traps the call and breaks the
 // instance; so does a host_call from an instance created without a [HostFunc], whose guest has no Host to call.
-// The Host method runs under a context the instance's stop ends.
+// The Host method runs under the call's context, which the instance's stop ends.
 func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) {
 	state := r.state(mod)
 
@@ -213,21 +221,13 @@ func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) 
 		panic(fmt.Errorf("%w: %s from an instance without a host", ErrABI, importHost))
 	}
 
-	answer, err := state.callHost(ctx, api.DecodeU32(stack[0]), args)
+	answer, err := state.host(ctx, state.pending[:0], api.DecodeU32(stack[0]), args)
 	if err != nil {
 		panic(fmt.Errorf("%w: %s: %w", ErrABI, importHost, err))
 	}
 
 	state.pending, state.ready = answer, true
 	stack[0] = api.EncodeU32(uint32(len(answer))) //nolint:gosec // G115: answers are bounded far below 4 GiB
-}
-
-// callHost calls the Host method with the given index through host, under ctx ended too by the instance's stop.
-func (st *hostState) callHost(ctx context.Context, method uint32, args []byte) ([]byte, error) {
-	ctx, cancel := st.enter(ctx)
-	defer st.leave(cancel)
-
-	return st.host(ctx, st.pending[:0], method, args)
 }
 
 // takeResult serves take_result.

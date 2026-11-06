@@ -168,13 +168,13 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 	if size > in.inCap {
 		in.stack[0] = uint64(size)
 
-		err := in.alloc.CallWithStack(ctx, in.stack[:1])
+		err := in.run(ctx, in.alloc, in.stack[:1])
 		if in.host.isStopped() {
 			return in.fail(fmt.Errorf("%s: %w", exportAlloc, ErrStopped))
 		}
 
 		if err != nil {
-			return in.fail(fmt.Errorf("%s: %w", exportAlloc, err))
+			return in.fail(err)
 		}
 
 		in.inPtr, in.inCap = uint32(in.stack[0]), size //nolint:gosec // G115: a wasm32 pointer in the low 32 bits
@@ -196,13 +196,13 @@ func (in *Instance) write(ctx context.Context, req []byte) error {
 func (in *Instance) invoke(ctx context.Context, fn *api.Function, stack []uint64) (Result, error) {
 	in.host.begin()
 
-	err := (*fn).CallWithStack(ctx, stack)
+	err := in.run(ctx, *fn, stack)
 	if in.host.isStopped() {
 		return Result{}, in.fail(fmt.Errorf("%s: %w", exportName(*fn), ErrStopped))
 	}
 
 	if err != nil {
-		return Result{}, in.fail(fmt.Errorf("%s: %w", exportName(*fn), err))
+		return Result{}, in.fail(err)
 	}
 
 	ptr, size := uint32(stack[0]>>ptrShift), uint32(stack[0]) //nolint:gosec // G115: two packed uint32 halves
@@ -226,6 +226,24 @@ func (in *Instance) invoke(ctx context.Context, fn *api.Function, stack []uint64
 	}
 
 	return res, nil
+}
+
+// run calls fn with stack under ctx, ended too by the instance's stop (see hostState.enter), naming the export in
+// its error. A stopped instance runs nothing: the caller finds it stopped.
+func (in *Instance) run(ctx context.Context, fn api.Function, stack []uint64) error {
+	guestCtx, cancel, ok := in.host.enter(ctx)
+	if !ok {
+		return ErrStopped
+	}
+
+	defer in.host.leave(ctx, cancel)
+
+	err := fn.CallWithStack(guestCtx, stack)
+	if err != nil {
+		return fmt.Errorf("%s: %w", exportName(fn), err)
+	}
+
+	return nil
 }
 
 // exportName returns the name fn is exported under.

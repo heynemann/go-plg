@@ -537,8 +537,9 @@ func TestCloseRunsPlgClose(t *testing.T) {
 	require.NoError(t, inst.Close(ended), "once its context has ended, closing frees without calling into the guest")
 	assert.True(t, inst.Broken(), "a closed instance is never reused")
 
-	inst = mustInstantiate(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies})
-	engine.Stop(inst)
+	rt, inst := instantiateRuntime(t, fakeGuest{data: []byte{byte(wire.StatusOK)}, bodies: bodies},
+		&engine.InstanceOptions{})
+	require.NoError(t, rt.Close(t.Context()))
 	require.NoError(t, inst.Close(t.Context()), "a stopped instance is freed without calling into the guest")
 	assert.True(t, inst.Broken(), "a closed instance is never reused")
 }

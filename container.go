@@ -119,7 +119,8 @@ func containerOptions(opts []Option) containerConfig {
 // every instance (each running the plugin's optional Close), stops the refill goroutines and releases the
 // runtimes and the compiled guests, so a closed container that stays referenced keeps almost no memory. Calls
 // still running when ctx ends are stopped, wherever they wait: in the guest, a sleep, an HTTP request or a Host
-// method (whose context ends); each fails with [ErrClosed], and so does a Create in progress. It returns the
+// method (whose context ends); each fails with [ErrClosed], and so does a Create in progress. A runtime with such
+// a call is released once the last of them has left the guest, which may be after Close returns. It returns the
 // failures, those of closing the plugins included. Last, it delivers the queued [WithOnEvent] events, the
 // retired versions' included, while ctx lasts, and stops delivering.
 // Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed]. Closing a closed

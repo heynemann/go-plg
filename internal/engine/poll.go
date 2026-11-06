@@ -70,26 +70,24 @@ func (r *Runtime) instantiateWASI(ctx context.Context, rt wazero.Runtime) {
 // the call's deadline, one sleeping in Create blocked Register, and one sleeping in a refill's Create blocked
 // the pool's close.
 //
-// pollOneoff waits until its earliest clock expires, ctx ends or the instance is stopped ([Runtime.Close]); ctx
-// is the context of the guest call in progress (the instantiation running the guest's initialization, an ABI
-// export or a step). When ctx ends first, it closes the module with the exit code close-on-context-done uses and
-// returns EINTR: the guest stops at its next check exactly as when it is stopped while running, so the call fails
-// with the [sys.ExitError] matching ctx's error and the instance is broken. When the instance is stopped first,
-// it does the same, and the call fails with [ErrStopped].
+// pollOneoff waits until its earliest clock expires or ctx ends: the context of the guest run in progress (the
+// instantiation running the guest's initialization, an ABI export or a step), which the instance's stop
+// ([Runtime.Close]) ends too. Then it closes the module with the exit code close-on-context-done uses and returns
+// EINTR: the guest stops at its next check exactly as when it is stopped while running, so the call fails with
+// the [sys.ExitError] matching ctx's error, or with [ErrStopped] once stopped, and the instance is broken.
 //
 // It serves relative clocks only; wazero does not support absolute ones either. Any other subscription fails the
 // poll with ENOTSUP: nothing in a plg instance can be waited for. It has no sockets or pipes, an empty stdin and
 // read-only in-memory files, and the Go runtime polls a file descriptor only after an I/O on it would block,
 // which never happens there; the Lua and TypeScript guests do not import poll_oneoff.
-func (r *Runtime) pollOneoff(ctx context.Context, mod api.Module, stack []uint64) {
-	stack[0] = uint64(poll(ctx, mod, r.state(mod).stopped, api.DecodeU32(stack[0]), api.DecodeU32(stack[1]),
-		api.DecodeU32(stack[2]), api.DecodeU32(stack[3])))
+func (*Runtime) pollOneoff(ctx context.Context, mod api.Module, stack []uint64) {
+	stack[0] = uint64(poll(ctx, mod, api.DecodeU32(stack[0]), api.DecodeU32(stack[1]), api.DecodeU32(stack[2]),
+		api.DecodeU32(stack[3])))
 }
 
 // poll is pollOneoff with decoded parameters: the subscriptions at inPtr, the events to write at outPtr and their
-// count at neventsPtr; stopped is closed once the instance is stopped.
-func poll(ctx context.Context, mod api.Module, stopped <-chan struct{}, inPtr, outPtr, count, neventsPtr uint32,
-) errno {
+// count at neventsPtr.
+func poll(ctx context.Context, mod api.Module, inPtr, outPtr, count, neventsPtr uint32) errno {
 	if count == 0 {
 		return errnoInval
 	}
@@ -112,7 +110,7 @@ func poll(ctx context.Context, mod api.Module, stopped <-chan struct{}, inPtr, o
 		return code
 	}
 
-	if !wait(ctx, stopped, timeout) {
+	if !wait(ctx, timeout) {
 		//nolint:errcheck // as in wazero's own stop (FailIfClosed): closing a stopped module's files reports nothing useful
 		_ = mod.CloseWithExitCode(ctx, exitCode(ctx.Err()))
 
@@ -147,9 +145,9 @@ func earliest(subs []byte) (uint64, errno) {
 	return timeout, errnoSuccess
 }
 
-// wait waits for timeout nanoseconds, until ctx ends or until stopped is closed, reporting whether the timeout
-// elapsed. A timeout beyond [time.Duration] lasts until ctx ends or stopped is closed.
-func wait(ctx context.Context, stopped <-chan struct{}, timeout uint64) bool {
+// wait waits for timeout nanoseconds or until ctx ends, reporting whether the timeout elapsed. A timeout beyond
+// [time.Duration] lasts until ctx ends.
+func wait(ctx context.Context, timeout uint64) bool {
 	if timeout == 0 {
 		return true
 	}
@@ -161,8 +159,6 @@ func wait(ctx context.Context, stopped <-chan struct{}, timeout uint64) bool {
 	case <-timer.C:
 		return true
 	case <-ctx.Done():
-		return false
-	case <-stopped:
 		return false
 	}
 }

@@ -8,7 +8,8 @@ import (
 
 // fakeGuest assembles a tiny wasm module that exports one page of memory and the plg ABI functions with the
 // given bodies, so engine behavior can be tested against exact guest misbehavior without the real guest. It
-// may import plg host functions and WASI's poll_oneoff: import i is function index i, called with call(i).
+// may import plg host functions and WASI's poll_oneoff and clock_time_get: import i is function index i, called
+// with call(i).
 type fakeGuest struct {
 	bodies  map[string][]byte // export name -> function body (instructions, without the final end)
 	data    []byte            // placed at address 0
@@ -20,30 +21,23 @@ const (
 	i64 = 0x7e
 )
 
-// signatureOf returns the parameter and result types of an ABI export.
+// signatureOf returns the parameter and result types of an ABI export or an import; _initialize has none.
 func signatureOf(export string) [2][]byte {
-	switch export {
-	case "plg_alloc":
-		return [2][]byte{{i32}, {i32}}
-	case "plg_init", "plg_drop":
-		return [2][]byte{{i32}, {i64}}
-	case "plg_call", "plg_resume":
-		return [2][]byte{{i32, i32}, {i64}}
-	case "plg_close":
-		return [2][]byte{nil, {i64}}
-	case "http_roundtrip":
-		return [2][]byte{{i32, i32}, {i32}}
-	case "take_result":
-		return [2][]byte{{i32, i32}, nil}
-	case "host_call", "http_start":
-		return [2][]byte{{i32, i32, i32}, {i32}}
-	case "poll_oneoff":
-		return [2][]byte{{i32, i32, i32, i32}, {i32}}
-	case "plg_start":
-		return [2][]byte{{i32, i32, i32}, {i64}}
-	default: // _initialize
-		return [2][]byte{}
-	}
+	return map[string][2][]byte{
+		"plg_alloc":      {{i32}, {i32}},
+		"plg_init":       {{i32}, {i64}},
+		"plg_drop":       {{i32}, {i64}},
+		"plg_call":       {{i32, i32}, {i64}},
+		"plg_resume":     {{i32, i32}, {i64}},
+		"plg_close":      {nil, {i64}},
+		"plg_start":      {{i32, i32, i32}, {i64}},
+		"http_roundtrip": {{i32, i32}, {i32}},
+		"take_result":    {{i32, i32}, nil},
+		"host_call":      {{i32, i32, i32}, {i32}},
+		"http_start":     {{i32, i32, i32}, {i32}},
+		"poll_oneoff":    {{i32, i32, i32, i32}, {i32}},
+		"clock_time_get": {{i32, i64, i32}, {i32}},
+	}[export]
 }
 
 // Instruction helpers.
@@ -66,7 +60,7 @@ func store32() []byte { return []byte{0x36, 0x00, 0x00} }
 
 // importModule is the module a fake guest imports function n from.
 func importModule(n string) string {
-	if n == "poll_oneoff" {
+	if n == "poll_oneoff" || n == "clock_time_get" {
 		return "wasi_snapshot_preview1"
 	}
 
