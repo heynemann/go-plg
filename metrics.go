@@ -58,7 +58,9 @@ const meterName = "github.com/heynemann/go-plg"
 //     response's status code), refused (by the policy) or failed (in transit, timed out, too large a response);
 //   - plg.http.duration {key, outcome}: their latency in seconds;
 //   - plg.http.request.size and plg.http.response.size {key}: the bytes of the encoded requests the plugins
-//     sent and of the encoded responses they received.
+//     sent and of the encoded responses they received;
+//   - plg.events.dropped {key, kind}: [WithOnEvent] events dropped because they found the queue full, kind
+//     being the [EventKind].
 //
 // The gauges (instances, in use, calls in flight, memory) cover the plugin versions the container serves; a
 // version replaced by a reload is no longer observed while it drains. Measurements on the call path use attribute
@@ -75,7 +77,7 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 // instruments are a container's OpenTelemetry instruments.
 type instruments struct {
 	calls, callErrors, panics, waits, refills, loads, reloadFailures, skipped metric.Int64Counter
-	validations, validationIssues                                             metric.Int64Counter
+	validations, validationIssues, eventsDropped                              metric.Int64Counter
 	httpRequests, httpSent, httpReceived                                      metric.Int64Counter
 	callDuration, httpDuration                                                metric.Float64Histogram
 	instances, inUse, inFlight, memory                                        metric.Int64ObservableUpDownCounter
@@ -130,6 +132,7 @@ func newInstruments(provider metric.MeterProvider) (*instruments, error) {
 	inst.httpSent = counter("plg.http.request.size", "By", "Bytes of the HTTP requests plugins sent.")
 	inst.httpReceived = counter("plg.http.response.size", "By", "Bytes of the HTTP responses plugins received.")
 	inst.httpDuration = histogram("plg.http.duration", "Latency of HTTP requests made by plugins.")
+	inst.eventsDropped = counter("plg.events.dropped", "{event}", "Events dropped: the WithOnEvent queue was full.")
 	inst.instances = gauge("plg.pool.instances", "{instance}", "Instances of a plugin alive or starting.")
 	inst.inUse = gauge("plg.pool.instances.in_use", "{instance}", "Instances of a plugin serving a call.")
 	inst.inFlight = gauge("plg.pool.calls.in_flight", "{call}", "Calls a plugin's instances are serving.")

@@ -2354,7 +2354,7 @@ func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
 		Team: Team{Name: "payments", Department: "finance"}, Org: "commerce", Company: "acme",
 		Maintainers: []Maintainer{{Name: "Ana", Email: "ana@example.com"}}, Labels: map[string]string{"tier": "1"},
 	}
-	meters := newPluginMeters(inst, "n/k", LanguageLua, newOwnerTags(owner), reflect.TypeFor[twoMethods]())
+	meters := newPluginMeters(inst, "n/k", LanguageLua, newOwnerTags(owner, "", ""), reflect.TypeFor[twoMethods]())
 	ctx := t.Context()
 
 	for _, call := range []struct {
@@ -4179,4 +4179,19 @@ func TestPoolClosesAnInstanceAcquiredAfterItsCloseGaveUp(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 	assert.Equal(t, int32(1), spawner.closed.Load())
 	assert.Equal(t, PoolStats{}, instances.stats())
+}
+
+// TestEventsAfterCloseAreNotQueued emits an event once Close stopped delivering, as a Validate or a panic report
+// racing Close may: it is not queued, so nothing holds it.
+func TestEventsAfterCloseAreNotQueued(t *testing.T) {
+	t.Parallel()
+
+	ctr := New(WithOnEvent(func(context.Context, Event) {}))
+	require.NoError(t, ctr.Close(t.Context()))
+
+	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall, Value: "late"})
+	ctr.events.problem(t.Context(), &Report{Key: "n/k", At: time.Now(), Err: ErrDuplicateKey})
+
+	assert.Empty(t, ctr.events.queue)
+	assert.Len(t, ctr.RecentPanics(), 1, "the panic itself was still reported")
 }

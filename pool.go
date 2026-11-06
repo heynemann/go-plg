@@ -321,7 +321,7 @@ func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	defer p.retire()
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose, Owner: p.owner.owner}
+			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose, Owner: p.owner.owner, tags: p.owner}
 			p.panics.recovered(ctx, failure, v)
 
 			err = failure
@@ -447,7 +447,7 @@ func (p *pool) spawnGuarded(ctx context.Context, phase Phase) (instance, error) 
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase, Owner: p.owner.owner}
+				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase, Owner: p.owner.owner, tags: p.owner}
 				p.panics.recovered(ctx, failure, v)
 
 				inst, err = nil, failure
@@ -503,7 +503,7 @@ func (p *pool) refillStep(ctx context.Context, delay *time.Duration) bool {
 			if v := recover(); v != nil {
 				p.panics.recovered(
 					ctx,
-					&PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill, Owner: p.owner.owner},
+					&PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill, Owner: p.owner.owner, tags: p.owner},
 					v,
 				)
 			}

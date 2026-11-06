@@ -47,6 +47,7 @@ type Container struct {
 	// the container logs itself; a plugin version's instances and pool log through guarded loggers of their own.
 	logger       *slog.Logger
 	panics       *panicReporter
+	events       *eventQueue // the WithOnEvent function's; nil without one
 	meters       *instruments
 	observation  metric.Registration                 // the callback observing the pools' gauges
 	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
@@ -97,6 +98,9 @@ func New(opts ...Option) *Container {
 	// After the instruments: a panic in the logger's handler on the engine's warning is counted in them.
 	ctr.engine = engine.New(context.Background(), engine.Options{Logger: ctr.logger, CacheDir: cfg.cacheDir})
 
+	ctr.events = newEventQueue(cfg.onEvent, ctr.panics, ctr.logger)
+	ctr.panics.events = ctr.events
+
 	return ctr
 }
 
@@ -115,7 +119,8 @@ func containerOptions(opts []Option) containerConfig {
 // runtimes and the compiled guests, so a closed container that stays referenced keeps almost no memory. Calls
 // still running when ctx ends are stopped, wherever they wait: in the guest, a sleep, an HTTP request or a Host
 // method (whose context ends); each fails with [ErrClosed], and so does a Create in progress. It returns the
-// failures, those of closing the plugins included.
+// failures, those of closing the plugins included. Last, it delivers the queued [WithOnEvent] events, the
+// retired versions' included, while ctx lasts, and stops delivering.
 // Afterwards Get, reloads and calls through plugins obtained earlier fail with [ErrClosed]. Closing a closed
 // container does nothing.
 func (c *Container) Close(ctx context.Context) error {
@@ -150,7 +155,7 @@ func (c *Container) Close(ctx context.Context) error {
 	// while the closed container stays referenced; closing the compilation cache frees their machine code.
 	c.modules.Clear()
 
-	errs = append(errs, c.engine.Close(ctx), c.unobserve(ctx))
+	errs = append(errs, c.engine.Close(ctx), c.unobserve(ctx), c.events.close(ctx))
 
 	err := errors.Join(errs...)
 	if err != nil {

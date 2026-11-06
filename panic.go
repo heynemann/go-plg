@@ -54,6 +54,9 @@ const (
 type PanicError struct {
 	// Value is the recovered value, or the guest's panic message or trap.
 	Value any
+	// tags are the failing plugin version's, for its [EventPanicked] event's version and storage; nil when no
+	// version is involved.
+	tags *ownerTags
 	// Time is when the failure was reported.
 	Time time.Time
 	// Key is the plugin key, "<name>/<descriptor key>", or the Register name when no plugin is involved (a
@@ -123,6 +126,7 @@ type panicReporter struct {
 	logger  *slog.Logger
 	onPanic func(context.Context, *PanicError)
 	meters  *instruments // nil counts nothing
+	events  *eventQueue  // the WithOnEvent queue; nil emits nothing
 	history panicHistory
 	// unguarded makes the guarded loggers log straight to logger, without the callback boundary, so that tests
 	// can prove that a panic escaping where plg logs leaves nothing behind.
@@ -149,8 +153,9 @@ func (r *panicReporter) recovered(ctx context.Context, failure *PanicError, valu
 	r.report(ctx, failure)
 }
 
-// report stamps failure with the current time, records, counts and logs it and passes it to the WithOnPanic
-// function. The meter provider and the logger's handler are the user's code too.
+// report stamps failure with the current time, records, counts and logs it, passes it to the WithOnPanic
+// function and emits its [EventPanicked] event. The meter provider and the logger's handler are the user's code
+// too.
 func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	failure.Time = time.Now()
 	r.history.record(failure)
@@ -164,6 +169,8 @@ func (r *panicReporter) report(ctx context.Context, failure *PanicError) {
 	if r.onPanic != nil {
 		r.callback(ctx, failure.Key, failure.Language, "OnPanic", func() { r.onPanic(ctx, failure) })
 	}
+
+	r.events.panicked(ctx, failure)
 }
 
 // callback runs fn, the user's code (named method) serving the plugin key in lang: a panic in it is recorded,
@@ -283,8 +290,9 @@ func callbackFailure(key string, lang Language, method string, v any) *PanicErro
 
 // Methods of the user's code that plg reports by name in the PanicError recorded when it panics.
 const (
-	logMethod   = "slog.Handler.Handle"  // the logger's handler
-	meterMethod = "metric.MeterProvider" // an instrument of the meter provider
+	logMethod     = "slog.Handler.Handle"  // the logger's handler
+	meterMethod   = "metric.MeterProvider" // an instrument of the meter provider
+	onEventMethod = "OnEvent"              // the WithOnEvent function
 )
 
 // log logs failure at Error level.

@@ -175,6 +175,7 @@ func (l *launcher) discardUnstarted(ctx context.Context, inst closer) {
 func (l *launcher) failed(ctx context.Context, phase Phase, value any, out *guestout.Capture) *PanicError {
 	failure := &PanicError{
 		Key: l.key, Language: l.lang, Phase: phase, Value: value, Guest: out.Guest(), Owner: l.owner.owner,
+		tags: l.owner,
 	}
 	l.panics.report(ctx, failure)
 

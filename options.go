@@ -24,6 +24,7 @@ type containerConfig struct {
 	logger        *slog.Logger
 	meterProvider metric.MeterProvider // nil: the global provider
 	onPanic       func(context.Context, *PanicError)
+	onEvent       func(context.Context, Event)
 	cacheDir      string
 	memoryBudget  uint64
 	panicHistory  int

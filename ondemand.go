@@ -182,7 +182,8 @@ func (c *Container) validateServing(ctx context.Context, gen *plugin) (Report, b
 }
 
 // validated keeps report, an on-demand validation of gen, as gen's latest, unless one started later was kept
-// already, and applies the Register's policy to its outcome. It reports whether it unpublished gen.
+// already, emits its [EventValidated] event and applies the Register's policy to its outcome. It reports whether it
+// unpublished gen.
 func (c *Container) validated(ctx context.Context, gen *plugin, report *Report) bool {
 	var prev *Report
 
@@ -196,6 +197,8 @@ func (c *Container) validated(ctx context.Context, gen *plugin, report *Report) 
 			break
 		}
 	}
+
+	c.events.generation(ctx, EventValidated, gen, report)
 
 	attrs := []slog.Attr{
 		slog.String("key", gen.key), gen.launch.owner.log, slog.String("version", gen.desc.Version),
@@ -234,6 +237,7 @@ func (c *Container) unpublish(ctx context.Context, gen *plugin, report *Report, 
 	}
 
 	gen.reg.rejections.Store(gen.key, report)
+	c.events.generation(ctx, EventRejected, gen, report)
 	c.retire(ctx, gen)
 
 	c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin unpublished: its validation failed",

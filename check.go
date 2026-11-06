@@ -50,6 +50,7 @@ func (c *Container) checkCandidate(ctx context.Context, name string, desc *Descr
 	default:
 	}
 
+	ctx = context.WithValue(ctx, checkKey{}, true) // its PanicErrors emit no events
 	src := source{storeName: checkStorage, desc: *desc}
 	key := name + "/" + desc.Key
 	report := newReport(key, &src, time.Now())

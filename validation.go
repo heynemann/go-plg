@@ -372,7 +372,7 @@ func (c *Container) validationInput(ctx context.Context, val *validation, launch
 	if panicked != nil {
 		failure := &PanicError{
 			Key: info.Key, Language: info.Language, Phase: PhaseCallback, Method: "WithValidation",
-			Owner: launch.owner.owner,
+			Owner: launch.owner.owner, tags: launch.owner,
 		}
 		c.panics.recovered(ctx, failure, panicked)
 
@@ -467,7 +467,7 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 func (c *Container) validateFailed(ctx context.Context, launch *launcher, inst instance, value any) *PanicError {
 	failure := &PanicError{
 		Key: launch.key, Language: launch.lang, Phase: PhaseCall, Method: goabi.ValidateMethod, Value: value,
-		Guest: inst.Guest(), Owner: launch.owner.owner,
+		Guest: inst.Guest(), Owner: launch.owner.owner, tags: launch.owner,
 	}
 	c.panics.report(ctx, failure)
 

@@ -667,9 +667,9 @@ languages, memory limits, ownership rules and validation); its files go through 
 storage's, and a descriptor without a `Version` gets their content hash. It runs `Create` and, with
 `WithValidation`, `Validate` in one throwaway instance whose Host calls and HTTP requests see
 `plg.IsValidation(ctx)`, then closes it. Nothing is published: no catalogue entry, no report kept for the
-registration (the candidate's issues are logged like a load's). The instance's memory limit is charged to the
-budget as extra room, beyond every plugin's reservation, never waiting for it: a budget the reservations fill
-fails `Check` at once with `plg.ErrMemoryBudget`.
+registration, no events (the candidate's issues are logged like a load's). The instance's memory limit is
+charged to the budget as extra room, beyond every plugin's reservation, never waiting for it: a budget the
+reservations fill fails `Check` at once with `plg.ErrMemoryBudget`.
 
 ## Limits, pools and the memory budget
 
@@ -875,8 +875,41 @@ if errors.As(err, &pe) {
   and errors by key, method and outcome; panics by phase; pool instances, instances in use (serving at least one
   call), calls in flight (more than instances in use only with `WithConcurrentCalls`), waits and refills; instance
   memory; loads, skips and reload failures; validations by trigger and outcome, and their issues by severity;
-  HTTP requests, latency and sizes. Names and attributes are listed on
-  `plg.WithMeterProvider`. Recording on the call path does not allocate.
+  HTTP requests, latency and sizes; lifecycle events dropped (`plg.events.dropped`). Names and attributes are
+  listed on `plg.WithMeterProvider`. Recording on the call path does not allocate.
+
+### Lifecycle events: `WithOnEvent`
+
+To route plugin problems to the people who own them, give the container one function that receives every
+lifecycle event:
+
+```go
+c := plg.New(plg.WithOnEvent(func(ctx context.Context, e plg.Event) {
+	switch e.Kind {
+	case plg.EventRejected: // e.Report.Err says why; e.Owner says who to tell
+		page(e.Owner.Contact.Oncall, e.Key, e.Version, e.Report.Err)
+	case plg.EventPanicked: // e.Panic is the PanicError
+		notify(e.Owner.Contact.Channel, e.Panic)
+	}
+}))
+```
+
+| Kind | When | Carries |
+|---|---|---|
+| `EventLoaded` | Register or a reload published a plugin version | its load `Report` |
+| `EventRejected` | a load failed (Register, which then fails, or a reload, which keeps the last good version), an issue blocked it (ownership, validation), a reload's storages list a key it cannot load (invalid descriptor, a key listed twice), or an on-demand validation unpublished the version | the failed load's or validation's `Report` |
+| `EventRetired` | a reload replaced or removed a version, `Unpublish` removed it, or `Close` closed the container | |
+| `EventPanicked` | a `PanicError` was reported (what `WithOnPanic` gets) | `Panic` |
+| `EventValidated` | an on-demand validation ran (`plg.Validate`, `plg.ValidateAll`) | its `Report` |
+| `EventSkipped` | a listed plugin's language is not enabled, at Register and each reload | |
+
+Every event carries the plugin's `Key`, `Version`, `Language`, `Storage` and `Owner` (empty where not known: a
+listing problem knows only the key). Delivery never slows anything down: one goroutine per container calls the
+function, in order, from a queue of 1024 events; an event that finds the queue full is dropped, counted in
+`plg.events.dropped` and logged at Warn. A panic in the function is contained like every callback's (a
+`PanicError` in phase `callback`, kept in `RecentPanics`) and delivery goes on. `Close` delivers what is queued
+(the versions it retires included) for as long as its ctx allows, ends the function's ctx with its own, and
+stops. `plg.Check` emits nothing.
 
 ## Deployment: `plg warm` and `plg build-guest`
 

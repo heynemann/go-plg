@@ -156,7 +156,7 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
 				failure := &PanicError{
 					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.iface.String() + "." + meth.name,
-					Owner: hc.owner.owner,
+					Owner: hc.owner.owner, tags: hc.owner,
 				}
 				hc.panics.recovered(ctx, failure, v)
 

@@ -6,10 +6,10 @@ Delivery is asynchronous: one goroutine per container drains a bounded queue (10
 
 **Blocked by:** 04 (Validate at load, for Go plugins), 06 (On-demand validation)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests observe each event type with correct fields, including owner
-- [ ] A slow callback never delays calls, Register or reloads (deterministic test with a blocking callback), and overflow drops and counts events
-- [ ] A panicking callback is contained; Close drains and stops delivery (goleak)
-- [ ] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
+- [x] Tests observe each event type with correct fields, including owner
+- [x] A slow callback never delays calls, Register or reloads (deterministic test with a blocking callback), and overflow drops and counts events
+- [x] A panicking callback is contained; Close drains and stops delivery (goleak)
+- [x] README and PLAN.md ("Validation and ownership" section, plus an implementation-log entry) updated
 - [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/storages where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket

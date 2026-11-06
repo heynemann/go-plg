@@ -218,17 +218,22 @@ func (o *Owner) metricAttrs() [3]attribute.KeyValue {
 }
 
 // ownerTags are a plugin version's owner and the forms plg reports it in, built once when the version loads so
-// that reporting it allocates nothing more.
+// that reporting it allocates nothing more, with the version and the storage it came from, which the version's
+// [PanicError]s carry to their [EventPanicked] events.
 type ownerTags struct {
 	metrics [3]attribute.KeyValue // team, org and company
 	log     slog.Attr             // the "owner" log group
+	version string                // the plugin version, resolved
+	storage string                // the name of the storage it was loaded from
 	owner   Owner                 // what PanicError and PluginError carry
 }
 
-// newOwnerTags returns the tags of owner.
-func newOwnerTags(owner *Owner) *ownerTags {
-	return &ownerTags{owner: *owner, log: owner.logAttr(), metrics: owner.metricAttrs()}
+// newOwnerTags returns the tags of owner, for a plugin version loaded from storage.
+func newOwnerTags(owner *Owner, version, storage string) *ownerTags {
+	return &ownerTags{
+		owner: *owner, log: owner.logAttr(), metrics: owner.metricAttrs(), version: version, storage: storage,
+	}
 }
 
 // noOwner are the tags of a plugin without an owner, and of what is no plugin.
-var noOwner = newOwnerTags(&Owner{}) //nolint:gochecknoglobals // immutable, shared by every owner-less report
+var noOwner = newOwnerTags(&Owner{}, "", "") //nolint:gochecknoglobals // immutable, shared by owner-less reports

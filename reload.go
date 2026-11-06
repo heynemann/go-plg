@@ -256,7 +256,9 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	for _, p := range problems {
 		key := reg.name + "/" + p.key
 		listed[key] = true
-		reg.rejections.Store(key, &Report{Key: key, At: time.Now(), Err: p.err})
+		report := &Report{Key: key, At: time.Now(), Err: p.err}
+		reg.rejections.Store(key, report)
+		c.events.problem(ctx, report)
 
 		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], p.err))
 	}
@@ -307,6 +309,7 @@ func (c *Container) reloadOne(ctx context.Context, reg *registration, key string
 	case err != nil:
 		c.finishReport(ctx, report, src, err)
 		reg.rejections.Store(key, report)
+		c.events.source(ctx, EventRejected, key, src, report)
 		c.countLoad(ctx, key, src.desc.Language, src.desc.owner(), err)
 
 		return c.rejected(ctx, key, src.desc.owner(), old, err)
@@ -447,6 +450,8 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 	changes.loaded = nil // published: the round no longer closes them
 
 	for _, gen := range loaded {
+		c.events.generation(ctx, EventLoaded, gen, gen.report)
+
 		if old := current[gen.key]; old != nil {
 			c.retire(ctx, old)
 		}
@@ -464,14 +469,16 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 	return nil
 }
 
-// retire stops serving gen, which the published catalogue no longer holds. A goroutine waits for its last call
-// in flight to leave, then closes its instances, each running the plugin's optional Close, and gives its memory
-// reservation back; [Container.Close] waits for it. Retiring a generation again does nothing: an on-demand
-// validation that unpublishes it may race a reload replacing or removing it.
+// retire stops serving gen, which the published catalogue no longer holds, and emits its [EventRetired] event. A
+// goroutine waits for its last call in flight to leave, then closes its instances, each running the plugin's
+// optional Close, and gives its memory reservation back; [Container.Close] waits for it. Retiring a generation
+// again does nothing: an on-demand validation that unpublishes it may race a reload replacing or removing it.
 func (c *Container) retire(ctx context.Context, gen *plugin) {
 	if !gen.retiring.CompareAndSwap(false, true) {
 		return
 	}
+
+	c.events.generation(ctx, EventRetired, gen, nil)
 
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.retired.Store(gen, cancel)
@@ -493,6 +500,7 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 				Language: gen.desc.Language,
 				Phase:    PhaseClose,
 				Owner:    *gen.desc.owner(),
+				tags:     gen.pool.owner,
 			}
 			c.panics.recovered(ctx, failure, v)
 

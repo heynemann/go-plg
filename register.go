@@ -61,6 +61,10 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 		return err
 	}
 
+	for _, plug := range plugins {
+		c.events.generation(ctx, EventLoaded, plug, plug.report)
+	}
+
 	c.serve(ctx, reg)
 
 	return nil
@@ -171,6 +175,10 @@ type problem struct {
 // Register did not enable are skipped and logged.
 func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) ([]source, error) {
 	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
+	for _, p := range problems {
+		c.events.problem(ctx, &Report{Key: name + "/" + p.key, At: time.Now(), Err: p.err})
+	}
+
 	if err == nil && len(problems) > 0 {
 		err = problems[0].err
 	}
@@ -184,6 +192,8 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 	for i := range listed {
 		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelInfo)
 		if err != nil {
+			c.events.problem(ctx, &Report{Key: name + "/" + listed[i].desc.Key, At: time.Now(), Err: err})
+
 			return nil, err
 		}
 
@@ -234,6 +244,7 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 			slog.String("key", key), slog.String("storage", src.storeName),
 			slog.String("language", string(src.desc.Language)), src.desc.owner().logAttr())
 		c.countSkipped(ctx, key, src.desc.Language, src.desc.owner())
+		c.events.source(ctx, EventSkipped, key, src, nil)
 
 		return false, nil
 	}
@@ -400,6 +411,7 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 		c.finishReport(ctx, report, &srcs[i], err)
 
 		if err != nil {
+			c.events.source(ctx, EventRejected, key, &srcs[i], report)
 			c.countLoad(ctx, key, srcs[i].desc.Language, srcs[i].desc.owner(), err)
 			c.closeUnpublished(ctx, plugins)
 			c.budget.unreserve(reserved)
@@ -472,7 +484,10 @@ func (c *Container) load(ctx context.Context, reg *registration, key string, src
 func (c *Container) loadStep(ctx context.Context, key string, src *source, step func() error) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: key, Language: src.desc.Language, Phase: PhaseLoad, Owner: *src.desc.owner()}
+			failure := &PanicError{
+				Key: key, Language: src.desc.Language, Phase: PhaseLoad, Owner: *src.desc.owner(),
+				tags: newOwnerTags(src.desc.owner(), src.desc.Version, src.storeName),
+			}
 			c.panics.recovered(ctx, failure, v)
 
 			err = failure
@@ -579,7 +594,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key string, src *source,
 	files *memfs.FS, report *Report,
 ) (*launcher, *pluginMeters, error) {
-	owner := newOwnerTags(src.desc.owner())
+	owner := newOwnerTags(src.desc.owner(), src.desc.Version, src.storeName)
 
 	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",

@@ -112,6 +112,8 @@ func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) fu
 // PanicErrors in [PhaseHTTP], and the plugin's request fails with an internal error.
 func (c *Container) httpPanicked(key string, lang Language, owner *ownerTags) func(context.Context, any) {
 	return func(ctx context.Context, value any) {
-		c.panics.recovered(ctx, &PanicError{Key: key, Language: lang, Phase: PhaseHTTP, Owner: owner.owner}, value)
+		c.panics.recovered(ctx, &PanicError{
+			Key: key, Language: lang, Phase: PhaseHTTP, Owner: owner.owner, tags: owner,
+		}, value)
 	}
 }

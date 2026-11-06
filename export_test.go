@@ -252,6 +252,11 @@ func SetCloseTimeout(c *Container, d time.Duration) {
 	c.closeTimeout = d
 }
 
+// EventsStopped returns a channel closed once the goroutine delivering c's WithOnEvent events has returned.
+func EventsStopped(c *Container) <-chan struct{} {
+	return c.events.done
+}
+
 // SetBundleLimits replaces the base of a bundling's time limit and the bundler's memory limit. Call it before the
 // container loads any TypeScript plugin.
 func SetBundleLimits(c *Container, timeBase time.Duration, memory uint64) {
