@@ -496,7 +496,8 @@ func (c *Container) retire(ctx context.Context, gen *plugin) {
 // closeRetired closes a retired generation once no call is in flight, or once ctx ends: Close gave up waiting
 // for the calls, and their instances are left to the runtimes. Closing gets the container's close timeout; a
 // failure is logged and kept in gen.closeErr. A panic meanwhile (not the logger's handler's, which is guarded) is
-// reported as a [PanicError] in [PhaseClose] and kept too; the generation counts as closed all the same.
+// reported as a [PanicError] in [PhaseClose] and kept too; the generation counts as closed all the same. gen.closed
+// is closed last, once the generation has left c.retired, so whoever waited for it finds the retirement complete.
 func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -513,11 +514,12 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 		}
 
 		c.budget.unreserve(gen.reserved)
-		close(gen.closed)
 
 		if stop, ok := c.retired.LoadAndDelete(gen); ok {
 			stop()
 		}
+
+		close(gen.closed)
 	}()
 
 	select {
