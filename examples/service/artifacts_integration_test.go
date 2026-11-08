@@ -36,7 +36,8 @@ type adminContract struct {
 
 // The example author repository's CI script validates and packs its three rules (Go, Lua, TypeScript), and the
 // service serves those artifacts: each rule prices orders, after its own Validate passed the service's limits and
-// with its owner named, and the admin handler shows the commit and the contract each was packed from.
+// with its owner named, and the admin handler shows, for each, the repository's commit and the contract it was
+// packed from, and its own digest as the version it serves.
 func TestServiceServesPackedArtifacts(t *testing.T) {
 	t.Parallel()
 
@@ -66,24 +67,45 @@ func TestServiceServesPackedArtifacts(t *testing.T) {
 		},
 	}, got, "every packed rule prices the order")
 
-	answer := adminDo(t, http.MethodGet, url+"/admin/plg/plugins/pricing/seasonal", adminToken, http.NoBody)
-	require.Equal(t, http.StatusOK, answer.status, string(answer.body))
+	var commit string // the repository's, the same for every artifact
 
-	var state struct {
-		Provenance *adminProvenance `json:"provenance"`
-		Owner      adminOwner       `json:"owner"`
-		Status     string           `json:"status"`
+	digests := make(map[string]string, len(entries)) // key by digest
+
+	for _, rule := range []struct{ key, team string }{
+		{"pricing/bundle", "assortment"}, {"pricing/seasonal", "promotions"}, {"pricing/vip", "loyalty"},
+	} {
+		answer := adminDo(t, http.MethodGet, url+"/admin/plg/plugins/"+rule.key, adminToken, http.NoBody)
+		require.Equal(t, http.StatusOK, answer.status, "%s: %s", rule.key, answer.body)
+
+		var state struct {
+			Provenance *adminProvenance `json:"provenance"`
+			Owner      adminOwner       `json:"owner"`
+			Status     string           `json:"status"`
+			Version    string           `json:"version"`
+		}
+
+		answer.decode(t, &state)
+		assert.Equal(t, "serving", state.Status, rule.key)
+		assert.Equal(t, rule.team, state.Owner.Team.Name, rule.key)
+		require.NotNil(t, state.Provenance, "%s: loaded from an artifact", rule.key)
+		assert.Equal(t, "github.com/heynemann/go-plg/examples", state.Provenance.Contract.Path, rule.key)
+		assert.Equal(t, "v1.0.0", state.Provenance.Contract.Version, rule.key)
+		assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, state.Provenance.Digest, rule.key)
+		assert.Equal(t, state.Provenance.Digest, state.Version, "%s: versioned by its digest", rule.key)
+		assert.Regexp(t, `^[0-9a-f]{40}$`, state.Provenance.Commit, "%s: packed from the repository's commit",
+			rule.key)
+		assert.False(t, state.Provenance.Dirty, "%s: the CI script's reports and artifacts are not the plugin's files",
+			rule.key)
+
+		if commit == "" {
+			commit = state.Provenance.Commit
+		}
+
+		assert.Equal(t, commit, state.Provenance.Commit, "%s: packed from the same commit as the others", rule.key)
+		assert.NotContains(t, digests, state.Provenance.Digest, "%s: a digest of its own files", rule.key)
+
+		digests[state.Provenance.Digest] = rule.key
 	}
-
-	answer.decode(t, &state)
-	assert.Equal(t, "serving", state.Status)
-	assert.Equal(t, "promotions", state.Owner.Team.Name)
-	require.NotNil(t, state.Provenance, "loaded from an artifact")
-	assert.Equal(t, "github.com/heynemann/go-plg/examples", state.Provenance.Contract.Path)
-	assert.Equal(t, "v1.0.0", state.Provenance.Contract.Version)
-	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, state.Provenance.Digest)
-	assert.Regexp(t, `^[0-9a-f]{40}$`, state.Provenance.Commit, "packed from the repository's commit")
-	assert.False(t, state.Provenance.Dirty, "the CI script's reports and artifacts are not the plugin's files")
 }
 
 // With -poll, the service reloads an artifact replaced in its -artifacts directory: once vip.plg holds the
