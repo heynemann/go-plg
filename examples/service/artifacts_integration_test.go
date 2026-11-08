@@ -3,16 +3,21 @@
 package main
 
 import (
+	"context"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/examples/internal/authorrepo"
+	"github.com/heynemann/go-plg/examples/pricing"
 )
 
 // adminProvenance is the part of an artifact's provenance the admin handler shows that this test reads.
@@ -128,4 +133,55 @@ func TestServicePollsReplacedArtifacts(t *testing.T) {
 	)
 	assert.Contains(t, got.Discounts, ruleResult{Rule: "pricing/vip", Cents: 160, Reason: "coupon SUMMER: 8% off"},
 		"pricing/vip serves the seasonal rule")
+}
+
+// openCounter counts the artifacts its storage opens.
+type openCounter struct {
+	*artifactStorage
+
+	opens atomic.Int32
+}
+
+func (s *openCounter) Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error) {
+	s.opens.Add(1)
+
+	return s.artifactStorage.Open(ctx, d)
+}
+
+// The artifact storage versions each artifact by its digest, so a reload of unchanged artifacts opens none of them
+// again, and the plugins keep the version Register gave them.
+func TestArtifactStorageReloadSkipsUnchangedArtifacts(t *testing.T) {
+	t.Parallel()
+
+	artifacts, err := openArtifactStorage(authorrepo.Pack(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, artifacts.Close()) })
+
+	descs, err := artifacts.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, descs, 3)
+
+	for _, desc := range descs {
+		art, err := artifacts.artifact(desc.Key + artifactExt)
+		require.NoError(t, err)
+		assert.Equal(t, art.Provenance().Digest, desc.Version, desc.Key)
+	}
+
+	storage := &openCounter{artifactStorage: artifacts}
+
+	container := plg.New()
+
+	t.Cleanup(func() { assert.NoError(t, container.Close(context.WithoutCancel(t.Context()))) })
+
+	require.NoError(t, plg.Register[pricing.Rule](t.Context(), container, registration,
+		plg.WithStorage(storage),
+		plg.WithHost[pricing.Customers](customers{}),
+		plg.WithValidation(func(context.Context, plg.PluginInfo) (pricing.Limits, error) {
+			return pricing.Limits{MaxPercent: maxPercent, MaxCents: maxCents}, nil
+		}),
+	))
+	require.Equal(t, int32(3), storage.opens.Load(), "Register opens each artifact once")
+
+	require.NoError(t, container.Reload(t.Context()))
+	assert.Equal(t, int32(3), storage.opens.Load(), "a reload opens no unchanged artifact")
 }

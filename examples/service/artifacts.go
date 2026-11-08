@@ -39,7 +39,8 @@ func (s *artifactStorage) Close() error {
 	return s.root.Close() //nolint:wrapcheck // os names the directory
 }
 
-// List opens each artifact and describes it by its plugin.yaml.
+// List opens each artifact and describes it by its plugin.yaml, versioned by the artifact's digest when the
+// plugin.yaml names no version, so a reload skips an artifact that has not changed without opening it again.
 func (s *artifactStorage) List(context.Context) ([]plg.Descriptor, error) {
 	entries, err := fs.ReadDir(s.root.FS(), ".")
 	if err != nil {
@@ -70,6 +71,11 @@ func (s *artifactStorage) List(context.Context) ([]plg.Descriptor, error) {
 		}
 
 		desc.Key = strings.TrimSuffix(name, artifactExt)
+
+		if desc.Version == "" { // the digest Register would give it, so a poll skips an unchanged artifact
+			desc.Version = art.Provenance().Digest
+		}
+
 		descs = append(descs, desc)
 	}
 
