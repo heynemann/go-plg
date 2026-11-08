@@ -41,7 +41,8 @@ type report struct {
 // pluginReport is the validation of one plugin: its steps in the order they ran, which also records each step as
 // it runs.
 type pluginReport struct {
-	// Plugin is the plugin as named: plg validate's operand, or its entry in the repository's plg.yaml.
+	// Plugin is the plugin as named: plg validate's operand, or its entry in the repository's plg.yaml; in plg
+	// pack's provenance, its directory relative to the repository ("." without one), as Dir.
 	Plugin string `json:"plugin"`
 	// Dir is the plugin's directory.
 	Dir string `json:"dir"`
