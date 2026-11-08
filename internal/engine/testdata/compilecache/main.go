@@ -1,6 +1,6 @@
 // Command compilecache compiles the Go guest through the on-disk compilation cache in os.Args[1] and logs
 // the compile, as JSON, to stdout. TestCompileCacheAcrossProcesses runs it twice: a fresh process per load,
-// built without the race detector, so the timings are the ones a service sees.
+// built without the race detector, so the logged timings are the ones a service sees.
 package main
 
 import (
