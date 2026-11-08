@@ -1,0 +1,11 @@
+implements: github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0
+language: go
+entrypoint: .
+owner:
+  maintainers:
+    - {name: Dee Park, email: dee@example.com, handle: "@dee"}
+  team: {name: assortment, department: merchandising}
+  org: commerce
+  company: Example Shop
+  contact: {oncall: assortment-oncall, channel: "#assortment", email: assortment@example.com}
+  links: {repository: https://git.example.com/pricing/rules, runbook: https://git.example.com/pricing/rules/assortment.md}

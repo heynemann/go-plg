@@ -1,0 +1,39 @@
+cases:
+  - name: gold customers get 300 cents off
+    call: Discount
+    input:
+      order: {customer: ada, coupon: "", items: [{sku: tea, quantity: 2, unitCents: 450}]}
+    host:
+      - {method: Tier, args: {customer: ada}, result: gold, times: 1}
+    expect:
+      result: {cents: 300, reason: "gold customer: 300 cents off"}
+  - name: never more than the subtotal
+    call: Discount
+    input:
+      order: {customer: ada, coupon: "", items: [{sku: tea, quantity: 1, unitCents: 120}]}
+    host:
+      - {method: Tier, args: {customer: ada}, result: gold}
+    expect:
+      result: {cents: 120, reason: "gold customer: 300 cents off"}
+  - name: other tiers get nothing
+    call: Discount
+    input:
+      order: {customer: bob, coupon: "", items: [{sku: tea, quantity: 2, unitCents: 450}]}
+    host:
+      - {method: Tier, args: {customer: bob}, result: silver}
+    expect:
+      result: {cents: 0, reason: ""}
+  - name: the service's failure is the call's
+    call: Discount
+    input:
+      order: {customer: eve, coupon: "", items: []}
+    host:
+      - {method: Tier, args: {customer: eve}, error: customers unavailable}
+    expect:
+      error: customers unavailable
+  - name: a service allowing 200 cents rejects the rule
+    call: Validate
+    input:
+      in: {maxPercent: 10, maxCents: 200}
+    expect:
+      issues: [{severity: error, code: vip.cents}]

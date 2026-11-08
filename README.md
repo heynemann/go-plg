@@ -39,6 +39,8 @@ HTTP allowlist).
 - [Reloading and polling](#reloading-and-polling)
 - [Stability guarantees and `PanicError`](#stability-guarantees-and-panicerror)
 - [Logs, metrics and traces](#logs-metrics-and-traces)
+- [Author guide: from a contract to a served plugin](#author-guide-from-a-contract-to-a-served-plugin) and
+  [platform guidance](#platform-guidance): publishing artifacts, contracts for large data, side effects
 - [Deployment: `plg warm` and `plg build-guest`](#deployment-plg-warm-and-plg-build-guest)
 - [Performance](#performance)
 - [Limitations and residual risks](#limitations-and-residual-risks)
@@ -1794,6 +1796,146 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/plg/plugins/prici
 The check runs the candidate's `Create` and `Validate` under the same rules as a load and publishes nothing.
 The service's integration tests (`examples/service`) exercise each of these end to end.
 
+## Author guide: from a contract to a served plugin
+
+For a team writing plugins for a service that publishes its contract: everything from the first file to watching
+the plugin serve, with the [pricing contract](examples/pricing) and the example author repository
+[`examples/rules`](examples/rules), which holds a rule in each language (`bundle` in Go, `vip` in Lua, `seasonal`
+in TypeScript), their test cases and committed typings, and the CI script that validates and packs them. Each
+step links to the section that tells it in full. The commands run from a checkout of plg; a test
+([`examples/authorguide`](examples/authorguide)) runs them as written, with the contract module served by a local
+proxy instead of fetched.
+
+**1. Start a plugin.** Install the command, then let [`plg init`](#starting-and-iterating-plg-init-and-plg-dev)
+write a plugin of the contract (manifest, typings, a skeleton of every method, a test case) and check it:
+
+<!-- authorguide:start -->
+```sh
+go install github.com/heynemann/go-plg/cmd/plg@latest
+plg init -implements github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0 -lang lua promo
+plg validate promo
+```
+
+The contract module is fetched by the go command, so a private one needs only what any Go build needs
+(`GOPRIVATE`, `.netrc`). The new plugin validates, with a warning until its `owner` block names the team (see
+[Ownership](#ownership)); the service of the example requires one, as does the repository's `requireOwnership`.
+
+**2. Iterate.** `plg dev promo` validates the plugin on every save and calls a method on demand (`call Discount
+order.yaml`): see [`plg dev`](#starting-and-iterating-plg-init-and-plg-dev).
+
+**3. Test.** Each `tests/*.yaml` file holds language-neutral cases: inputs, stubbed Host calls, HTTP requests and
+secrets, and the expected result, error or `Validate` issues (see [Test cases](#test-cases-testsyaml)).
+[`vip`'s](examples/rules/vip/tests/vip.yaml) stub the service's `Tier`; [`bundle`'s](examples/rules/bundle/tests/bundle.yaml)
+read an order from a fixture and check that `Validate` rejects the rule under a stricter service.
+
+**4. Typings.** Lua and TypeScript plugins commit the [typings](#typings-plg-types) `plg types` writes from the
+contract; validate fails, naming the command to run, when `implements` moves to a version they were not written
+for. Go plugins import the contract package itself, from a module requiring the pinned version
+([`bundle/go.mod`](examples/rules/bundle/go.mod)).
+
+**5. Validate in CI, then pack.** The repository's [`plg.yaml`](examples/rules/plg.yaml) lists its plugins (see
+[Author repositories](#author-repositories-plgyaml)); its [`ci.sh`](examples/rules/ci.sh) is the whole CI job:
+`plg validate -format json -junit reports/validate.xml .` keeps the [JSON and JUnit
+reports](#checking-a-plugin-before-registering-it-plg-validate) and fails the job on any failed plugin, then
+[`plg pack -o dist .`](#packing-a-plugin-plg-pack) writes one `.plg` artifact per plugin:
+
+<!-- authorguide:repo -->
+```sh
+cd examples/rules
+plg types seasonal
+plg validate seasonal
+./ci.sh
+```
+
+**6. Serve the artifacts.** The platform publishes the artifacts to its storage and the service loads them with
+`plg.OpenArtifact` (see [Storages](#storages) and [Publishing artifacts](#publishing-artifacts-to-a-storage)
+below). The example service serves a directory of them with `-artifacts`
+([`artifacts.go`](examples/service/artifacts.go)):
+
+<!-- authorguide:service -->
+```sh
+cd .. && PRICING_ADMIN_TOKEN=s3cret go run ./service -artifacts rules/dist
+```
+
+**7. Watch it serve.** Name the environment in `~/.config/plg/profiles.yaml` and ask it, with
+[`plg status` and `plg events`](#from-a-terminal-plg-status-and-plg-events), what it serves, from which commit and
+contract, and what happened to it:
+
+<!-- authorguide:profiles -->
+```yaml
+profiles:
+  - name: local
+    url: http://localhost:8080/admin/plg
+    token: {env: PRICING_ADMIN_TOKEN}
+```
+
+<!-- authorguide:serving -->
+```sh
+export PRICING_ADMIN_TOKEN=s3cret
+curl -s localhost:8080/quote -d '{"customer":"ada","coupon":"SUMMER","items":[{"sku":"tea","quantity":10,"unitCents":450}]}'
+plg status
+plg status pricing/vip
+plg events pricing/vip
+```
+
+```text
+KEY               STATUS   VERSION        LANGUAGE    TEAM        PANICS  PROBLEM
+pricing/bundle    serving  sha256:633e…   go          assortment  0       -
+pricing/seasonal  serving  sha256:940f…   typescript  promotions  0       -
+pricing/vip       serving  sha256:1d62…   lua         loyalty     0       -
+```
+
+`plg status pricing/vip` adds, among the owner, pool and memory, the artifact's `provenance` (`commit 3b1f…,
+contract github.com/heynemann/go-plg/examples v1.0.0, packed by plg v…`), and `plg events` its loads, reloads,
+rejections and panics.
+
+**8. Secrets and traces.** A plugin calling a third-party API declares the secrets it reads in `plugin.yaml` and
+reads them at run time; the service resolves them (`plg.WithSecrets`), and test cases fake them (see
+[Secrets](#secrets)). Each call is a span `plg.call <key>.<method>` in the service's trace, with the plugin's Host
+calls and HTTP requests below it and its log lines carrying `trace_id` (see
+[Logs, metrics and traces](#logs-metrics-and-traces)).
+
+### Platform guidance
+
+#### Publishing artifacts to a storage
+
+A `.plg` artifact is one immutable blob named by its key, which is how object stores and databases like to keep
+things. Publish from the CI job that packed it (after `plg pack` succeeded, so only validated plugins reach the
+storage), under a path the platform owns (`plugins/<key>.plg`), and let the service's storage list those blobs
+and return `plg.OpenArtifact` of each from `Open` (see [Storages](#storages)); the [S3](examples/s3storage) and
+[PostgreSQL](examples/pgstorage) examples show listing and versioning, and `examples/service/artifacts.go` a
+directory of artifacts. With [polling](#reloading-and-polling) a published artifact goes live without a restart,
+and a bad one keeps the last good version serving. Decide from the provenance what to accept (a `dirty` artifact,
+an old contract, a commit not on the main branch): plg loads whatever it is given.
+
+#### Designing contracts for large data: bounded predicates and pages
+
+Every call crosses into WebAssembly and back, its arguments and results serialized each way, under the
+plugin's memory limit and timeout. Keep both sides of a call bounded:
+
+- **Ask predicates, not sets.** "Is this user in the cohort?" (`IsMember(ctx, user) (bool, error)`) scales with
+  one user; "return every user of the cohort" scales with the cohort and eventually exceeds the memory limit.
+- **Page what must be listed.** When the service does need the members, take a cursor and a page size and
+  return one page and the next cursor (`List(ctx, cursor string, limit int) (Page, error)`), with the service
+  enforcing the limit; the plugin's memory then holds one page, whatever the data's size.
+- **Let the plugin pull, through the Host.** Data the service holds reaches plugins through
+  [Host](#calling-back-into-the-service-the-host-interface) methods of the same shape (a lookup by key, a page),
+  never as one argument carrying everything.
+
+#### Side effects: idempotency keys and at-least-once delivery
+
+A plugin call can fail after its effect happened: a timeout cuts it after the HTTP request reached the provider,
+an instance traps after a write, the service retries or restarts. Contracts with side effects (delivering a
+reward, sending a message) are therefore at least once, and must make repeating harmless:
+
+- **The service passes an idempotency key** in the call (`Deliver(ctx, delivery Delivery)` where `Delivery`
+  carries a key derived from what is being delivered, such as the reward and user ids, never a fresh random value
+  per attempt), and plugins hand it on (an `Idempotency-Key` header, a unique constraint) so the provider applies
+  the effect once.
+- **The service retries until it knows the outcome**, recording delivery as done only after a successful call,
+  and treats a plugin's error as "may have happened": the key makes the retry safe.
+- **Results say what happened**, so a retry answering "already delivered" is a success, not an error.
+
 ## Deployment: `plg warm` and `plg build-guest`
 
 Guests are compiled to machine code at startup and cached on disk (default `$PLG_CACHE_DIR`, else
@@ -1904,12 +2046,16 @@ allocations (2.5 KB) per call, before any export.
 - [`examples/service`](examples/service): an HTTP pricing service serving those rules, with a host, a memory
   budget, every rule instance started before serving, per-call deadlines, validation and required ownership, a
   lifecycle event log, the admin handler and a `plg.Check` upload endpoint behind a token
-  ([walkthrough](#putting-it-together-fit-to-serve-and-who-to-talk-to)), optional polling of a plugin directory,
-  and a clean shutdown: `cd examples && go run ./service`.
+  ([walkthrough](#putting-it-together-fit-to-serve-and-who-to-talk-to)), optional polling of a plugin directory
+  or of a directory of packed artifacts (`-artifacts`), and a clean shutdown: `cd examples && go run ./service`.
+- [`examples/rules`](examples/rules): an author repository of three more rules of the same contract (Go, Lua,
+  TypeScript) with its `plg.yaml`, test cases, committed typings and the CI script validating and packing them,
+  which the [author guide](#author-guide-from-a-contract-to-a-served-plugin) walks through.
 - [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, tested against MinIO.
 - [`examples/pgstorage`](examples/pgstorage): a `plg.Storage` over PostgreSQL listing only enabled plugins, with
   its migration, tested against PostgreSQL.
-- [`examples/quickstart`](examples/quickstart): runs this README's quick start.
+- [`examples/quickstart`](examples/quickstart): runs this README's quick start, and
+  [`examples/authorguide`](examples/authorguide) its author guide, with the service on the artifacts it packs.
 
 Their tests start MinIO and PostgreSQL with [testcontainers](https://golang.testcontainers.org/), so they need
 Docker: `make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`

@@ -310,6 +310,9 @@ func TestServiceFailures(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(unowned, "coupon", "plugin.yaml"),
 		[]byte("implements: "+ruleImplements+"\nlanguage: typescript\nentrypoint: rule.ts\n"), 0o600))
 
+	notArtifact := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(notArtifact, "bulk.plg"), []byte("not a tar.gz"), 0o600))
+
 	tests := map[string]struct {
 		log  string
 		args []string
@@ -344,6 +347,22 @@ func TestServiceFailures(t *testing.T) {
 			args: []string{"-addr", "127.0.0.1:0", "-plugins", unowned},
 			want: exitFailed,
 			log:  "plg.ownership.missing",
+		},
+		"both sources": {
+			args: []string{"-plugins", broken, "-artifacts", broken},
+			want: exitUsage,
+			log:  "-plugins and -artifacts are exclusive",
+		},
+		"missing artifact directory": {
+			args: []string{"-addr", "127.0.0.1:0", "-artifacts", filepath.Join(broken, "none")},
+			want: exitFailed,
+			log:  "artifacts: ",
+		},
+		"a file that is not an artifact": {
+			args: []string{"-addr", "127.0.0.1:0", "-artifacts", notArtifact},
+			want: exitFailed,
+			log:  "listing storage artifacts " + notArtifact + ": bulk.plg: ",
+			more: []string{plg.ErrInvalidArtifact.Error()},
 		},
 	}
 

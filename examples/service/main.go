@@ -7,8 +7,10 @@
 //	  "items":[{"sku":"tea","quantity":12,"unitCents":450}]}'
 //
 // By default it serves the rules embedded from examples/plugins. With -plugins <dir> it serves a directory of
-// plugins in the same layout instead and, with -poll <interval>, follows it: rules added, changed or removed
-// there are served without a restart. SIGINT or SIGTERM stops it cleanly.
+// plugins in the same layout instead, and with -artifacts <dir> the .plg artifacts plg pack wrote there (those of
+// the example author repository: examples/rules/ci.sh packs them into examples/rules/dist). With -poll <interval>
+// it follows either directory: rules added, changed or removed there are served without a restart. SIGINT or
+// SIGTERM stops it cleanly.
 //
 // Every rule validates itself against the service's limits (pricing.Limits, plg.WithValidation) and names its
 // owning team and contact in its plugin.yaml (plg.WithRequiredOwnership) before it goes live; a rule that fails

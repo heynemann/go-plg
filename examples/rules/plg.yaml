@@ -1,0 +1,7 @@
+# The example author repository: one pricing rule per language, validated and packed by ci.sh. Every rule must
+# name its owner, as the pricing service requires.
+plugins:
+  - bundle
+  - vip
+  - seasonal
+requireOwnership: true
