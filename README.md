@@ -847,12 +847,15 @@ lists them in the Lua Language Server's `workspace.library`.
 
 `plg dev [plugin dir]` (default: the current directory, or an author repository's only plugin) validates the plugin
 as `plg validate` does, then again whenever its files, its tests, the repository's `plg.yaml` or its shared
-directories change (it polls them every quarter of a second), printing each run's table. The contract module is
-resolved once (later runs reuse it without the go command) and the guests are warm in the sense of the
-compilation cache: the guests and the TypeScript compiler compiled on the first run are loaded from the on-disk
-cache (`-cache-dir`) on every run after a save, which compiles nothing new, so it costs the load and the test
-cases. Each run still starts a fresh container, as `plg validate` does. It
-reads commands from stdin:
+directories change (it polls them every quarter of a second), printing each run's table. A directory with no
+`plugin.yaml` is refused (exit 2: `<dir> is not a plugin directory: it has no plugin.yaml or plg.yaml and no author
+repository lists it`) unless it is an author repository (its only plugin) or one lists it. Watching stops with
+`plg.ErrPluginTooLarge`, naming the entry, once the watched files (the plugin, the shared directories and
+`plg.yaml` together) hold more than `plg.MaxPluginEntries` (16384) entries, as a plugin's own files may. The
+contract module is resolved once (later runs reuse it without the go command) and the guests are warm in the sense
+of the compilation cache: the guests and the TypeScript compiler compiled on the first run are loaded from the
+on-disk cache (`-cache-dir`) on every run after a save, which compiles nothing new, so it costs the load and the
+test cases. Each run still starts a fresh container, as `plg validate` does. It reads commands from stdin:
 
 ```text
 plg dev> call Quote order.yaml
