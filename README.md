@@ -1722,9 +1722,10 @@ profiles:
 ```
 
 A token comes from an environment variable or from what a command prints (run without a shell, in the working
-directory, and given 30 seconds, as each admin request is); a profile without one sends none. Errors show a
-profile's URL without its password. The file is read as strictly as `plugin.yaml` (unknown and
-duplicate keys, anchors and aliases are errors). Then:
+directory, and given 30 seconds, as each admin request is); a profile without one sends none. `plg status` and
+`plg events` follow no redirect (a 3xx answer is reported as an error), so the token never goes anywhere but the
+profile's URL. Errors show a profile's URL without its password. The file is read as strictly as `plugin.yaml`
+(unknown and duplicate keys, anchors and aliases are errors). Then:
 
 ```sh
 go run github.com/heynemann/go-plg/cmd/plg status                  # every plugin, one row each
