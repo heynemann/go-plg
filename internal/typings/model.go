@@ -274,7 +274,7 @@ func walksToTime(n *node, visited map[*node]bool) bool {
 }
 
 // paramNames returns the names the parameters have in the declarations: their Go names, p1, p2, ... for
-// parameters without one, keywords of either language followed by "_".
+// parameters without one, keywords of either language followed by "_"; a name another parameter has gains more.
 func paramNames(params []param) []string {
 	names := make([]string, len(params))
 	taken := map[string]bool{}
@@ -287,10 +287,11 @@ func paramNames(params []param) []string {
 		name := p.name
 		if name == "" || name == "_" {
 			name = "p" + strconv.Itoa(i+1)
-			for taken[name] {
-				name += "_"
-			}
 		} else if reservedName(name) {
+			name += "_"
+		}
+
+		for name != p.name && taken[name] {
 			name += "_"
 		}
 

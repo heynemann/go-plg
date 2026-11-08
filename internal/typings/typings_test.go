@@ -148,6 +148,21 @@ func TestRecursiveTypesReachTheirTimes(t *testing.T) {
 	}
 }
 
+// TestParameterNamesStayDistinct generates the typings of a contract with a parameter named end, a keyword, beside
+// one named end_: end becomes end__, so the two stay distinct, in TypeScript and Lua alike.
+func TestParameterNamesStayDistinct(t *testing.T) {
+	t.Parallel()
+
+	ts, err := typings.Generate(typings.LanguageTypeScript, clashes(t), nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(ts.Files[0].Data), "    Get(end__: string, end_: number): plg.Result<void>;\n")
+
+	lua, err := typings.Generate(typings.LanguageLua, clashes(t), nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(lua.Files[0].Data),
+		"---@field Get fun(self: clashes.Lease, end__: string, end_: integer)\n")
+}
+
 // TestGenerateRefusesWhatTypingsCannotDescribe generates typings for Go, for a Host that is no interface, an
 // interface whose method takes no context, and one carrying a channel.
 func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {

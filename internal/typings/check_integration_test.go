@@ -147,6 +147,34 @@ func TestTypeScriptScaffoldTypeChecks(t *testing.T) {
 	assert.Empty(t, diags, string(scaffold.Files[0].Data))
 }
 
+// TestClashingNamesTypeCheck type-checks, with the real compiler, the TypeScript skeleton of a contract with a
+// parameter named end beside one named end_ against its typings: the declarations compile and the skeleton
+// type-checks.
+func TestClashingNamesTypeCheck(t *testing.T) {
+	t.Parallel()
+
+	contract := clashes(t)
+
+	typ, err := typings.Generate(typings.LanguageTypeScript, contract, nil)
+	require.NoError(t, err)
+
+	scaffold, err := typings.NewScaffold(typings.LanguageTypeScript, contract, "lease")
+	require.NoError(t, err)
+
+	var files memfs.Builder
+
+	for _, file := range append(typ.Files, scaffold.Files...) {
+		require.NoError(t, files.Add(file.Name, file.Data))
+	}
+
+	plugin, err := files.Build()
+	require.NoError(t, err)
+
+	diags, err := typ.CheckTypeScript(t.Context(), checker(t), plugin, scaffold.Entrypoint)
+	require.NoError(t, err)
+	assert.Empty(t, diags)
+}
+
 // TestSharedDirectoriesResolveInEditors type-checks, with the real compiler and the generated tsconfig.json, a
 // plugin in an author repository importing a shared directory as validate's copy places it (`./lib/tiers` from
 // the plugin's root): its rootDirs resolve the import to the shared directory at its repository path, which the
