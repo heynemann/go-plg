@@ -4,8 +4,11 @@ import (
 	"cmp"
 	"fmt"
 	"go/types"
+	"maps"
 	"slices"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/heynemann/go-plg/internal/gen"
 	"github.com/heynemann/go-plg/internal/layout"
@@ -20,9 +23,10 @@ type model struct {
 	host       *ifaceModel // nil without a Host
 	validation *node       // the validation input, nil without one
 	visited    map[*node]bool
-	nodes      map[*types.TypeName]*node // the planned type of each declared named type
-	spaces     map[string]string         // namespace by package path
-	decls      []*types.TypeName         // the named types the methods reach (time.Time aside), in declaration order
+	nodes      map[*types.TypeName]*node  // the planned type of each declared named type
+	instances  map[string]*types.TypeName // the declared name of each instantiated generic type, by its type string
+	spaces     map[string]string          // namespace by package path
+	decls      []*types.TypeName          // the named types the methods reach (time.Time aside), in declaration order
 }
 
 // ifaceModel is an interface of the contract and its methods.
@@ -48,7 +52,7 @@ type param struct {
 func newModel(contract *Contract) (*model, error) {
 	planned := &model{
 		contract: contract, visited: map[*node]bool{}, nodes: map[*types.TypeName]*node{},
-		spaces: map[string]string{},
+		instances: map[string]*types.TypeName{}, spaces: map[string]string{},
 	}
 
 	iface, ifaceSigs, err := signatures(contract.Interface)
@@ -136,6 +140,8 @@ func describeInterface(obj *types.TypeName, iface *types.Interface, planned []la
 
 // walk finds the named types the methods reach and gives every package a namespace.
 func (m *model) walk() {
+	instances := map[string]*node{}
+
 	for _, iface := range []*ifaceModel{m.iface, m.host} {
 		if iface == nil {
 			continue
@@ -145,48 +151,126 @@ func (m *model) walk() {
 
 		for _, meth := range iface.methods {
 			for _, p := range meth.params {
-				m.visit(p.node)
+				m.visit(p.node, instances)
 			}
 
 			for _, r := range meth.results {
-				m.visit(r)
+				m.visit(r, instances)
 			}
 		}
 	}
 
 	if m.validation != nil {
-		m.visit(m.validation)
+		m.visit(m.validation, instances)
 	}
 
+	m.nameInstances(instances)
 	m.assignNamespaces()
 	slices.SortFunc(m.decls, func(a, b *types.TypeName) int { return cmp.Compare(m.ref(a), m.ref(b)) })
 }
 
-func (m *model) visit(n *node) {
+// visit notes the named types n reaches: the declared ones in m.nodes, the instantiated generic ones in instances
+// by their type string, which nameInstances names.
+func (m *model) visit(n *node, instances map[string]*node) {
 	if m.visited[n] {
 		return
 	}
 
 	m.visited[n] = true
 
-	if obj := declared(n); obj != nil && m.nodes[obj] == nil {
-		m.nodes[obj] = n
-		m.decls = append(m.decls, obj)
-		m.addSpace(obj.Pkg())
-	}
+	m.note(n, instances)
 
 	if n.Elem != nil {
-		m.visit(n.Elem)
+		m.visit(n.Elem, instances)
 	}
 
 	for _, field := range n.Fields {
-		m.visit(field.Node)
+		m.visit(field.Node, instances)
 	}
 }
 
-// declared returns the named type n is, which the declarations declare; nil for unnamed types, predeclared ones
+// note notes the named type n is, if any: a declared one in m.nodes, an instantiated generic one in instances.
+func (m *model) note(n *node, instances map[string]*node) {
+	named := namedType(n)
+
+	switch {
+	case named == nil: // an unnamed type, a predeclared one or a time
+	case named.TypeArgs().Len() > 0:
+		key := types.TypeString(named, nil)
+		if instances[key] == nil {
+			instances[key] = n
+
+			m.addSpace(named.Obj().Pkg())
+		}
+	case m.nodes[named.Obj()] == nil:
+		m.nodes[named.Obj()] = n
+		m.decls = append(m.decls, named.Obj())
+		m.addSpace(named.Obj().Pkg())
+
+	default: // declared already
+	}
+}
+
+// nameInstances declares each instantiated generic type, by its type string in instances, in its generic type's
+// package: Page[Item] as Page_Item, a number following a name the package or another instance has. The shorter
+// type strings name first, so Page[Item] is Page_Item and Page[[]Item] Page_Item_2.
+func (m *model) nameInstances(instances map[string]*node) {
+	taken := map[string]bool{} // by package path and name
+
+	keys := slices.Collect(maps.Keys(instances))
+	slices.SortFunc(keys, func(a, b string) int { return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b)) })
+
+	for _, key := range keys {
+		n := instances[key]
+		named := namedType(n)
+		origin := named.Obj()
+		base := origin.Name() + "_" + typeArgsName(named.TypeArgs())
+
+		name := base
+		for i := 2; taken[origin.Pkg().Path()+"."+name] || origin.Pkg().Scope().Lookup(name) != nil; i++ {
+			name = base + "_" + strconv.Itoa(i)
+		}
+
+		taken[origin.Pkg().Path()+"."+name] = true
+
+		obj := types.NewTypeName(origin.Pos(), origin.Pkg(), name, named)
+		m.instances[key] = obj
+		m.nodes[obj] = n
+		m.decls = append(m.decls, obj)
+	}
+}
+
+// typeArgsName names type arguments as an identifier: the words of each argument's Go type without packages (its
+// runs of identifier characters), joined by "_".
+func typeArgsName(args *types.TypeList) string {
+	var words []string
+
+	for arg := range args.Types() {
+		words = append(words, strings.FieldsFunc(types.TypeString(arg, func(*types.Package) string { return "" }),
+			func(char rune) bool { return char != '_' && !unicode.IsLetter(char) && !unicode.IsDigit(char) })...)
+	}
+
+	return strings.Join(words, "_")
+}
+
+// declared returns the declaration of the named type n is: its type name, or the name nameInstances gave an
+// instantiated generic type; nil for unnamed types, predeclared ones and time.Time (plg.Time).
+func (m *model) declared(n *node) *types.TypeName {
+	named := namedType(n)
+
+	switch {
+	case named == nil:
+		return nil
+	case named.TypeArgs().Len() > 0:
+		return m.instances[types.TypeString(named, nil)]
+	default:
+		return named.Obj()
+	}
+}
+
+// namedType returns the named type n is, which the declarations declare; nil for unnamed types, predeclared ones
 // and time.Time (plg.Time).
-func declared(n *node) *types.TypeName {
+func namedType(n *node) *types.Named {
 	if n.Kind == layout.Time {
 		return nil
 	}
@@ -196,7 +280,7 @@ func declared(n *node) *types.TypeName {
 		return nil
 	}
 
-	return named.Obj()
+	return named
 }
 
 // addSpace notes that the declarations need a namespace for pkg, named after it until assignNamespaces settles

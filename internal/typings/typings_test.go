@@ -163,6 +163,34 @@ func TestParameterNamesStayDistinct(t *testing.T) {
 		"---@field Get fun(self: clashes.Lease, end__: string, end_: integer)\n")
 }
 
+// TestGenericInstancesAreDeclaredApart generates the typings of a contract with a generic Page instantiated with
+// Item, Tier, []Item and map[string]*Tier: each instance gets its own declaration, named after its type arguments
+// (Page[[]Item] after Page[Item], whose name it would have), in TypeScript and Lua alike.
+func TestGenericInstancesAreDeclaredApart(t *testing.T) {
+	t.Parallel()
+
+	ts, err := typings.Generate(typings.LanguageTypeScript, clashes(t), nil)
+	require.NoError(t, err)
+
+	declarations := string(ts.Files[0].Data)
+	assert.Contains(t, declarations, "    items: clashes.Page_Item;\n    tiers: clashes.Page_Tier;\n"+
+		"    groups: clashes.Page_Item_2;\n    byName: clashes.Page_map_string_Tier;\n")
+	assert.Contains(t, declarations, "  /** example.com/clashes.Page[example.com/clashes.Item] */\n"+
+		"  interface Page_Item {\n    entries: clashes.Item[] | null;\n")
+	assert.Contains(t, declarations, "  /** example.com/clashes.Page[[]example.com/clashes.Item] */\n"+
+		"  interface Page_Item_2 {\n    entries: (clashes.Item[] | null)[] | null;\n")
+	assert.Contains(t, declarations, "  interface Page_Tier {\n    entries: clashes.Tier[] | null;\n")
+	assert.Contains(t, declarations, "  interface Page_map_string_Tier {\n"+
+		"    entries: ({ [key: string]: clashes.Tier | null } | null)[] | null;\n")
+
+	lua, err := typings.Generate(typings.LanguageLua, clashes(t), nil)
+	require.NoError(t, err)
+
+	annotations := string(lua.Files[0].Data)
+	assert.Contains(t, annotations, "---@class clashes.Page_Item\n---@field entries clashes.Item[]|nil\n")
+	assert.Contains(t, annotations, "---@class clashes.Page_Tier\n---@field entries clashes.Tier[]|nil\n")
+}
+
 // TestGenerateRefusesWhatTypingsCannotDescribe generates typings for Go, for a Host that is no interface, an
 // interface whose method takes no context, and one carrying a channel.
 func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {

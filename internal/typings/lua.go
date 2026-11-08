@@ -172,7 +172,7 @@ func (m *model) luaResults(results []*node) string {
 
 // luaType returns the type of n: its name when it is declared, else its shape.
 func (m *model) luaType(n *node) string {
-	if obj := declared(n); obj != nil {
+	if obj := m.declared(n); obj != nil {
 		return m.ref(obj)
 	}
 

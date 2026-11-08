@@ -277,9 +277,9 @@ func (m *model) tsDecl(out *strings.Builder, obj *types.TypeName) {
 	}
 }
 
-// goName names a Go type by its package path and name.
+// goName names a Go type by its package path and name, an instantiated generic type with its type arguments.
 func goName(obj *types.TypeName) string {
-	return obj.Pkg().Path() + "." + obj.Name()
+	return types.TypeString(obj.Type(), nil)
 }
 
 // side says whose methods an interface's are.
@@ -373,7 +373,7 @@ func (m *model) tsValue(n *node, way flow) string {
 
 // ts returns the type of n: its name when it is declared, else its shape.
 func (m *model) ts(n *node) string {
-	if obj := declared(n); obj != nil {
+	if obj := m.declared(n); obj != nil {
 		return m.ref(obj)
 	}
 

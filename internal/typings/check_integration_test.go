@@ -148,8 +148,9 @@ func TestTypeScriptScaffoldTypeChecks(t *testing.T) {
 }
 
 // TestClashingNamesTypeCheck type-checks, with the real compiler, the TypeScript skeleton of a contract with a
-// parameter named end beside one named end_ against its typings: the declarations compile and the skeleton
-// type-checks.
+// parameter named end beside one named end_ and a generic Page instantiated with Item, Tier and more, using a
+// Listing of them: the declarations compile and the skeleton type-checks; each page holds its own elements, so
+// tiers holding items fails.
 func TestClashingNamesTypeCheck(t *testing.T) {
 	t.Parallel()
 
@@ -161,18 +162,36 @@ func TestClashingNamesTypeCheck(t *testing.T) {
 	scaffold, err := typings.NewScaffold(typings.LanguageTypeScript, contract, "lease")
 	require.NoError(t, err)
 
-	var files memfs.Builder
+	check := checker(t)
 
-	for _, file := range append(typ.Files, scaffold.Files...) {
-		require.NoError(t, files.Add(file.Name, file.Data))
+	plugin := func(tiers string) fs.FS {
+		var files memfs.Builder
+
+		for _, file := range typ.Files {
+			require.NoError(t, files.Add(file.Name, file.Data))
+		}
+
+		source := string(scaffold.Files[0].Data) + "\nexport const listing: clashes.Listing = {\n" +
+			"  items: { entries: [{ name: \"a\" }], next: \"\" },\n" +
+			"  tiers: { entries: [" + tiers + "], next: \"\" },\n" +
+			"  groups: { entries: [[{ name: \"c\" }], null], next: \"\" },\n" +
+			"  byName: { entries: [{ gold: { level: 2 }, none: null }], next: \"\" },\n};\n"
+		require.NoError(t, files.Add(scaffold.Entrypoint, []byte(source)))
+
+		built, buildErr := files.Build()
+		require.NoError(t, buildErr)
+
+		return built
 	}
 
-	plugin, err := files.Build()
-	require.NoError(t, err)
-
-	diags, err := typ.CheckTypeScript(t.Context(), checker(t), plugin, scaffold.Entrypoint)
+	diags, err := typ.CheckTypeScript(t.Context(), check, plugin(`{ level: 1 }`), scaffold.Entrypoint)
 	require.NoError(t, err)
 	assert.Empty(t, diags)
+
+	diags, err = typ.CheckTypeScript(t.Context(), check, plugin(`{ name: "b" }`), scaffold.Entrypoint)
+	require.NoError(t, err)
+	require.Len(t, diags, 1, diags)
+	assert.Contains(t, diags[0].String(), "'name' does not exist in type 'Tier'")
 }
 
 // TestSharedDirectoriesResolveInEditors type-checks, with the real compiler and the generated tsconfig.json, a
