@@ -234,13 +234,33 @@ func Required(dir, modPath string) (Requirement, error) {
 			goMod, modPath)
 	}
 
-	for _, replace := range file.Replace {
-		if replace.Old.Path == modPath && (replace.Old.Version == "" || replace.Old.Version == req.Version) {
-			req.replaced(replace.New)
-		}
+	if replace := replacement(file.Replace, modPath, req.Version); replace != nil {
+		req.replaced(replace.New)
 	}
 
 	return req, nil
+}
+
+// replacement returns the replace directive of the module modPath at version, nil without one: as the go
+// command, one naming the version wins over one naming none, whatever their order.
+func replacement(replaces []*modfile.Replace, modPath, version string) *modfile.Replace {
+	var bare *modfile.Replace
+
+	for _, replace := range replaces {
+		if replace.Old.Path != modPath {
+			continue
+		}
+
+		if replace.Old.Version == version {
+			return replace
+		}
+
+		if replace.Old.Version == "" {
+			bare = replace
+		}
+	}
+
+	return bare
 }
 
 // replaced records the replacement of the module required: a version, or a directory (relative to the go.mod's).

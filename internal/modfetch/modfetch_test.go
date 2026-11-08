@@ -157,6 +157,20 @@ func TestRequiredReadsTheContractRequirement(t *testing.T) {
 			"replaced by an absolute directory", head + "replace example.com/rewards => /src/rewards\n",
 			modfetch.Requirement{Dir: "/src/rewards"},
 		},
+		{
+			"another module replaced", head + "replace example.com/rewardsx v1.2.0 => ../rewardsx\n",
+			modfetch.Requirement{Version: "v1.2.0"},
+		},
+		{
+			"replaced for the version before a bare replace", head + "replace example.com/rewards v1.2.0 => " +
+				"../pinned\nreplace example.com/rewards => ../fork\n",
+			modfetch.Requirement{Dir: "../pinned"},
+		},
+		{
+			"replaced for the version after a bare replace", head + "replace example.com/rewards => ../fork\n" +
+				"replace example.com/rewards v1.2.0 => ../pinned\n",
+			modfetch.Requirement{Dir: "../pinned"},
+		},
 	}
 
 	for _, tc := range tests {
