@@ -2,14 +2,11 @@ package engine
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 
-	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/sys"
 )
 
@@ -31,39 +28,18 @@ type RunOptions struct {
 // or Host. A run stopped because ctx ended fails with ctx's error; one stopped by [Runtime.Close] with
 // [ErrStopped]; a trap with wazero's error.
 func (m *Module) Run(ctx context.Context, opts *RunOptions) (uint32, error) {
-	name := "plg-command-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := newHostState(&InstanceOptions{}, m.rt)
-	m.rt.hosts.Store(name, state)
+	state, name := newHostState(&InstanceOptions{}, m.rt), m.rt.moduleName("plg-command-")
 
-	defer m.rt.hosts.Delete(name)
-
-	// As in Instantiate: either Close finds this run, or this run sees closing and never starts.
-	guestCtx, cancel, ok := state.enter(ctx)
-	if ok && m.rt.closing.Load() {
-		state.leave(ctx, cancel)
-
-		ok = false
-	}
-
+	guestCtx, cancel, ok := m.enterNew(ctx, name, state)
 	if !ok {
 		return 0, fmt.Errorf("running %s: %w", m.name, ErrStopped)
 	}
 
-	fsCfg := wazero.NewFSConfig()
-	for _, mnt := range opts.Mounts {
-		fsCfg = fsCfg.WithFSMount(mnt.FS, mnt.GuestPath)
-	}
+	defer m.rt.hosts.Delete(name)
 
-	cfg := wazero.NewModuleConfig().
-		WithName(name).
+	cfg := sandbox(name, opts.Mounts, opts.Stdout, opts.Stderr).
 		WithStartFunctions("_start").
-		WithArgs(append([]string{m.name}, opts.Args...)...).
-		WithSysWalltime().
-		WithSysNanotime().
-		WithRandSource(rand.Reader).
-		WithFSConfig(fsCfg).
-		WithStdout(orDiscard(opts.Stdout)).
-		WithStderr(orDiscard(opts.Stderr))
+		WithArgs(append([]string{m.name}, opts.Args...)...)
 
 	for _, pair := range opts.Env {
 		key, value, _ := strings.Cut(pair, "=")
