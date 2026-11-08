@@ -2,13 +2,12 @@ package plugin
 
 import (
 	"context"
-	"errors"
 
 	"github.com/heynemann/go-plg/internal/secretabi"
 )
 
 // ErrNoGuest is what [Secret] fails with outside a plg guest, such as in a plugin's own go test.
-var ErrNoGuest = errors.New("plugin: secrets are read only inside plg")
+var ErrNoGuest = secretabi.ErrNoGuest
 
 // Secret returns the value of the secret name, which the plugin's plugin.yaml must declare (secrets: [name]); the
 // service resolves it (plg.WithSecrets). It fails, with the host's reason, for a name plugin.yaml does not
@@ -21,10 +20,5 @@ var ErrNoGuest = errors.New("plugin: secrets are read only inside plg")
 // the plugin's output, errors and panics. The read is bounded by the plugin call (or Create) it is made in; ctx
 // is not consulted.
 func Secret(_ context.Context, name string) (string, error) {
-	read := secretabi.Read
-	if read == nil {
-		return "", ErrNoGuest
-	}
-
-	return read(name)
+	return secretabi.Read(name) //nolint:wrapcheck // the host's reason (or ErrNoGuest) reaches the plugin as is
 }
