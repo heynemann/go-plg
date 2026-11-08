@@ -87,6 +87,7 @@ type launcher struct {
 	output  *slog.Logger
 	panics  *panicReporter
 	owner   *ownerTags
+	spans   *pluginSpans // the version's spans; nil traces nothing
 	opts    engine.InstanceOptions
 	key     string
 	lang    Language
@@ -103,7 +104,7 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 	opts := l.opts
 	opts.Stdout, opts.Stderr = out.Stdout(), out.Stderr()
 
-	out.Begin()
+	out.Begin(ctx)
 
 	inst, err := l.mod.Instantiate(ctx, &opts)
 	if err != nil {
@@ -203,7 +204,7 @@ type guestInstance struct {
 
 // Start starts a call on a multiplexing guest, capturing the step's output like a call's.
 func (g *guestInstance) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	step, err := g.Instance.Start(ctx, call, method, args)
 	g.out.End(ctx)
@@ -213,7 +214,7 @@ func (g *guestInstance) Start(ctx context.Context, call, method uint32, args []b
 
 // Resume delivers an HTTP answer to a multiplexing guest, capturing the step's output like a call's.
 func (g *guestInstance) Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	step, err := g.Instance.Resume(ctx, request, answer)
 	g.out.End(ctx)
@@ -222,7 +223,7 @@ func (g *guestInstance) Resume(ctx context.Context, request uint32, answer []byt
 }
 
 func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	res, err := g.Instance.Call(ctx, method, args)
 	g.out.End(ctx)
@@ -234,7 +235,7 @@ func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (e
 // with that error; a guest that panics, traps, is stopped by ctx or breaks the ABI meanwhile fails with a reported
 // [PanicError] in [PhaseClose].
 func (g *guestInstance) Close(ctx context.Context) error {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	err := g.Instance.Close(ctx)
 	g.out.End(ctx)

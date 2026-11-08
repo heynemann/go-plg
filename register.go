@@ -597,7 +597,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 	}
 
 	gen := newGeneration(key, reg.contr.iface, &src.desc, instances)
-	gen.reg, gen.launch, gen.storage = reg, launch, src.storeName
+	gen.reg, gen.launch, gen.storage, gen.spans = reg, launch, src.storeName, launch.spans
 
 	defer func() {
 		if v := recover(); v != nil {
@@ -643,8 +643,9 @@ func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key st
 	}
 
 	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
+	spans := newPluginSpans(c.tracing, key, src.desc.Language, owner, reg.contr.iface, reg.host)
 
-	return c.newLauncher(reg, key, src, owner, spec, mod, meters), meters, nil
+	return c.newLauncher(reg, key, src, owner, spec, mod, meters, spans), meters, nil
 }
 
 // checkLoad checks a plugin about to launch, adding the issues found to report: it fails when one blocks the
@@ -657,19 +658,20 @@ func checkLoad(reg *registration, src *source, report *Report) error {
 
 // newLauncher returns the launcher of a plugin version's instances, which start from spec.
 func (c *Container) newLauncher(reg *registration, key string, src *source, owner *ownerTags, spec launchSpec,
-	mod *engine.Module, meters *pluginMeters,
+	mod *engine.Module, meters *pluginMeters, spans *pluginSpans,
 ) *launcher {
 	return &launcher{
 		mod:     mod,
 		output:  c.panics.pluginLogger(key, src.desc.Language, owner),
 		panics:  c.panics,
 		owner:   owner,
+		spans:   spans,
 		payload: spec.payload,
 		opts: engine.InstanceOptions{
 			Mounts:      spec.mounts,
-			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters),
+			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters, spans),
 			HTTPRefuses: reg.http.Refuses,
-			Host:        reg.host.handler(key, src.desc.Language, owner, c.panics),
+			Host:        reg.host.handler(key, src.desc.Language, owner, c.panics, spans),
 		},
 		key:  key,
 		lang: src.desc.Language,

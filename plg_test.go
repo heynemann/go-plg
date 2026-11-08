@@ -30,6 +30,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(plg.GlobalTracingChild) != "" { // a process of TestTracingFollowsTheGlobalProvider's own
+		m.Run()
+
+		return
+	}
+
 	for _, contract := range []plg.Contract{pingerContract(), fastPingerContract()} {
 		err := plg.RegisterContract(contract)
 		if err != nil {

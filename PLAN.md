@@ -269,13 +269,14 @@ It is:
 
 ## Observability
 
-- **slog:** loads, reloads, skips, failures, panics and traps, pool exhaustion, budget refusals, HTTP requests, guest stdout/stderr.
+- **slog:** loads, reloads, skips, failures, panics and traps, pool exhaustion, budget refusals, HTTP requests, guest stdout/stderr (with `trace_id`/`span_id` when the call is traced).
 - **OTel metrics** (`go.opentelemetry.io/otel/metric` API only), labelled by plugin key (names and attributes: `WithMeterProvider`'s doc):
   - calls, latency, errors, panics/traps;
   - pool instances, in-use (instances serving at least one call), calls in flight, waits, refills;
   - instance memory;
   - loads, reload failures and skipped plugins;
   - HTTP requests, latency, bytes.
+- **OTel traces** (`go.opentelemetry.io/otel/trace` API only; names and attributes: `WithTracerProvider`'s doc): a span per plugin call, children for Host methods and HTTP requests (which carry `traceparent`), parented by the caller's context.
 
 ## Package layout
 
@@ -363,7 +364,7 @@ Agreed in a design session for the first real user: a rewards platform where gro
 ### Runtime additions
 
 - **Secrets:** `plg.WithSecrets(func(ctx, plg.PluginInfo, name string) (string, error))` per registration. Plugins read only names their manifest declares (`secrets.get` in Lua and TypeScript, `plugin.Secret(ctx, name)` in Go); values are resolved on access with a short per-version cache (rotation without reloads) and scrubbed from logs, errors, panic values and guest output.
-- **Tracing:** `WithTracerProvider` (OTel trace API only; global by default): a span per plugin call (`plg.call <key>.<method>`, with key, version, language, method, outcome and owner team/org/company), child spans for Host methods and HTTP requests (which carry `traceparent`), trace and span IDs on guest log records. Parent spans come from the caller's context.
+- **Tracing** *(implemented: ticket 11)*: `WithTracerProvider` (OTel trace API only; global by default): a span per plugin call (`plg.call <key>.<method>`, with key, version, language, method, outcome and owner team/org/company), child spans for Host methods and HTTP requests (which carry `traceparent`), trace and span IDs on guest log records. Parent spans come from the caller's context.
 
 ## Milestones
 
@@ -1227,7 +1228,19 @@ Fixes for the second adversarial review of `4a3c31a` (`.scratch/adversarial-fixe
 
 ### Author developer experience
 
-Tickets in `.scratch/author-dx/issues/`, one commit each.
+Tickets in `.scratch/author-dx/issues/`, one commit each (the design: "Author developer experience" above).
+
+#### 11: Tracing
+
+- **API:** container option `WithTracerProvider(trace.TracerProvider)`; nil or absent means `otel.GetTracerProvider()` as it is at `New`. The library imports only the trace API (`otel/trace`, `otel/trace/noop`, `otel/propagation`); `otel/sdk/trace` and its `tracetest` appear in tests only. Scope `github.com/heynemann/go-plg`, as the meter's.
+- **Spans:** `plg.call <key>.<method>` per call, started in `plugin.call` around `callInstance` (waiting for an instance included; both binders go through it), from the caller's ctx, so the caller's span is the parent; attributes key, version (the resolved one), language, method, outcome and team/org/company, the same names and values as the call metrics' (outcome by the same `outcomeOf`); a call whose outcome is not ok has the error status with the call's error and an exception event. `plg.host <Host iface>.<method>` (the interface as `reflect.Type.String`, as `PanicError.Method` names Host methods) per Host method call in `hostCaller.serve`, outcome from the answer's status (ok, error, conversion, panic; a call that could not be served is error), the Host method receiving the span's ctx. `plg.http <method>` (client kind; named `plg.http` until the request decodes) per request in `httpcap`, through a new `Hooks.Trace` that starts the span from the call's ctx and returns the function ending it with the request's `Report` (which gains `Err`, `Method` and `URL`); attributes `http.request.method`, `url.full` (the logged target: scheme, host and path, never credentials or the query), `http.response.status_code`, outcome (as `plg.http.requests`'s), error status for refused, failed and ≥ 400. Spans of the multiplexed path need nothing more: a call's later steps and its requests run under its own ctx (`callState.ctx`), which holds its span.
+- **Precomputed:** `pluginSpans` per plugin version (built in `prepareLaunch` next to the meters): each method's span name and `[]trace.SpanStartOption`, the Host methods' and the HTTP requests' options, so starting a span builds no string or attribute set; the outcome attribute is set at the end.
+- **traceparent:** `httpcap.request` injects `propagation.TraceContext` from the request's ctx whenever it holds a valid span context, replacing the plugin's `traceparent` and `tracestate` (the plugin's `tracestate` is dropped even when ours is empty, so the pair stays consistent); without one, the plugin's own headers go through. So with a no-op provider a request still carries the caller's span context, as the OpenTelemetry API propagates a parent through a no-op tracer.
+- **Guest log records:** `guestout.Capture.Begin` now takes the step's ctx and the capture logs every line with it (records reach the handler with the call's ctx, so handlers that read spans from ctx work too) and adds `trace_id`/`span_id` when it holds a valid span context. `End` clears it, so a capture never keeps a ctx between steps (it is the step's, `containedctx` justified as `callState.ctx` is).
+- **No-op cost: none.** A no-op tracer still allocates per span (a context holding its non-recording span), and the API's default global provider (no SDK installed yet) two (that span boxed, and the context). So `newTracing` turns tracing off for `noop.TracerProvider` (and the deprecated `trace.NewNoopTracerProvider`), and for the API's default global provider remembers it as `idle`: `tracing.on()` is then one atomic load (`otel.GetTracerProvider`) and an interface comparison per call, false until `otel.SetTracerProvider` replaces the default (whose tracers then delegate to the SDK, so a container created before the SDK traces from then on, as the metrics do). The default is recognised by its type, `go.opentelemetry.io/otel/internal/global.tracerProvider` (the API exposes no other way); `TestTracingFollowsTheGlobalProvider` pins it in a fresh process (the test re-runs itself with `PLG_TEST_GLOBAL_TRACING_CHILD`, for which `TestMain` skips preparing guests), since the global provider can be replaced once per process. A provider replaced later by a no-op one is not noticed (its spans would cost the no-op tracer's allocation); accepted.
+- **Panics:** every call into the provider (`Tracer`, `Start`, the span's setters and `End`) goes through `panicReporter.callback` with Method `trace.TracerProvider`, as the meter provider's do: a span whose start panicked is left out, a provider whose `Tracer` panicked leaves tracing off; nothing fails the call.
+- **Tests** (integration ones with one container per test function serving every language, each under a Register name of its own, pools of one): `TestCallSpansCarryThePluginAndItsOwner` (each language's owned hostile plugin under a request span: parent/child, every attribute incl. the resolved version and owner, error status with the exception event, and every guest output record of the failing call carrying its trace and span IDs), `TestHTTPRequestsAreSpansCarryingTraceparent` (each language, script plugins multiplexed: the request span is the call's child, client kind, URL without its query, status code, and the test server received `00-<trace>-<request span>-01`; a refused request's span has the error status), `TestHostMethodsAreChildSpans` (the Host span is the call's child and the Host method's ctx holds it; a failing Host method and its call have the error status); unit: `TestCallSpansRecordTheirOutcome` (ok, error, conversion, panic, unavailable), `TestTracerProviderPanicsAreContained`, `TestHostOutcome`, `TestRequestsCarryTheirSpanContext` (`httpcap`: caller's span context replaces the plugin's headers, none keeps them, the hook's span ends once per request, refusals included), `TestLinesCarryTheirStepsContextAndSpan` (`guestout`), `TestNoopTracingDoesNotAllocate` (`make allocs`: a call allocates the same untraced, with a no-op provider, the deprecated one and the idle global default; a recording provider allocates more).
+- **Cost** (`BenchmarkCallLuaTraced`, `-count=3`, no race detector, this branch; `BenchmarkCallLua` on the base branch alongside): base 7.0–7.2 µs, 11360 B, 10 allocations; `tracer=default` 7.2–7.3 µs and `tracer=noop` 7.0–7.2 µs, both 11360 B and 10 allocations (no added allocation); `tracer=sdk` (recording, no exporter) 8.4–8.5 µs, 13872 B, 16 allocations.
 
 #### 12: Events ring and plg status / plg events
 

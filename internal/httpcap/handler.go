@@ -10,6 +10,9 @@ import (
 	"net/url"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/heynemann/go-plg/internal/httpabi"
 )
 
@@ -26,7 +29,14 @@ type Hooks struct {
 	// Mark, when not nil, returns an attribute logged with a request after Attr, from the request's context (the
 	// plugin call's); a zero Attr is left out.
 	Mark func(ctx context.Context) slog.Attr
+	// Trace, when not nil, starts the span of a request from the call's context: it returns the context holding
+	// it, which the request is made with and whose span context its traceparent header carries, and the function
+	// ending it, or nil when it traces nothing.
+	Trace func(ctx context.Context) (context.Context, SpanEnd)
 }
+
+// SpanEnd ends a request's span with the request's report.
+type SpanEnd func(Report)
 
 // Outcome is how a request ended.
 type Outcome uint8
@@ -42,8 +52,11 @@ const (
 	OutcomeFailed
 )
 
-// Report describes one request, for metrics.
+// Report describes one request, for metrics and traces.
 type Report struct {
+	Err      error         // why the request was refused or failed; nil for OutcomeOK
+	Method   string        // the request's method; empty when it was refused before it was decoded
+	URL      string        // scheme://host/path: no credentials, no query; empty as Method
 	Duration time.Duration // from the request reaching the host to its answer
 	Status   int           // the response's status code; 0 unless the outcome is OutcomeOK
 	Sent     int           // bytes of the encoded request (URL, header and body) the plugin handed over
@@ -53,11 +66,11 @@ type Report struct {
 
 // Handler returns the function serving the http_roundtrip requests of the plugin with the given key (the
 // shape of engine.HTTPFunc). It appends the encoded answer to dst; req is the encoded request and n counts the
-// requests of the current call. Each request is reported to hooks.Done once answered; a panic in the capability
-// (or net/http) is passed to hooks.Panicked and answered with [ErrInternal].
+// requests of the current call. Each request is reported to hooks.Done (and its span ended) once answered; a
+// panic in the capability (or net/http) is passed to hooks.Panicked and answered with [ErrInternal].
 func (c *Client) Handler(key string, hooks Hooks) func(ctx context.Context, dst, req []byte, n int) []byte {
 	return func(ctx context.Context, dst, req []byte, n int) []byte {
-		return c.serve(ctx, key, hooks, dst, req, n)
+		return c.serve(ctx, key, &hooks, dst, req, n)
 	}
 }
 
@@ -71,9 +84,17 @@ type exchange struct {
 	received int
 }
 
-// serve answers one request, turning a panic in the capability (or net/http) into an internal error.
-func (c *Client) serve(ctx context.Context, key string, hooks Hooks, dst, req []byte, n int) []byte {
-	var out []byte
+// serve answers one request, turning a panic in the capability (or net/http) into an internal error. The
+// request's span (hooks.Trace) starts before the request reaches the host; the hook guards itself.
+func (c *Client) serve(ctx context.Context, key string, hooks *Hooks, dst, req []byte, n int) []byte {
+	var (
+		out   []byte
+		ended SpanEnd
+	)
+
+	if hooks.Trace != nil {
+		ctx, ended = hooks.Trace(ctx)
+	}
 
 	start := time.Now()
 
@@ -81,36 +102,52 @@ func (c *Client) serve(ctx context.Context, key string, hooks Hooks, dst, req []
 		defer func() {
 			if v := recover(); v != nil {
 				hooks.Panicked(ctx, v)
-				hooks.Done(ctx, Report{Duration: time.Since(start), Sent: len(req), Outcome: OutcomeFailed})
+				report(ctx, hooks, ended, &Report{
+					Err: ErrInternal, Duration: time.Since(start), Sent: len(req), Outcome: OutcomeFailed,
+				})
 
 				out = httpabi.AppendFailure(dst, ErrInternal.Error())
 			}
 		}()
 
-		out = c.answer(ctx, key, hooks, start, dst, req, n)
+		out = c.answer(ctx, key, hooks, ended, start, dst, req, n)
 	}()
 
 	return out
 }
 
-// answer makes or refuses one request, logs it and reports it to hooks.Done.
-func (c *Client) answer(ctx context.Context, key string, hooks Hooks, start time.Time, dst, req []byte, n int,
+// report reports a request to hooks.Done and ends its span (ended, if not nil).
+func report(ctx context.Context, hooks *Hooks, ended SpanEnd, rep *Report) {
+	hooks.Done(ctx, *rep)
+
+	if ended != nil {
+		ended(*rep)
+	}
+}
+
+// answer makes or refuses one request, logs it and reports it (see report).
+func (c *Client) answer(ctx context.Context, key string, hooks *Hooks, ended SpanEnd, start time.Time, dst,
+	req []byte, n int,
 ) []byte {
 	xch := exchange{start: start, sent: len(req)}
 	head := len(dst)
 
 	out, err := c.do(ctx, &xch, dst, req, n)
 	if err != nil {
-		c.log(ctx, key, &hooks, &xch, err)
-		hooks.Done(ctx, Report{Duration: time.Since(start), Sent: xch.sent, Outcome: outcome(err)})
+		c.log(ctx, key, hooks, &xch, err)
+		report(ctx, hooks, ended, &Report{
+			Err: err, Method: xch.method, URL: xch.target, Duration: time.Since(start), Sent: xch.sent,
+			Outcome: outcome(err),
+		})
 
 		return httpabi.AppendFailure(out[:head], message(err))
 	}
 
 	xch.received = len(out) - head
-	c.log(ctx, key, &hooks, &xch, nil)
-	hooks.Done(ctx, Report{
-		Duration: time.Since(start), Status: xch.status, Sent: xch.sent, Received: xch.received, Outcome: OutcomeOK,
+	c.log(ctx, key, hooks, &xch, nil)
+	report(ctx, hooks, ended, &Report{
+		Method: xch.method, URL: xch.target, Duration: time.Since(start), Status: xch.status, Sent: xch.sent,
+		Received: xch.received, Outcome: OutcomeOK,
 	})
 
 	return out
@@ -239,8 +276,18 @@ func (c *Client) request(ctx context.Context, xch *exchange, raw []byte) (*http.
 	}
 
 	hreq.Header = decoded.Header
+	propagate(reqCtx, hreq.Header)
 
 	return hreq, cancel, nil
+}
+
+// propagate sets the traceparent and tracestate headers of the span context in ctx (its span's, or the
+// caller's), replacing the plugin's own; without one, the plugin's go through.
+func propagate(ctx context.Context, header http.Header) {
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		header.Del("Tracestate")
+		propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
+	}
 }
 
 // failure classifies a transport error: the call's own context ending, the policy's timeout, a refused

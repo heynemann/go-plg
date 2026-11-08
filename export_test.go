@@ -20,6 +20,10 @@ const MuxGrace = muxGrace
 // BundleMemoryLimit is the bundler's memory limit.
 const BundleMemoryLimit = bundleMemoryLimit
 
+// GlobalTracingChild is the environment variable set in the process TestTracingFollowsTheGlobalProvider runs
+// itself in: TestMain then runs the tests without preparing the guests, which that test does not use.
+const GlobalTracingChild = "PLG_TEST_GLOBAL_TRACING_CHILD"
+
 // WithHTTPRoots makes the plugins' https requests trust roots instead of the system's certificate authorities, so
 // tests can reach their own https servers.
 func WithHTTPRoots(roots *x509.CertPool) RegisterOption {
@@ -281,7 +285,7 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Contai
 		return nil, err
 	}
 
-	return hst.handler(key, LanguageGo, noOwner, ctr.panics), nil
+	return hst.handler(key, LanguageGo, noOwner, ctr.panics, nil), nil
 }
 
 // UseGenericBinder makes c serve every contract with the generic binder, ignoring the fast paths plg gen

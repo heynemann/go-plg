@@ -235,11 +235,13 @@ func (c *Container) call(ctx context.Context, key string, meth *method, call plg
 }
 
 // call runs one method call on an instance of the plugin, waiting for one while all are busy, and records it in
-// the plugin's call metrics.
+// the plugin's call metrics and its span.
 func (p *plugin) call(ctx context.Context, meth *method, call plgimpl.Call) error {
 	start := time.Now()
+	ctx, span := p.spans.call(ctx, meth.index)
 	err := p.callInstance(ctx, meth, call)
 	p.pool.called(ctx, meth.index, time.Since(start), err)
+	p.spans.called(ctx, span, err)
 
 	return err
 }

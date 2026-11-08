@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/httpabi"
@@ -140,6 +141,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 		assert.NotEqual(t, httpcap.OutcomeOK, got.report.Outcome)
 		assert.Zero(t, got.report.Status)
 		assert.Zero(t, got.report.Received)
+		assert.Error(t, got.report.Err, "a refusal or failure says why")
 
 		got.refused = hostErr.Message
 
@@ -150,6 +152,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 	assert.Equal(t, httpcap.OutcomeOK, got.report.Outcome)
 	assert.Equal(t, resp.Status, got.report.Status)
 	assert.Equal(t, len(out)-len(prefix), got.report.Received, "the encoded response")
+	assert.NoError(t, got.report.Err)
 
 	got.resp = resp
 
@@ -516,6 +519,77 @@ func TestHandlerRecoversPanics(t *testing.T) {
 	assert.Equal(t, httpcap.ErrInternal.Error(), got.refused, "the plugin is told about an internal error")
 	assert.Equal(t, []any{"transport bug"}, recovered, "the panic went to the panicked function, once")
 	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
+	require.ErrorIs(t, got.report.Err, httpcap.ErrInternal)
+}
+
+// spanContext returns a sampled span context with the given span ID and tracestate.
+func spanContext(t *testing.T, span byte, state string) trace.SpanContext {
+	t.Helper()
+
+	ts, err := trace.ParseTraceState(state)
+	require.NoError(t, err)
+
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x0a, 15: 0x01}, SpanID: trace.SpanID{7: span}, TraceFlags: trace.FlagsSampled,
+		TraceState: ts,
+	})
+}
+
+// TestRequestsCarryTheirSpanContext: a request carries the span context of its context in traceparent and
+// tracestate, replacing the plugin's own, which go through when the context holds none. With a Trace hook, the
+// request is made with the hook's context and its span ended once with the request's report, refusals included.
+func TestRequestsCarryTheirSpanContext(t *testing.T) {
+	t.Parallel()
+
+	type propagated struct{ parent, state string }
+
+	got := make(chan propagated, 1)
+	srv := newServer(t, func(_ http.ResponseWriter, req *http.Request) {
+		got <- propagated{req.Header.Get("Traceparent"), req.Header.Get("Tracestate")}
+	})
+	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
+
+	const pluginParent = "00-0b000000000000000000000000000002-0000000000000009-01"
+
+	plugins := http.Header{"Tracestate": {"p=1"}}
+	plugins["traceparent"] = []string{pluginParent} // as a script plugin may write it
+
+	serve(t.Context(), t, client, request("GET", srv.URL, plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{pluginParent, "p=1"}, <-got, "no span context: the plugin's own")
+
+	caller := trace.ContextWithSpanContext(t.Context(), spanContext(t, 1, "c=1"))
+	serve(caller, t, client, request("GET", srv.URL, plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{"00-0a000000000000000000000000000001-0000000000000001-01", "c=1"}, <-got,
+		"the caller's span context replaces the plugin's")
+
+	var ended []httpcap.Report
+
+	handler := client.Handler("web/p", httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(context.Context, httpcap.Report) {},
+		Trace: func(ctx context.Context) (context.Context, httpcap.SpanEnd) {
+			assert.Equal(t, caller, ctx, "the hook starts from the call's context")
+
+			return trace.ContextWithSpanContext(ctx, spanContext(t, 2, "")),
+				func(report httpcap.Report) { ended = append(ended, report) }
+		},
+	})
+
+	handler(caller, nil, request("GET", srv.URL+"/items?token=secret", plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{"00-0a000000000000000000000000000001-0000000000000002-01", ""}, <-got,
+		"the hook's span, and no plugin tracestate beside it")
+	require.Len(t, ended, 1, "the span is ended once")
+	assert.Equal(t, "GET", ended[0].Method)
+	assert.Equal(t, srv.URL+"/items", ended[0].URL, "no query")
+	assert.Equal(t, http.StatusOK, ended[0].Status)
+	assert.Equal(t, httpcap.OutcomeOK, ended[0].Outcome)
+	require.NoError(t, ended[0].Err)
+
+	handler(caller, nil, request("POST", "http://refused.example/x", nil, ""), 1)
+	require.Len(t, ended, 2, "a refused request's span is ended too")
+	assert.Equal(t, "POST", ended[1].Method)
+	assert.Equal(t, httpcap.OutcomeRefused, ended[1].Outcome)
+	require.ErrorIs(t, ended[1].Err, httpcap.ErrHostNotAllowed)
 }
 
 // benchTarget is a handler allowed to reach a loopback server answering "ok", and a GET for it.

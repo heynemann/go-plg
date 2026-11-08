@@ -1,6 +1,6 @@
 // Package guestout captures a guest instance's stdout and stderr. Complete lines go to slog, tagged with the
-// plugin key and the stream, within a budget per step; the last bytes of stderr are kept so that a failure can
-// report what the guest wrote, such as its traceback.
+// plugin key and the stream (and the trace and span IDs of the step's span), within a budget per step; the last
+// bytes of stderr are kept so that a failure can report what the guest wrote, such as its traceback.
 //
 // A Capture belongs to one instance and, like the instance, is used by one goroutine at a time.
 package guestout
@@ -10,6 +10,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Bounds.
@@ -26,7 +28,10 @@ const (
 
 // Capture collects one instance's output. Create it with [New].
 type Capture struct {
-	logger  *slog.Logger
+	logger *slog.Logger
+	// ctx is the context of the step in progress, from Begin to End: the guest writes inside a step's host
+	// function, which hands its writer no context, and the records are logged with the step's.
+	ctx     context.Context //nolint:containedctx // the step's, see above; nil between steps
 	key     string
 	tail    []byte // ring of the last TailSize bytes of stderr, allocated on the first write
 	stdout  stream
@@ -65,9 +70,11 @@ func (c *Capture) Stderr() io.Writer {
 	return &c.stderr
 }
 
-// Begin starts a step of the instance (an init, call or close): [Capture.Guest] returns what stderr receives
-// from now on, and each stream's logging budget starts afresh.
-func (c *Capture) Begin() {
+// Begin starts a step of the instance (an init, call or close) running under ctx: [Capture.Guest] returns what
+// stderr receives from now on, each stream's logging budget starts afresh, and the lines are logged with ctx
+// (with trace_id and span_id when it holds a span).
+func (c *Capture) Begin(ctx context.Context) {
+	c.ctx = ctx
 	c.mark = c.written
 	c.stdout.logged, c.stdout.dropped = 0, false
 	c.stderr.logged, c.stderr.dropped = 0, false
@@ -77,6 +84,8 @@ func (c *Capture) Begin() {
 func (c *Capture) End(ctx context.Context) {
 	c.stdout.flush(ctx)
 	c.stderr.flush(ctx)
+
+	c.ctx = nil
 }
 
 // Guest returns what stderr received since the step began: its last [TailSize] bytes at most.
@@ -112,8 +121,8 @@ func (c *Capture) keepTail(data []byte) {
 	c.written += size
 }
 
-// Write logs every complete line of data and keeps the rest for the next write. It never fails. The guest
-// writes during a call without its context, so the lines are logged without one.
+// Write logs every complete line of data and keeps the rest for the next write. It never fails. The lines are
+// logged with the context of the step in progress (see [Capture.Begin]).
 //
 // Its cost is linear in len(data) at most, since the guest's write runs in a host function that no deadline
 // interrupts: a newline is searched for only within the line being filled, and once the step's budget and its
@@ -123,7 +132,10 @@ func (s *stream) Write(data []byte) (int, error) {
 		s.capture.keepTail(data)
 	}
 
-	ctx := context.Background()
+	ctx := s.capture.ctx
+	if ctx == nil { // written outside a step
+		ctx = context.Background()
+	}
 
 	for rest := data; len(rest) > 0 && !s.dropped; {
 		room := MaxLine - len(s.line)
@@ -159,7 +171,7 @@ func (s *stream) flush(ctx context.Context) {
 	}
 }
 
-// emit logs the buffered line within the step's budget.
+// emit logs the buffered line within the step's budget, with ctx, the step's context, and the IDs of its span.
 func (s *stream) emit(ctx context.Context) {
 	line := s.line
 	s.line = s.line[:0]
@@ -175,6 +187,17 @@ func (s *stream) emit(ctx context.Context) {
 	}
 
 	s.logged += len(line) + 1
-	s.capture.logger.LogAttrs(ctx, s.level, "plg: guest output",
-		slog.String("key", s.capture.key), slog.String("stream", s.name), slog.String("line", string(line)))
+
+	attrs := [...]slog.Attr{
+		slog.String("key", s.capture.key), slog.String("stream", s.name), slog.String("line", string(line)), {}, {},
+	}
+	n := 3
+
+	if span := trace.SpanContextFromContext(ctx); span.IsValid() {
+		attrs[3], attrs[4] = slog.String("trace_id", span.TraceID().String()),
+			slog.String("span_id", span.SpanID().String())
+		n = 5
+	}
+
+	s.capture.logger.LogAttrs(ctx, s.level, "plg: guest output", attrs[:n]...)
 }

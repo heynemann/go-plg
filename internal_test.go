@@ -1378,7 +1378,7 @@ func TestGuestOutputGuardsDoNotAllocate(t *testing.T) {
 		stdout := out.Stdout()
 
 		return testing.AllocsPerRun(100, func() {
-			out.Begin()
+			out.Begin(t.Context())
 
 			_, err := stdout.Write(line)
 			if err != nil {
@@ -2446,7 +2446,7 @@ func TestHTTPMeasurements(t *testing.T) {
 		{Outcome: httpcap.OutcomeRefused, Sent: 40, Duration: time.Microsecond},
 		{Outcome: httpcap.OutcomeFailed, Sent: 50, Duration: 2 * time.Second},
 	} {
-		meters.requested(ctx, report)
+		meters.requested(ctx, &report)
 	}
 
 	got := collect(t, reader)
@@ -2679,7 +2679,7 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	// Every measurement goes to a no-op instrument instead.
 	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
 	meters.called(t.Context(), 0, time.Millisecond, errFake)
-	meters.requested(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
+	meters.requested(t.Context(), &httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 	ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
 	ctr.countReloadFailure(t.Context(), "n", &Owner{})

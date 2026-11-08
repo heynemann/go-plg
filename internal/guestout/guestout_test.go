@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/guestout"
@@ -25,11 +26,14 @@ func TestMain(m *testing.M) {
 
 // record is one logged line.
 type record struct {
-	msg    string
-	key    string
-	stream string
-	line   string
-	level  slog.Level
+	ctx     context.Context //nolint:containedctx // the context the record was logged with, for the test to check
+	msg     string
+	key     string
+	stream  string
+	line    string
+	traceID string
+	spanID  string
+	level   slog.Level
 }
 
 // lines is a slog handler keeping every record.
@@ -42,17 +46,21 @@ func (l *lines) WithAttrs([]slog.Attr) slog.Handler     { return l }
 func (l *lines) WithGroup(string) slog.Handler          { return l }
 
 //nolint:gocritic // hugeParam: slog.Handler fixes the signature
-func (l *lines) Handle(_ context.Context, rec slog.Record) error {
-	got := record{level: rec.Level, msg: rec.Message}
+func (l *lines) Handle(ctx context.Context, rec slog.Record) error {
+	got := record{ctx: ctx, level: rec.Level, msg: rec.Message}
 
-	rec.Attrs(func(a slog.Attr) bool {
-		switch a.Key {
+	rec.Attrs(func(attr slog.Attr) bool {
+		switch attr.Key {
 		case "key":
-			got.key = a.Value.String()
+			got.key = attr.Value.String()
 		case "stream":
-			got.stream = a.Value.String()
+			got.stream = attr.Value.String()
 		case "line":
-			got.line = a.Value.String()
+			got.line = attr.Value.String()
+		case "trace_id":
+			got.traceID = attr.Value.String()
+		case "span_id":
+			got.spanID = attr.Value.String()
 		default: // the budget of a truncation notice
 		}
 
@@ -97,7 +105,7 @@ func TestLinesAreLoggedWithTheKeyAndStream(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	write(t, capture.Stdout(), "hello ", "world\nsecond\n\nthird")
 	write(t, capture.Stderr(), "oops\n")
@@ -122,11 +130,57 @@ func TestLinesAreLoggedWithTheKeyAndStream(t *testing.T) {
 	assert.Len(t, logs.records, 5, "nothing pending: End logs nothing")
 }
 
+// stepKey marks the context of a step, for TestLinesCarryTheirStepsContextAndSpan.
+type stepKey struct{}
+
+func TestLinesCarryTheirStepsContextAndSpan(t *testing.T) {
+	t.Parallel()
+
+	span := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 15: 0x01},
+		SpanID:     trace.SpanID{0x0c, 7: 0x02},
+		TraceFlags: trace.FlagsSampled,
+	})
+	traced := trace.ContextWithSpanContext(context.WithValue(t.Context(), stepKey{}, "call"), span)
+
+	capture, logs := newCapture()
+	write(t, capture.Stdout(), "before any step\n")
+
+	capture.Begin(traced)
+	write(t, capture.Stdout(), "in the call\npartial")
+	capture.End(context.WithValue(traced, stepKey{}, "end"))
+
+	capture.Begin(context.WithValue(t.Context(), stepKey{}, "untraced"))
+	write(t, capture.Stderr(), "untraced\n")
+	capture.End(t.Context())
+	write(t, capture.Stdout(), "after the steps\n")
+
+	require.Len(t, logs.records, 5)
+
+	want := []struct {
+		step            any
+		traceID, spanID string
+	}{
+		{step: nil},
+		{step: "call", traceID: "0a0b0000000000000000000000000001", spanID: "0c00000000000002"},
+		{step: "end", traceID: "0a0b0000000000000000000000000001", spanID: "0c00000000000002"},
+		{step: "untraced"},
+		{step: nil},
+	}
+
+	for i, rec := range logs.records {
+		assert.Equal(t, want[i].step, rec.ctx.Value(stepKey{}), "record %d (%s) is logged with its step's context",
+			i, rec.line)
+		assert.Equal(t, want[i].traceID, rec.traceID, "record %d (%s)", i, rec.line)
+		assert.Equal(t, want[i].spanID, rec.spanID, "record %d (%s)", i, rec.line)
+	}
+}
+
 func TestLongLinesAreLoggedInPieces(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	exact := strings.Repeat("a", guestout.MaxLine)
 	write(t, capture.Stdout(), exact+"\n")
@@ -149,7 +203,7 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	line := strings.Repeat("x", 1000) + "\n"
 	perStep := guestout.StepBudget / len(line)
 
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	for range 2 * perStep {
 		write(t, capture.Stderr(), line)
@@ -176,7 +230,7 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	write(t, capture.Stdout(), "other stream\n")
 	assert.Equal(t, []string{"other stream"}, logs.texts("stdout"), "each stream has its own budget")
 
-	capture.Begin()
+	capture.Begin(t.Context())
 	write(t, capture.Stderr(), "next step\n")
 	assert.Equal(t, "next step", logs.texts("stderr")[perStep+1], "Begin renews the budget")
 }
@@ -185,7 +239,7 @@ func TestEmptyLinesCountAgainstTheBudget(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	write(t, capture.Stdout(), strings.Repeat("\n", 4_000_000))
 	capture.End(t.Context())
@@ -202,7 +256,7 @@ func TestGuestReturnsTheStepsStderr(t *testing.T) {
 	assert.Empty(t, capture.Guest(), "nothing written yet")
 
 	write(t, capture.Stderr(), "from instantiation\n")
-	capture.Begin()
+	capture.Begin(t.Context())
 	assert.Empty(t, capture.Guest(), "a new step starts empty")
 
 	write(t, capture.Stdout(), "not stderr\n")
@@ -214,7 +268,7 @@ func TestGuestKeepsTheLastBytesOfALongStep(t *testing.T) {
 	t.Parallel()
 
 	capture, _ := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	var all bytes.Buffer
 
@@ -231,7 +285,7 @@ func TestGuestKeepsTheLastBytesOfALongStep(t *testing.T) {
 	write(t, capture.Stderr(), huge)
 	assert.Equal(t, huge[len(huge)-guestout.TailSize:], capture.Guest(), "one write larger than the ring")
 
-	capture.Begin()
+	capture.Begin(t.Context())
 	write(t, capture.Stderr(), "after\n")
 	assert.Equal(t, "after\n", capture.Guest(), "only the new step, though the ring holds more")
 }
@@ -267,7 +321,7 @@ func TestOutputPastTheBudgetIsNotScanned(t *testing.T) {
 	copy(data[size-guestout.TailSize:], strings.Repeat("y", guestout.TailSize))
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	var (
 		n     int
@@ -308,7 +362,7 @@ func BenchmarkStep(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		capture.Begin()
+		capture.Begin(ctx)
 		capture.End(ctx)
 	}
 }
@@ -321,7 +375,7 @@ func BenchmarkStderrLine(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		capture.Begin() // a fresh step: within the budget, so the line is logged
+		capture.Begin(b.Context()) // a fresh step: within the budget, so the line is logged
 
 		_, err := capture.Stderr().Write(line)
 		if err != nil {
@@ -342,7 +396,7 @@ func BenchmarkNewlineFreeWrite(b *testing.B) {
 			b.ReportAllocs()
 
 			for b.Loop() {
-				capture.Begin()
+				capture.Begin(b.Context())
 
 				_, err := capture.Stderr().Write(data)
 				if err != nil {

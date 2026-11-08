@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
@@ -21,13 +22,14 @@ import (
 type Option func(*containerConfig)
 
 type containerConfig struct {
-	logger        *slog.Logger
-	meterProvider metric.MeterProvider // nil: the global provider
-	onPanic       func(context.Context, *PanicError)
-	onEvent       func(context.Context, Event)
-	cacheDir      string
-	memoryBudget  uint64
-	panicHistory  int
+	logger         *slog.Logger
+	meterProvider  metric.MeterProvider // nil: the global provider
+	tracerProvider trace.TracerProvider // nil: the global provider
+	onPanic        func(context.Context, *PanicError)
+	onEvent        func(context.Context, Event)
+	cacheDir       string
+	memoryBudget   uint64
+	panicHistory   int
 }
 
 // defaultPanicHistory is how many PanicErrors [Container.RecentPanics] keeps by default.

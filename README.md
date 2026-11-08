@@ -32,7 +32,7 @@ HTTP allowlist).
 - [Calling back into the service: the Host interface](#calling-back-into-the-service-the-host-interface)
 - [Reloading and polling](#reloading-and-polling)
 - [Stability guarantees and `PanicError`](#stability-guarantees-and-panicerror)
-- [Logs and metrics](#logs-and-metrics)
+- [Logs, metrics and traces](#logs-metrics-and-traces)
 - [Deployment: `plg warm` and `plg build-guest`](#deployment-plg-warm-and-plg-build-guest)
 - [Performance](#performance)
 - [Limitations and residual risks](#limitations-and-residual-risks)
@@ -868,17 +868,33 @@ if errors.As(err, &pe) {
 }
 ```
 
-## Logs and metrics
+## Logs, metrics and traces
 
 - **Logs:** `plg.New(plg.WithLogger(logger))` (a `*slog.Logger`; discarded by default) gets loads, reloads,
   skips, failures, panics, pool backoffs, HTTP requests and the plugins' own output (stdout at Info, stderr at
-  Warn, with the plugin key).
+  Warn, with the plugin key, and `trace_id`/`span_id` when the call is traced).
 - **Metrics:** OpenTelemetry, through `plg.WithMeterProvider(mp)` (default: the global provider): calls, latency
   and errors by key, method and outcome; panics by phase; pool instances, instances in use (serving at least one
   call), calls in flight (more than instances in use only with `WithConcurrentCalls`), waits and refills; instance
   memory; loads, skips and reload failures; validations by trigger and outcome, and their issues by severity;
   HTTP requests, latency and sizes; lifecycle events dropped (`plg.events.dropped`). Names and attributes are
   listed on `plg.WithMeterProvider`. Recording on the call path does not allocate.
+- **Traces:** OpenTelemetry, through `plg.WithTracerProvider(tp)` (default: the global provider, picked up once
+  an SDK is installed). Each plugin call is a span `plg.call <key>.<method>`, a child of the span in the call's
+  context, with the key, version, language, method, outcome and the owner's team, org and company; failed calls
+  have the error status. Host methods (`plg.host <Host>.<method>`) and HTTP requests (`plg.http <method>`, client
+  spans) are its children, and every request carries the `traceparent` of its span, so the trace continues in
+  the services the plugins call:
+
+  ```go
+  ctr := plg.New(plg.WithTracerProvider(tp))
+  ctx, span := tracer.Start(r.Context(), "price order") // or the span your HTTP middleware started
+  defer span.End()
+  total, err := rule.Price(ctx, order) // plg.call pricing/loyalty.Price, its Host calls and requests below it
+  ```
+
+  With a no-op provider (or none installed) tracing costs a call nothing. Span names and attributes are listed
+  on `plg.WithTracerProvider`.
 
 ### Lifecycle events: `WithOnEvent`
 
@@ -1235,6 +1251,10 @@ the history).
 Go plugins are interpreted inside WebAssembly with the CPU cap on: about 20–50× slower per call and about 10×
 heavier per instance than Lua or TypeScript. Prefer Lua or TypeScript for hot paths; Go plugins suit plugin
 authors who want Go, at a call rate where 0.1 ms per call is acceptable.
+
+Tracing (`BenchmarkCallLuaTraced`, Lua, one string in and out): no provider installed, or a no-op one, adds no
+allocation and no measurable time to a call; an SDK provider recording the call's span adds ≈ 1.4 µs and 6
+allocations (2.5 KB) per call, before any export.
 
 ## Limitations and residual risks
 

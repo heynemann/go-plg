@@ -114,13 +114,14 @@ var (
 )
 
 // handler returns the function serving host_call for the instances of the plugin with the given key and
-// language, reporting panics to panics.
-func (h *host) handler(key string, lang Language, owner *ownerTags, panics *panicReporter) engine.HostFunc {
+// language, reporting panics to panics and tracing each Host method call in spans.
+func (h *host) handler(key string, lang Language, owner *ownerTags, panics *panicReporter, spans *pluginSpans,
+) engine.HostFunc {
 	if h == nil {
 		return nil
 	}
 
-	caller := &hostCaller{host: h, panics: panics, owner: owner, key: key, lang: lang}
+	caller := &hostCaller{host: h, panics: panics, owner: owner, spans: spans, key: key, lang: lang}
 
 	return caller.serve
 }
@@ -130,6 +131,7 @@ type hostCaller struct {
 	host   *host
 	panics *panicReporter
 	owner  *ownerTags
+	spans  *pluginSpans
 	key    string
 	lang   Language
 }
@@ -137,7 +139,8 @@ type hostCaller struct {
 // serve decodes a host call's arguments, calls the Host method and appends its status-prefixed answer to dst:
 // the encoded results, the message of the error it returned, of its results' conversion failure or of its
 // panic. A panic (in the method, or in plg decoding or encoding its values) is reported as a [PanicError] in
-// [PhaseHost], whose message the plugin receives as the method's error; the instance keeps serving.
+// [PhaseHost], whose message the plugin receives as the method's error; the instance keeps serving. The call has
+// its span, a child of the plugin call's, which the Host method's context carries.
 func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw []byte) ([]byte, error) {
 	hst := hc.host
 	if int(index) >= len(hst.methods) {
@@ -145,6 +148,8 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 	}
 
 	meth := hst.methods[index]
+	head := len(dst)
+	ctx, span := hc.spans.host(ctx, index)
 
 	var (
 		answer []byte
@@ -166,6 +171,8 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 
 		answer, err = hst.answer(ctx, dst, meth, raw)
 	}()
+
+	hc.spans.hostAnswered(ctx, span, answer[head:], err)
 
 	return answer, err
 }

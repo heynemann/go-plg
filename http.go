@@ -80,14 +80,14 @@ func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (
 }
 
 // httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
-// Register call's policy, its panics reported and its requests counted in meters. A validation's requests
-// ([IsValidation]) are logged with validation=true.
+// Register call's policy, its panics reported, its requests counted in meters and traced in spans. A
+// validation's requests ([IsValidation]) are logged with validation=true.
 func (c *Container) httpHandler(reg *registration, key string, lang Language, owner *ownerTags,
-	meters *pluginMeters,
+	meters *pluginMeters, spans *pluginSpans,
 ) engine.HTTPFunc {
 	return reg.http.Handler(key, httpcap.Hooks{
 		Panicked: c.httpPanicked(key, lang, owner), Done: c.httpDone(key, lang, meters), Attr: owner.log,
-		Mark: validationMark,
+		Mark: validationMark, Trace: spans.httpRequest,
 	})
 }
 
@@ -104,7 +104,7 @@ func validationMark(ctx context.Context) slog.Attr {
 // panic in their instruments reported as a PanicError in [PhaseCallback] (the request goes on as it ended).
 func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) func(context.Context, httpcap.Report) {
 	return func(ctx context.Context, report httpcap.Report) {
-		c.panics.callback(ctx, key, lang, meterMethod, func() { meters.requested(ctx, report) })
+		c.panics.callback(ctx, key, lang, meterMethod, func() { meters.requested(ctx, &report) })
 	}
 }
 

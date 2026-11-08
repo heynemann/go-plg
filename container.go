@@ -49,6 +49,7 @@ type Container struct {
 	panics       *panicReporter
 	events       *eventQueue // keeps every event for Events, and delivers it to the WithOnEvent function if any
 	meters       *instruments
+	tracing      *tracing
 	observation  metric.Registration                 // the callback observing the pools' gauges
 	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
 	modules      *xsync.Map[moduleKey, *compiledGuest]
@@ -95,6 +96,8 @@ func New(opts ...Option) *Container {
 	ctr.logger = ctr.panics.guardedLogger("", "")
 	ctr.panics.tally = ctr.countPanic
 	ctr.instrument(&cfg)
+
+	ctr.tracing = newTracing(cfg.tracerProvider, ctr.panics)
 
 	// After the instruments: a panic in the logger's handler on the engine's warning is counted in them.
 	ctr.engine = engine.New(context.Background(), engine.Options{Logger: ctr.logger, CacheDir: cfg.cacheDir})

@@ -446,7 +446,7 @@ func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerT
 		}
 	}
 
-	for o, name := range []string{"ok", "refused", "failed"} {
+	for o, name := range httpOutcomes {
 		meters.http[o] = with(attribute.String("outcome", name))
 	}
 
@@ -466,8 +466,11 @@ func (m *pluginMeters) called(ctx context.Context, index uint32, elapsed time.Du
 	}
 }
 
+// httpOutcomes are the outcome attribute values of an HTTP request's measurements and span, by httpcap.Outcome.
+var httpOutcomes = [...]string{"ok", "refused", "failed"} //nolint:gochecknoglobals // immutable attribute values
+
 // requested records an HTTP request of the plugin.
-func (m *pluginMeters) requested(ctx context.Context, report httpcap.Report) {
+func (m *pluginMeters) requested(ctx context.Context, report *httpcap.Report) {
 	requests := m.http[report.Outcome].add
 	if report.Outcome == httpcap.OutcomeOK {
 		requests = m.status(report.Status)
