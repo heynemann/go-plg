@@ -148,7 +148,7 @@ func (f adminFlags) client(ctx context.Context, cmd string, env *Env) (*adminCli
 		return nil, failure(cmd, err), false
 	}
 
-	token, err := prof.token(ctx, env)
+	token, err := prof.token(ctx, env, adminTimeout)
 	if err != nil {
 		return nil, failure(cmd, err), false
 	}
@@ -274,7 +274,7 @@ func (c *adminClient) get(ctx context.Context, target *url.URL, out any) error {
 
 	err = sonic.ConfigDefault.NewDecoder(answer.Body).Decode(out)
 	if err != nil {
-		return fmt.Errorf("profile %s: GET %s: reading the answer: %w", c.profile, target, err)
+		return fmt.Errorf("profile %s: GET %s: reading the answer: %w", c.profile, target.Redacted(), err)
 	}
 
 	return nil
@@ -305,5 +305,5 @@ func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
 		msg += " (check the profile's token)"
 	}
 
-	return fmt.Errorf("profile %s: GET %s: %w %s", c.profile, target, errAnswer, msg)
+	return fmt.Errorf("profile %s: GET %s: %w %s", c.profile, target.Redacted(), errAnswer, msg)
 }

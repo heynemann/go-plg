@@ -448,6 +448,9 @@ func TestStatusFailures(t *testing.T) {
 		return fmt.Sprintf("profiles:\n  - name: p\n    url: %s\n%s", url, token)
 	}
 	url := func(mount string) string { return env.srv.URL + mount }
+	// withSecret is the URL of mount with credentials in it, which no error may show.
+	withSecret := func(mount string) string { return strings.Replace(url(mount), "://", "://ana:s3cret@", 1) }
+	redacted := func(mount string) string { return strings.Replace(url(mount), "://", "://ana:xxxxx@", 1) }
 
 	tests := map[string]struct {
 		vars     map[string]string
@@ -484,6 +487,26 @@ func TestStatusFailures(t *testing.T) {
 		},
 		"an FTP URL":           {profiles: profile("ftp://example.com", ""), contains: "url must be an absolute http"},
 		"a URL without a host": {profiles: profile("http://", ""), contains: "url must be an absolute http"},
+		"an FTP URL with credentials": { //nolint:gosec // G101: a test's fake password
+			profiles: profile("ftp://ana:s3cret@example.com", ""),
+			contains: `url must be an absolute http or https URL, not "ftp://ana:xxxxx@example.com"`,
+		},
+		"an unparsable URL with credentials": {
+			profiles: profile("http://ana:s3cret@ex%zz.com", ""),
+			contains: "profile p: url must be an absolute http or https URL, not a URL\n",
+		},
+		"a refusal from a URL with credentials": {
+			profiles: profile(withSecret("/staging"), ""),
+			contains: "GET " + redacted("/staging/plugins") + ": the admin handler answered 401 Unauthorized",
+		},
+		"an answer that is not JSON from a URL with credentials": {
+			profiles: profile(withSecret("/garbled"), ""),
+			contains: "GET " + redacted("/garbled/plugins") + ": reading the answer: ",
+		},
+		"a server that is gone at a URL with credentials": {
+			profiles: profile(strings.Replace(gone.URL, "://", "://ana:s3cret@", 1), ""),
+			contains: `profile p: Get "` + strings.Replace(gone.URL, "://", "://ana:***@", 1) + `/plugins": dial tcp`,
+		},
 		"a token from two sources": {
 			profiles: profile(url("/open"), "    token: {env: X, command: [echo, x]}\n"),
 			contains: "profile p: token needs exactly one of env and command",
@@ -568,6 +591,7 @@ func TestStatusFailures(t *testing.T) {
 			assert.True(t, strings.HasPrefix(stderr, "plg status: "), stderr)
 			assert.Contains(t, stderr,
 				strings.ReplaceAll(tc.contains, "$FILE", filepath.Join(home, ".config", "plg", "profiles.yaml")))
+			assert.NotContains(t, stderr, "s3cret", "no error shows a URL's password")
 		})
 	}
 }

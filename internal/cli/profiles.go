@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/strictyaml"
 )
@@ -154,8 +155,12 @@ func (p *profile) check() error {
 	}
 
 	base, err := url.Parse(p.URL)
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
-		return fmt.Errorf("profile %s: %w, not %q", p.Name, errProfileURL, p.URL)
+	if err != nil { // the URL is not quoted: it may hold credentials, which a parse failure cannot redact
+		return fmt.Errorf("profile %s: %w, not a URL", p.Name, errProfileURL)
+	}
+
+	if (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+		return fmt.Errorf("profile %s: %w, not %q", p.Name, errProfileURL, base.Redacted())
 	}
 
 	p.base = base
@@ -195,8 +200,9 @@ func (p *profiles) pick(path, name string) (*profile, error) {
 	return &p.Profiles[i], nil
 }
 
-// token returns the profile's bearer token; empty when the profile names no token source.
-func (p *profile) token(ctx context.Context, env *Env) (string, error) {
+// token returns the profile's bearer token; empty when the profile names no token source. A token command has
+// timeout to print it.
+func (p *profile) token(ctx context.Context, env *Env, timeout time.Duration) (string, error) {
 	switch {
 	case p.Token == nil:
 		return "", nil
@@ -211,11 +217,21 @@ func (p *profile) token(ctx context.Context, env *Env) (string, error) {
 
 	var stdout, stderr bytes.Buffer
 
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	//nolint:gosec // G204: runs the command the user's own profile names
 	cmd := exec.CommandContext(ctx, p.Token.Command[0], p.Token.Command[1:]...)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = env.Dir, &stdout, &stderr
+	cmd.WaitDelay = time.Second // its children may hold its output open once it is killed
 
 	err := cmd.Run()
+
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("profile %s: %w: %q did not finish within %s", p.Name, errTokenCommand,
+			p.Token.Command, timeout)
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("profile %s: %w: %q: %w: %s", p.Name, errTokenCommand, p.Token.Command, err,
 			strings.TrimSpace(stderr.String()))

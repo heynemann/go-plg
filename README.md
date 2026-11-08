@@ -1122,7 +1122,7 @@ An `<event>` is a `plg.Event`: `at`, `kind` (a `plg.EventKind`), `key`, `version
 ### From a terminal: `plg status` and `plg events`
 
 Plugin authors check their plugins in an environment through its admin handler. Name the environments in
-`~/.config/plg/profiles.yaml` (`$XDG_CONFIG_HOME/plg/profiles.yaml` when that is set):
+`~/.config/plg/profiles.yaml` (`$XDG_CONFIG_HOME/plg/profiles.yaml` when that is an absolute path):
 
 ```yaml
 default: staging                                 # used without -profile (else the only profile)
@@ -1136,7 +1136,8 @@ profiles:
 ```
 
 A token comes from an environment variable or from what a command prints (run without a shell, in the working
-directory); a profile without one sends none. The file is read as strictly as `plugin.yaml` (unknown and
+directory, and given 30 seconds, as each admin request is); a profile without one sends none. Errors show a
+profile's URL without its password. The file is read as strictly as `plugin.yaml` (unknown and
 duplicate keys, anchors and aliases are errors). Then:
 
 ```sh

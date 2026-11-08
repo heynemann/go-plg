@@ -3,9 +3,11 @@ package plg
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,12 +58,12 @@ func answering(res engine.Result, err error) func() (engine.Result, error) {
 	return func() (engine.Result, error) { return res, err }
 }
 
-// TestNoopTracingDoesNotAllocate: with a no-op provider (or the API's default global one, before an SDK replaces
-// it), a call allocates exactly what it does untraced (`make allocs` runs it uninstrumented); a recording
-// provider allocates, so the comparison measures the spans.
+// TestNoopTracingCallsDoNotAllocate: with a no-op provider (or the API's default global one, before an SDK replaces
+// it), a call allocates exactly what it does untraced (`make allocs` runs it uninstrumented, with -race); a
+// recording provider allocates, so the comparison measures the spans.
 //
 //nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
-func TestNoopTracingDoesNotAllocate(t *testing.T) {
+func TestNoopTracingCallsDoNotAllocate(t *testing.T) {
 	if testing.CoverMode() != "" {
 		t.Skip("allocations are measured without coverage instrumentation, by make allocs")
 	}
@@ -152,6 +154,43 @@ func TestCallSpansRecordTheirOutcome(t *testing.T) {
 			assert.Equal(t, sdktrace.Status{Code: codes.Error, Description: err.Error()}, span.Status)
 			require.Len(t, span.Events, 1)
 			assert.Equal(t, "exception", span.Events[0].Name)
+		})
+	}
+}
+
+// TestHTTPSpansRecordTheResponseStatus: an answered request carries http.response.status_code, and a status of
+// 400 or above sets the client span's error status; below 400 it stays unset.
+func TestHTTPSpansRecordTheResponseStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusOK, http.StatusFound, http.StatusBadRequest, http.StatusBadGateway} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+
+			exporter := tracetest.NewInMemoryExporter()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+
+			t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.Background())) })
+
+			reporter := reporting(slog.DiscardHandler)
+			plug, _ := tracedPlugin(t, reporter, newTracing(provider, reporter), answering(engine.Result{}, nil))
+
+			_, end := plug.spans.httpRequest(t.Context())
+			require.NotNil(t, end)
+			end(httpcap.Report{
+				Method: http.MethodGet, URL: "https://example.test/x", Status: status, Outcome: httpcap.OutcomeOK,
+			})
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, 1)
+			assert.Contains(t, attrStrings(&spans[0]), "http.response.status_code="+strconv.Itoa(status))
+
+			want := codes.Unset
+			if status >= http.StatusBadRequest {
+				want = codes.Error
+			}
+
+			assert.Equal(t, want, spans[0].Status.Code)
 		})
 	}
 }
