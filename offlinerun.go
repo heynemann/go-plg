@@ -50,19 +50,7 @@ type offlineLaunch struct {
 //nolint:ireturn // it is offline.Open, which returns the offline.Runner interface
 func openOffline(_ context.Context, spec *offline.Contract, plugin *offline.Plugin, opts *offline.Options,
 ) (offline.Runner, error) {
-	desc, err := ParseManifest(plugin.Manifest)
-	if err != nil {
-		return nil, err
-	}
-
-	desc.Key = plugin.Key
-
-	contr, err := offlineContract(spec)
-	if err != nil {
-		return nil, err
-	}
-
-	hst, err := stubHost(contr.pkgPath, contr.described.Type, spec.Host)
+	prepared, err := prepareOffline(spec, plugin)
 	if err != nil {
 		return nil, err
 	}
@@ -77,9 +65,10 @@ func openOffline(_ context.Context, spec *offline.Contract, plugin *offline.Plug
 
 	return &offlineRunner{
 		//nolint:contextcheck // New takes no context: what the container starts ends with the runner's Close
-		ctr:   New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir)),
-		contr: contr, hst: hst, validation: spec.Validation, files: plugin.Files, desc: desc, timeout: timeout,
-		options: offlineOptions(&single), prepared: map[*offline.HTTP]*offlineLaunch{},
+		ctr:   newOfflineContainer(opts),
+		contr: prepared.contr, hst: prepared.hst, validation: spec.Validation, files: plugin.Files,
+		desc: prepared.desc, timeout: timeout, options: offlineOptions(&single),
+		prepared: map[*offline.HTTP]*offlineLaunch{},
 	}, nil
 }
 

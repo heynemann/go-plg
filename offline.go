@@ -60,14 +60,56 @@ func offlineOwnership(manifest []byte, required bool) ([]adminjson.Issue, error)
 
 // checkOfflineContract is [offline.CheckContract]: it checks spec's interface and Host as checkOffline does.
 func checkOfflineContract(spec *offline.Contract) error {
-	contr, err := offlineContract(spec)
-	if err != nil {
-		return err
-	}
-
-	_, err = stubHost(contr.pkgPath, contr.described.Type, spec.Host)
+	_, _, err := offlineContractHost(spec)
 
 	return err
+}
+
+// offlineContractHost prepares spec as Register prepares a registered contract, with a Host whose methods fail
+// every call.
+func offlineContractHost(spec *offline.Contract) (*contract, *host, error) {
+	contr, err := offlineContract(spec)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hst, err := stubHost(contr.pkgPath, contr.described.Type, spec.Host)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return contr, hst, nil
+}
+
+// offlinePlugin is a plugin plg validate checks or runs: its descriptor, keyed as the plugin is, and the contract
+// and Host offlineContractHost prepares.
+type offlinePlugin struct {
+	contr *contract
+	hst   *host
+	desc  Descriptor
+}
+
+// prepareOffline parses plugin's manifest and prepares spec, as both checkOffline and openOffline start.
+func prepareOffline(spec *offline.Contract, plugin *offline.Plugin) (offlinePlugin, error) {
+	desc, err := ParseManifest(plugin.Manifest)
+	if err != nil {
+		return offlinePlugin{}, err
+	}
+
+	desc.Key = plugin.Key
+
+	contr, hst, err := offlineContractHost(spec)
+	if err != nil {
+		return offlinePlugin{}, err
+	}
+
+	return offlinePlugin{contr: contr, hst: hst, desc: desc}, nil
+}
+
+// newOfflineContainer is the throwaway container a plg validate check or run starts in, logging to opts' Logger and
+// caching compiled guests in its CacheDir; its caller closes it.
+func newOfflineContainer(opts *offline.Options) *Container {
+	return New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir))
 }
 
 // checkOfflineHost is [offline.CheckHost]: it checks spec as checkOffline checks the Host of a contract of pkgPath.
@@ -94,19 +136,7 @@ func offlineDefaults(language string) directive.Limits {
 // candidate (no pool, one throwaway instance running Create), under the limits opts sets and in its Go guest.
 func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.Plugin, opts *offline.Options,
 ) (_ *adminjson.Report, err error) {
-	desc, err := ParseManifest(plugin.Manifest)
-	if err != nil {
-		return nil, err
-	}
-
-	desc.Key = plugin.Key
-
-	contr, err := offlineContract(spec)
-	if err != nil {
-		return nil, err
-	}
-
-	hst, err := stubHost(contr.pkgPath, contr.described.Type, spec.Host)
+	prepared, err := prepareOffline(spec, plugin)
 	if err != nil {
 		return nil, err
 	}
@@ -119,20 +149,20 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 	cfg.createTimeout = opts.Limits.Timeout
 
 	//nolint:contextcheck // New takes no context: what the container starts ends with its Close, below
-	ctr := New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir))
+	ctr := newOfflineContainer(opts)
 
 	defer func() {
 		err = errors.Join(err, ctr.Close(context.WithoutCancel(ctx)))
 	}()
 
-	reg, err := ctr.newRegistration(contr, cfg, offlineName, hst)
+	reg, err := ctr.newRegistration(prepared.contr, cfg, offlineName, prepared.hst)
 	if err != nil {
 		return nil, err
 	}
 
 	defer reg.http.Close()
 
-	report, err := ctr.checkAgainst(ctx, reg, offlineStorage, &desc, plugin.Files)
+	report, err := ctr.checkAgainst(ctx, reg, offlineStorage, &prepared.desc, plugin.Files)
 
 	return newAdminReport(&report), err
 }

@@ -36,7 +36,7 @@ func checkLuaSyntax(ctx context.Context, files fs.FS, opts *offline.Options) (_ 
 	}
 
 	//nolint:contextcheck // New takes no context: what the container starts ends with its Close, below
-	ctr := New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir))
+	ctr := newOfflineContainer(opts)
 
 	defer func() {
 		err = errors.Join(err, ctr.Close(context.WithoutCancel(ctx)))
