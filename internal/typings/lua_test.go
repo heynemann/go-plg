@@ -339,7 +339,7 @@ func cut(text, prefix string) (string, error) {
 
 // TestLuaAnnotationsParse parses every annotation of the golden Lua typings with the language server's grammar
 // and resolves every type they name: each is a builtin or a class or alias the file declares. The file is valid
-// Lua too: the cli tests run it in the Lua guest.
+// Lua too: TestGoldenLuaTypingsRunInTheLuaGuest runs it in the Lua guest.
 func TestLuaAnnotationsParse(t *testing.T) {
 	t.Parallel()
 

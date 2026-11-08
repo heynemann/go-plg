@@ -75,8 +75,9 @@ func everything(t *testing.T) *typings.Contract {
 }
 
 // TestGeneratesTheGoldenTypings generates the TypeScript and Lua typings of a contract using every data type and
-// compares them with the golden files, which are the product: the integration test type-checks a TypeScript
-// plugin against them and the Lua one parses the annotations. Run with -update to rewrite them.
+// compares them with the golden files, which are the product: the integration tests type-check a TypeScript
+// plugin against them and run the Lua ones in the Lua guest, and the Lua tests parse the annotations. Run with
+// -update to rewrite them.
 func TestGeneratesTheGoldenTypings(t *testing.T) {
 	t.Parallel()
 
