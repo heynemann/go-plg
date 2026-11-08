@@ -8,4 +8,4 @@
 
 - [x] Tests: each pipeline step's failure surfaces in all three output formats; the JSON schema is pinned by tests on consumer-relevant fields; the resource report reflects a plugin that allocates near its limit
 - [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI run 42474071042 for `bc511d2`: success)
