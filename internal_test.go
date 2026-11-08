@@ -5194,3 +5194,27 @@ func TestTracingFollowsTheGlobalProvider(t *testing.T) {
 	assert.Nil(t, newTracing(nil, reporter).idle, "the SDK is no default")
 	assert.Nil(t, newTracing(tracenoop.NewTracerProvider(), reporter).tracer, "a no-op provider is off")
 }
+
+// TestGoValidateMissingReadsTheFilesTheGuestLoads names only the Validate methods the Go guest can see: one
+// declared in a file the guest skips (a name starting with "_", another GOOS's file, a build-constrained one) is
+// not declared by the plugin.
+func TestGoValidateMissingReadsTheFilesTheGuestLoads(t *testing.T) {
+	t.Parallel()
+
+	const want = "Validate(ctx context.Context, in c.In) ([]plugin.Issue, error)"
+
+	files := fstest.MapFS{
+		"p/plugin.go":      {Data: []byte("package p\n\ntype P struct{}\n")},
+		"p/_old.go":        {Data: []byte("package p\n\nfunc (P) Validate() {}\n")},
+		"p/v_windows.go":   {Data: []byte("package p\n\nfunc (*P) Validate() {}\n")},
+		"p/ignored.go":     {Data: []byte("// +build ignore\n\npackage p\n\nfunc (P) Validate(int) {}\n")},
+		"p/plugin_test.go": {Data: []byte("package p\n\nfunc (P) Validate(string) {}\n")},
+	}
+
+	assert.Equal(t, "the plugin instance has no method "+want+", and the plugin declares no method Validate",
+		goValidateMissing(files, "p", want))
+
+	files["p/validate.go"] = &fstest.MapFile{Data: []byte("package p\n\nfunc (P) Validate(n int) {}\n")}
+	assert.Equal(t, "the plugin instance has no method "+want+"; the plugin declares func (P) Validate(n int) "+
+		"(p/validate.go:3:1)", goValidateMissing(files, "p", want))
+}

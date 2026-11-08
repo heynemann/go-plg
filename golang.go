@@ -163,10 +163,16 @@ func goValidateMissing(files fs.FS, entrypoint, want string) string {
 }
 
 // declaredValidates returns the Validate methods the Go source file name declares, each as its signature
-// followed by its position; none when the file cannot be read or parsed.
+// followed by its position; none when the file cannot be read or parsed, or the Go guest does not load it (see
+// [gorestrict.GuestLoads]).
 func declaredValidates(files fs.FS, fset *token.FileSet, name string) []string {
 	src, err := fs.ReadFile(files, name)
 	if err != nil {
+		return nil
+	}
+
+	loads, err := gorestrict.GuestLoads(fset, name, src)
+	if err != nil || !loads {
 		return nil
 	}
 
