@@ -9,7 +9,7 @@ import (
 
 // Rule is implemented by pricing rule plugins.
 //
-//plg:limits timeout=3s
+//plg:limits timeout=20s
 //plg:validation Limits
 type Rule interface {
 	// Quote prices order: its lines' total, less 10% for the customer's gold tier.

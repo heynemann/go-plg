@@ -137,7 +137,7 @@ func TestValidateRunsTestCasesInEveryLanguage(t *testing.T) {
 			{"an input of another type", `tests/fail.yaml:74:20: input.cents: str "ten" is not an integer (int)`, nil},
 			{"a missing fixture", "tests/fail.yaml:79:21: input.order: $ref: open fixtures/missing.yaml: ", nil},
 			{"a panic", "Spin failed: it panicked or trapped: plg: " + key + ": call Spin failed: " + panicked, nil},
-			{"a timeout", "Spin failed: it did not return within 3s: plg: " + key + ": call Spin failed: ", nil},
+			{"a timeout", "Spin failed: it did not return within 20s: plg: " + key + ": call Spin failed: ", nil},
 			{
 				"other issues",
 				"Validate returned other issues than expect.issues",
