@@ -43,8 +43,8 @@ func untilPrompt(t *testing.T, out *bufio.Reader) string {
 // TestDevRevalidatesOnChangesAndCallsMethods runs plg dev on a plugin plg init wrote, with an injected watcher and
 // stdin: it validates the plugin (watching its directory), validates it again when the watcher reports a change
 // (reusing the contract module it resolved: the go command is gone by then) and shows the test case the change
-// broke; call runs one method with an input file and prints its result, or why it could not; the end of stdin
-// stops it.
+// broke; call runs one method with an input file and prints its result, or why it could not (the plugin's error on
+// one line, its escape sequence neutralized); the end of stdin stops it.
 func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 	t.Parallel()
 
@@ -118,6 +118,16 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 	_, err = io.WriteString(typed, "call Quote missing.yaml\n")
 	require.NoError(t, err)
 	assert.Contains(t, untilPrompt(t, out), "Quote failed: open missing.yaml: ")
+
+	replaceIn(t, plugin, "plugin.lua", "return { total = 1,", `error("\27[2Jboom\nagain") return { total = 1,`)
+
+	_, err = io.WriteString(typed, "call Quote order.yaml\n")
+	require.NoError(t, err)
+
+	failed := untilPrompt(t, out)
+	assert.Regexp(t, "^Quote failed: .*\ufffd\\[2Jboom again\n"+devPrompt+"$", failed,
+		"the plugin's error, on one line")
+	assert.NotContains(t, failed, "\x1b", "the plugin's error does not drive the terminal")
 
 	require.NoError(t, typed.Close())
 

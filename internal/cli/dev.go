@@ -247,7 +247,8 @@ func (s *devSession) callCommand(ctx context.Context, args []string) {
 	}
 }
 
-// call calls the plugin's method with the parameters of the input file and prints what it returned.
+// call calls the plugin's method with the parameters of the input file and prints what it returned, or its error on
+// one line without control characters (it holds the plugin's own text).
 func (s *devSession) call(ctx context.Context, method, input string) {
 	var steps strings.Builder
 
@@ -263,7 +264,7 @@ func (s *devSession) call(ctx context.Context, method, input string) {
 	}
 
 	if err != nil {
-		s.printf("%s failed: %v\n", method, err)
+		s.printf("%s failed: %s\n", method, oneLine(err.Error()))
 
 		return
 	}
