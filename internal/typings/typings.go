@@ -3,7 +3,8 @@
 // returns), every type its methods take and return, with struct fields under the names Lua and TypeScript see
 // (`json` tag names), the Host (the host global), the validation input and plg's Issue, and the globals each guest
 // provides. They describe exactly what crosses: the types are planned as the wire codec plans them
-// ([gen.Plan]), so a field tagged `json:"-"` is absent and nil-able values may be null.
+// ([gen.Plan]), so a field tagged `json:"-"` is absent and nil-able values may be null. From the same plan it
+// writes the skeletons plg init starts plugins from, in Go, Lua and TypeScript ([NewScaffold]).
 package typings
 
 import (

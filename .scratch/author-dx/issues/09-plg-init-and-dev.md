@@ -4,8 +4,8 @@
 
 **Blocked by:** 04 (Test cases), 05 (Author repos: plg.yaml), 06 (Typings and type-checking)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests: init for each language produces a plugin that passes validate unchanged; dev re-runs on a file change (deterministic, driven by an injected watcher) and the interactive call prints the result
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Tests: init for each language produces a plugin that passes validate unchanged; dev re-runs on a file change (deterministic, driven by an injected watcher) and the interactive call prints the result
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)

@@ -95,9 +95,11 @@ func runValidate(env *Env, args []string) outcome {
 // each step adds its rows to table. repo is the author repository listing the plugin, if any, and files the
 // plugin's files, the repository's shared directories copied in.
 type validation struct {
-	env        *Env
-	table      *stepTable
-	repo       *authorrepo.Repo
+	env   *Env
+	table *stepTable
+	repo  *authorrepo.Repo
+	// modules, when set, keeps the contract modules resolved, so that later runs (plg dev's) reuse them.
+	modules    *modules
 	files      fs.FS
 	dir        string
 	arg        string
@@ -105,6 +107,9 @@ type validation struct {
 	cacheDir   string
 	guestCache string   // empty means the default, <user cache>/plg/guests
 	hosts      []string // the contract's Host candidates when there are several and none was chosen
+	// newPlugin is set by plg init: the plugin has no source yet, so its Host is -host's or the contract's only
+	// candidate.
+	newPlugin bool
 }
 
 // resolved is what the steps up to the interface found.
@@ -365,6 +370,13 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	default:
 	}
 
+	if mod, ok := v.modules.find(ref); ok {
+		v.table.row("contract", stepOK, fmt.Sprintf("module %s %s (%s; resolved by an earlier run)", mod.Path,
+			mod.Version, mod.Dir))
+
+		return mod, true
+	}
+
 	fetcher := modfetch.Fetcher{Environ: v.env.environ()}
 
 	mod, err := fetcher.Fetch(ctx, ref.Package, ref.Version)
@@ -372,6 +384,7 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 		return modfetch.Module{}, v.failed("contract", err)
 	}
 
+	v.modules.keep(ref, mod)
 	v.table.row("contract", stepOK, fmt.Sprintf("module %s %s (%s)", mod.Path, mod.Version, mod.Dir))
 
 	return mod, true
@@ -390,23 +403,7 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 		return nil, v.failed("interface", err)
 	}
 
-	host := v.host
-
-	switch {
-	case host != "":
-	case desc.Language == plg.LanguageGo:
-		host = createHost(v.files, desc.Entrypoint, ref.Package, loaded.PackageName())
-	default:
-		// Typings written for an earlier contract may name a Host it no longer has: they are stale then, which the
-		// typings step reports, so the Host is chosen as if there were none.
-		host = typings.HostIn(string(desc.Language), v.files)
-		if host != "" && loaded.SetHost(host) == nil {
-			host = ""
-		} else {
-			host = v.defaultHost(loaded, ref.Package)
-		}
-	}
-
+	host := v.chooseHost(loaded, ref, desc)
 	if host != "" {
 		err = loaded.SetHost(host)
 		if err != nil {
@@ -426,6 +423,29 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	v.table.row("interface", stepOK, detail)
 
 	return loaded, true
+}
+
+// chooseHost returns the Host the plugin's Create takes, to set on loaded (see contract); empty when there is none
+// to set, or the one its typings name is set already. A new plugin (plg init's) takes -host's, else the contract's
+// only candidate.
+func (v *validation) chooseHost(loaded *contractload.Loaded, ref contractref.Ref, desc *plg.Descriptor) string {
+	switch {
+	case v.host != "":
+		return v.host
+	case v.newPlugin:
+		return v.defaultHost(loaded, ref.Package)
+	case desc.Language == plg.LanguageGo:
+		return createHost(v.files, desc.Entrypoint, ref.Package, loaded.PackageName())
+	}
+
+	// Typings written for an earlier contract may name a Host it no longer has: they are stale then, which the
+	// typings step reports, so the Host is chosen as if there were none.
+	host := typings.HostIn(string(desc.Language), v.files)
+	if host != "" && loaded.SetHost(host) == nil {
+		return ""
+	}
+
+	return v.defaultHost(loaded, ref.Package)
 }
 
 // defaultHost returns the contract package's only interface that passes plg's Host checks, the Host of a Lua or
@@ -466,9 +486,18 @@ func (v *validation) typings(res *resolved) (*typings.Typings, bool) {
 	return typ, true
 }
 
-// generateTypings generates the typings of the plugin's language. A contract they cannot describe fails with the
-// error loading a plugin against it would fail with, which names what breaks it.
+// generateTypings generates the typings of the plugin's language.
 func generateTypings(res *resolved) (*typings.Typings, error) {
+	typ, err := typings.Generate(string(res.desc.Language), typingsContract(res))
+	if err != nil {
+		return nil, describable(res, err)
+	}
+
+	return typ, nil
+}
+
+// typingsContract is the contract as the typings (and plg init's skeletons) describe it.
+func typingsContract(res *resolved) *typings.Contract {
 	contract := &typings.Contract{
 		Interface: res.loaded.InterfaceType, Host: res.loaded.HostType, Implements: res.desc.Implements,
 	}
@@ -478,19 +507,20 @@ func generateTypings(res *resolved) (*typings.Typings, error) {
 		}
 	}
 
-	typ, err := typings.Generate(string(res.desc.Language), contract)
+	return contract
+}
+
+// describable returns err, an error of the typings: a contract they cannot describe fails with the error loading
+// a plugin against it would fail with, which names what breaks it.
+func describable(res *resolved, err error) error {
 	if errors.Is(err, typings.ErrContract) {
 		broken := offline.CheckContract(res.loaded.Contract)
 		if broken != nil {
-			return nil, broken //nolint:wrapcheck // plg's errors name the contract and what breaks it
+			return broken //nolint:wrapcheck // plg's errors name the contract and what breaks it
 		}
 	}
 
-	if err != nil {
-		return nil, err //nolint:wrapcheck // typings' errors say what is wrong
-	}
-
-	return typ, nil
+	return err
 }
 
 // typesCommand is the plg types command line that writes the plugin's typings.

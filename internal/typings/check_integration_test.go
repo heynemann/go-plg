@@ -116,3 +116,31 @@ func TestCheckTypeScriptRefusesLuaTypings(t *testing.T) {
 	_, err = typ.CheckTypeScript(t.Context(), nil, golden(t, ""), "plugin.ts")
 	require.ErrorIs(t, err, typings.ErrLanguage)
 }
+
+// TestTypeScriptScaffoldTypeChecks type-checks the TypeScript skeleton of a contract with several results, a
+// variadic method, unnamed parameters, times, pointers, maps, a Host and a validation input against its typings
+// with the real compiler: no diagnostics.
+func TestTypeScriptScaffoldTypeChecks(t *testing.T) {
+	t.Parallel()
+
+	contract := shapes(t)
+
+	typ, err := typings.Generate(typings.LanguageTypeScript, contract)
+	require.NoError(t, err)
+
+	scaffold, err := typings.NewScaffold(typings.LanguageTypeScript, contract, "shape")
+	require.NoError(t, err)
+
+	var files memfs.Builder
+
+	for _, file := range append(typ.Files, scaffold.Files...) {
+		require.NoError(t, files.Add(file.Name, file.Data))
+	}
+
+	plugin, err := files.Build()
+	require.NoError(t, err)
+
+	diags, err := typ.CheckTypeScript(t.Context(), checker(t), plugin, scaffold.Entrypoint)
+	require.NoError(t, err)
+	assert.Empty(t, diags, string(scaffold.Files[0].Data))
+}

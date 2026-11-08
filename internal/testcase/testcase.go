@@ -114,13 +114,17 @@ type issue struct {
 	severity, code, message, field *string
 }
 
-// position is where a node is in a file.
+// position is where a node is in a file; without a line, where a value came from.
 type position struct {
 	file      string
 	line, col int
 }
 
 func (p position) String() string {
+	if p.line == 0 {
+		return p.file
+	}
+
 	return p.file + ":" + strconv.Itoa(p.line) + ":" + strconv.Itoa(p.col)
 }
 

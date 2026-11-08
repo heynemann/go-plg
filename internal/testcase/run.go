@@ -15,8 +15,8 @@ import (
 	"github.com/heynemann/go-plg/internal/offline"
 )
 
-// validateParam is the name of Validate's parameter, the validation input.
-const validateParam = "in"
+// ValidateParam is the name of Validate's parameter, the validation input.
+const ValidateParam = "in"
 
 // Result is how one case ran.
 type Result struct {
@@ -80,6 +80,42 @@ func runCase(ctx context.Context, contract *offline.Contract, files fs.FS, runne
 	result.Details = append(result.Details, problems...)
 
 	return result
+}
+
+// Invoke calls the method call (or Validate) of the plugin in a fresh instance by runner, with the arguments of
+// the input file name of files: a mapping of the parameters by name, as a case's input ($ref paths relative to
+// files' root); an empty name gives none. There are no stubs: runner's Host and HTTP policy answer, as they were
+// opened with. It returns what the call returned, written as test cases write values, or why it failed.
+func Invoke(ctx context.Context, contract *offline.Contract, files fs.FS, runner offline.Runner, call, name string,
+) (string, error) {
+	tc := &Case{Name: call, call: call, pos: position{file: "call " + call}}
+
+	if name != "" {
+		root, err := readYAML(files, name)
+		if err != nil {
+			return "", err
+		}
+
+		if root.Kind != yaml.MappingNode {
+			return "", errorAt(at(name, root), "the input is a mapping of the call's parameters by name")
+		}
+
+		tc.input, tc.pos = root, at(name, root)
+	}
+
+	prepared, err := prepare(contract, &decoder{files: files}, &File{Name: name}, tc)
+	if err != nil {
+		return "", err
+	}
+
+	outcome := runner.Run(context.WithValue(ctx, stateKey{}, prepared.state), &offline.Call{
+		Args: prepared.args, Method: prepared.method,
+	})
+	if outcome.Err != nil {
+		return "", outcome.Err
+	}
+
+	return prepared.describeOutcome(&outcome), nil
 }
 
 // prepared is a case whose values are decoded: ready to run.
@@ -151,7 +187,7 @@ func (p *prepared) resolve(contract *offline.Contract) (*signature, error) {
 	if p.call == ValidateCall && contract.Validation != nil {
 		p.method, p.validate = len(contract.Methods), true
 
-		return &signature{params: []string{validateParam}, ins: []reflect.Type{contract.Validation.Input}}, nil
+		return &signature{params: []string{ValidateParam}, ins: []reflect.Type{contract.Validation.Input}}, nil
 	}
 
 	known := make([]string, 0, len(contract.Methods)+1)

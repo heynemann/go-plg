@@ -74,6 +74,23 @@ commands:
                       plugin.yaml pins (resolved as validate resolves it): TypeScript declarations (plg.d.ts) and
                       the compiler options validate type-checks with (tsconfig.json), or Lua Language Server
                       annotations (plg.d.lua); files it did not write are never overwritten; -host as for validate
+  init -implements <package>.<Interface>@<version> -lang go|lua|ts [-host Interface] [dir]
+                      create a plugin directory (default: the interface's name, lowered) implementing the
+                      interface: plugin.yaml (implements, language, entrypoint and an owner block to fill in), the
+                      typings (Lua and TypeScript), a skeleton implementing every method with its results' zero
+                      values (and Validate, returning no issues, when the contract has //plg:validation), and
+                      tests/example.yaml calling each method; a Go plugin's module requires the contract module (a
+                      go.mod of the plugin's own, or the author repository's, which gains the requirement); a
+                      plugin inside an author repository is added to its plg.yaml. The contract is resolved as
+                      validate resolves it; its Host is -host's, else the contract's only Host candidate
+  dev [-host Interface] [-cache-dir dir] [-guest-cache dir] [plugin dir]
+                      validate a plugin (default: the current directory, or an author repository's only plugin)
+                      and again on each change to its files, its tests, the repository's shared directories or
+                      plg.yaml; the contract module is resolved once and the guests stay compiled in the
+                      compilation cache between runs. Reads commands from stdin: call <Method> [input file]
+                      calls one method (or Validate) in a fresh instance with the parameters the YAML input file
+                      names (as a test case's input; the Host and HTTP requests fail) and prints its result; run
+                      validates again; quit (or the end of the input) stops
   status [-profile name] [-format table|json] [-team name] [key]
                       show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
                       detail; -team keeps the plugins whose owner team is name
@@ -95,6 +112,8 @@ profile) from $XDG_CONFIG_HOME/plg/profiles.yaml (default ~/.config/plg/profiles
 
 // Env is what a command runs in.
 type Env struct {
+	// Stdin is what plg dev reads its commands from; nil reads none.
+	Stdin io.Reader
 	// Stdout gets what status and events show.
 	Stdout io.Writer
 	// Stderr gets errors, usage and warm's compile log.
@@ -104,6 +123,9 @@ type Env struct {
 	// Environ returns the environment (os.Environ), which validate runs the go command in; nil means the
 	// process's.
 	Environ func() []string
+	// Watch watches the files under paths (directories and files) for plg dev until ctx ends, sending the paths
+	// that changed; nil polls the file system every quarter of a second.
+	Watch func(ctx context.Context, paths []string) <-chan []string
 	// Dir is the working directory, against which relative paths resolve.
 	Dir string
 }
@@ -139,6 +161,21 @@ type outcome struct {
 	code int
 }
 
+// commands are plg's commands, by name.
+//
+//nolint:gochecknoglobals // immutable lookup table
+var commands = map[string]func(env *Env, args []string) outcome{
+	"gen":         func(env *Env, args []string) outcome { return runGen(env.Dir, args) },
+	"warm":        func(env *Env, args []string) outcome { return runWarm(env.Dir, args, env.Stderr) },
+	"build-guest": func(env *Env, args []string) outcome { return runBuildGuest(env.Dir, args) },
+	"status":      runStatus,
+	"events":      runEvents,
+	"validate":    runValidate,
+	"types":       runTypes,
+	"init":        runInit,
+	"dev":         runDev,
+}
+
 func run(args []string, env *Env) outcome {
 	if len(args) == 0 {
 		return outcome{code: exitUsage, msg: usage}
@@ -146,24 +183,12 @@ func run(args []string, env *Env) outcome {
 
 	cmd, args := args[0], args[1:]
 
-	switch cmd {
-	case "gen":
-		return runGen(env.Dir, args)
-	case "warm":
-		return runWarm(env.Dir, args, env.Stderr)
-	case "build-guest":
-		return runBuildGuest(env.Dir, args)
-	case "status":
-		return runStatus(env, args)
-	case "events":
-		return runEvents(env, args)
-	case "validate":
-		return runValidate(env, args)
-	case "types":
-		return runTypes(env, args)
-	default:
+	command, ok := commands[cmd]
+	if !ok {
 		return outcome{code: exitUsage, msg: fmt.Sprintf("plg: unknown command %q\n\n%s", cmd, usage)}
 	}
+
+	return command(env, args)
 }
 
 // usageError is a command's misuse.

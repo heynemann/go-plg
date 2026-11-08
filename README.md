@@ -28,7 +28,8 @@ HTTP allowlist).
 - [Declaring the interface: `implements`](#declaring-the-interface-implements) and
   [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate),
   also of [author repositories (`plg.yaml`)](#author-repositories-plgyaml),
-  with [typings for Lua and TypeScript: `plg types`](#typings-plg-types)
+  with [typings for Lua and TypeScript: `plg types`](#typings-plg-types), and
+  [starting and iterating: `plg init` and `plg dev`](#starting-and-iterating-plg-init-and-plg-dev)
 - [Storages](#storages)
 - [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
@@ -741,6 +742,47 @@ the Host the plugin uses, recorded in the files' header; without it, `plg types`
 typings name, else takes the contract's only possible Host, as `plg validate` does. Run it again whenever
 `implements` changes: `plg validate` fails until the typings match the pinned contract. Go plugins get none: they
 import the contract package itself.
+
+### Starting and iterating: `plg init` and `plg dev`
+
+`plg init` starts a plugin from the contract it will implement:
+
+```sh
+go run github.com/heynemann/go-plg/cmd/plg init -implements example.com/shop/pricing.Rule@v1.0.0 -lang ts rules/gold
+```
+
+It resolves the contract as `plg validate` does (an author repository's `replace` included) and writes a new
+plugin directory (default: the interface's name, lowered; an existing one must be empty): `plugin.yaml`
+(`implements`, `language`, `entrypoint` and an `owner` block to fill in), the typings of a Lua or TypeScript
+plugin, a skeleton implementing every method of the interface with its results' zero values (and `Validate`,
+returning no issues, when the contract declares `//plg:validation`) whose `Create` takes the Host (Go) or reaches
+it through `host` (Lua, TypeScript), and `tests/example.yaml`, a case per method calling it with zero values and
+expecting what the skeleton returns. The Host is `-host`'s, else the contract's only possible Host. A Go plugin
+becomes a module of its own requiring the pinned contract module, unless its author repository has a `go.mod`
+above it, which gains that requirement instead (`go mod tidy` afterwards writes `go.sum`); a `go.mod` requiring
+another version of the contract module stops `plg init` before it writes anything. A plugin inside an author
+repository is added to its `plg.yaml`, after the plugins it lists, its comments kept. The new plugin passes
+`plg validate` as written, with a warning until its owner block is filled in (an error under
+`requireOwnership: true`).
+
+`plg dev [plugin dir]` (default: the current directory, or an author repository's only plugin) validates the plugin
+as `plg validate` does, then again whenever its files, its tests, the repository's `plg.yaml` or its shared
+directories change (it polls them every quarter of a second), printing each run's table. The contract module is
+resolved once (later runs reuse it without the go command) and the guests and the TypeScript compiler stay
+compiled in the compilation cache (`-cache-dir`), so a run after a save costs the load and the test cases. It
+reads commands from stdin:
+
+```text
+plg dev> call Quote order.yaml
+Quote: result {total: 300, discount: 0, reasons: null}
+plg dev> call Split
+Split failed: call Split: input gives no "cents" (parameters: cents, parts)
+```
+
+`call <Method> [input file]` calls one method (or `Validate`) in a fresh instance under the plugin's limits, with
+the parameters the YAML input file gives by name, as a test case's `input` (`$ref` relative to the file); the
+Host and HTTP requests fail, as in `plg validate`'s `load`. `run` validates again, and `quit` or the end of the
+input stops it.
 
 ## Storages
 
