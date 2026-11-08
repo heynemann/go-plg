@@ -302,14 +302,22 @@ func TestOpenArtifactHoldsFilesToTheStorageLimits(t *testing.T) {
 	require.ErrorContains(t, err, "the artifact decompresses to more than")
 }
 
-// TestOpenArtifactRejectsWhatPackNeverWrites opens archives holding entries outside the plugin's directory (path
-// traversal, absolute and unclean paths), entries that are not regular files (links, directories, devices), a file
-// twice or as a directory too, and archives whose provenance record is missing, doubled, not a file, too large,
-// not JSON, of another format or of other files, or that lack plugin.yaml: each fails with ErrInvalidArtifact.
-func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
-	t.Parallel()
+// malformedArchive is an archive plg pack never writes: OpenArtifact fails on it with ErrInvalidArtifact, saying
+// msg.
+type malformedArchive struct {
+	name    string
+	msg     string
+	entries []rawEntry
+}
 
-	provenance := provenanceEntry(t, nil)
+// malformedArchives returns archives holding entries outside the plugin's directory (path traversal, absolute and
+// unclean paths), entries that are not regular files (links, directories, devices), a file twice or as a directory
+// too, and archives whose provenance record is missing, doubled, not a file, too large, not JSON, of another format
+// or of other files, or that lack plugin.yaml.
+func malformedArchives(tb testing.TB) []malformedArchive {
+	tb.Helper()
+
+	provenance := provenanceEntry(tb, nil)
 	files := fileEntries()
 	with := func(entries ...rawEntry) []rawEntry {
 		return append(append([]rawEntry{provenance}, files...), entries...)
@@ -318,21 +326,17 @@ func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
 		return rawEntry{header: &tar.Header{Typeflag: typ, Name: name, Linkname: link, Mode: 0o644}}
 	}
 	record := func(edit func(*adminjson.Provenance)) rawEntry {
-		rec := artifactRecord(artifactTree(t, artifactFiles()))
+		rec := artifactRecord(artifactTree(tb, artifactFiles()))
 		rec.Format = artifact.Format
 		edit(rec)
 
 		data, err := sonic.ConfigStd.Marshal(rec)
-		require.NoError(t, err)
+		require.NoError(tb, err)
 
 		return rawEntry{name: artifact.ProvenanceName, data: string(data)}
 	}
 
-	tests := []struct {
-		name    string
-		msg     string
-		entries []rawEntry
-	}{
+	return []malformedArchive{
 		{
 			"parent", `the entry "plugin/../../etc/passwd" is not inside the plugin`,
 			with(rawEntry{name: "plugin/../../etc/passwd", data: "x"}),
@@ -381,12 +385,17 @@ func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
 		}, files...)},
 		{"edited file", "but its provenance records sha256:", append([]rawEntry{provenance}, files[0], files[1],
 			rawEntry{name: "plugin/plugin.yaml", data: artifactFiles()["plugin.yaml"] + "version: \"2\"\n"})},
-		{"no plugin.yaml", "no plugin/plugin.yaml", append([]rawEntry{provenanceEntry(t, map[string]string{
+		{"no plugin.yaml", "no plugin/plugin.yaml", append([]rawEntry{provenanceEntry(tb, map[string]string{
 			"main.lua": artifactFiles()["main.lua"], "lib/tiers.lua": artifactFiles()["lib/tiers.lua"],
 		})}, files[:2]...)},
 	}
+}
 
-	for _, tc := range tests {
+// TestOpenArtifactRejectsWhatPackNeverWrites opens each of malformedArchives: each fails with ErrInvalidArtifact.
+func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range malformedArchives(t) {
 		art, err := openArtifact(rawArchive(t, 0, false, tc.entries...))
 		require.ErrorIs(t, err, plg.ErrInvalidArtifact, tc.name)
 		require.NotErrorIs(t, err, plg.ErrPluginTooLarge, tc.name)
@@ -396,7 +405,7 @@ func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
 }
 
 // FuzzOpenArtifact opens arbitrary bytes as an artifact, seeded with what plg pack writes, the archives the tests
-// above damage and the malformed ones they hand-make. Whatever the bytes, OpenArtifact either fails with
+// above damage and every one of malformedArchives. Whatever the bytes, OpenArtifact either fails with
 // ErrInvalidArtifact or ErrPluginTooLarge and returns no artifact, or returns files within the limits of a
 // plugin's files, plugin.yaml among them, whose digest is the one its provenance records.
 func FuzzOpenArtifact(f *testing.F) {
@@ -407,35 +416,24 @@ func FuzzOpenArtifact(f *testing.F) {
 	checksum[len(packed)-6] ^= 0xff
 
 	provenance := provenanceEntry(f, nil)
-	with := func(entries ...rawEntry) []byte {
-		return rawArchive(f, 0, false, append(append([]rawEntry{provenance}, fileEntries()...), entries...)...)
-	}
-	header := func(typ byte, name, link string) rawEntry {
-		return rawEntry{header: &tar.Header{Typeflag: typ, Name: name, Linkname: link, Mode: 0o644}}
-	}
+	handMade := append([]rawEntry{provenance}, fileEntries()...)
 
 	for _, seed := range [][]byte{
-		packed, with(), packed[:10], packed[:64], packed[:len(packed)/2], packed[:len(packed)-1], flipped, checksum,
+		packed, rawArchive(f, 0, false, handMade...),
+		packed[:10], packed[:64], packed[:len(packed)/2], packed[:len(packed)-1], flipped, checksum,
 		nil, []byte("not an artifact"),
 		rawArchive(f, 0, true, provenance, rawEntry{name: "plugin/main.lua", data: "x"}),
 		rawArchive(f, 0, true, provenance, rawEntry{header: &tar.Header{
 			Typeflag: tar.TypeReg, Name: "plugin/huge.bin", Size: plg.MaxPluginFileSize + 1, Mode: 0o644,
 		}}),
 		rawArchive(f, 0, false, provenance, rawEntry{name: "plugin/" + strings.Repeat("d/", 1500) + "f"}),
-		rawArchive(f, 4096, false, append([]rawEntry{provenance}, fileEntries()...)...),
-		with(rawEntry{name: "plugin/../../etc/passwd", data: "x"}),
-		with(rawEntry{name: "/etc/cron.d/evil", data: "x"}),
-		with(rawEntry{name: "plugin/./x", data: "x"}),
-		with(header(tar.TypeDir, "plugin/", "")),
-		with(header(tar.TypeSymlink, "plugin/link", "/etc/passwd")),
-		with(header(tar.TypeLink, "plugin/hard", "plugin/main.lua")),
-		with(rawEntry{name: "plugin/main.lua", data: "x"}),
-		with(rawEntry{name: "plugin/main.lua/x", data: "x"}),
-		with(provenance),
-		rawArchive(f, 0, false, fileEntries()...),
-		rawArchive(f, 0, false, append([]rawEntry{{name: artifact.ProvenanceName, data: "{"}}, fileEntries()...)...),
+		rawArchive(f, 4096, false, handMade...),
 	} {
 		f.Add(seed)
+	}
+
+	for _, tc := range malformedArchives(f) {
+		f.Add(rawArchive(f, 0, false, tc.entries...))
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
