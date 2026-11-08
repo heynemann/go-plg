@@ -330,9 +330,9 @@ Agreed in a design session after the second adversarial review; tickets in `.scr
 - **Inspection:** *(implemented: ticket 09, which adds `skipped` for a plugin in a language its Register does not enable, and calls `rejected` any plugin no version of which serves because its latest load or listing failed.)* `plg.Info(c, key)` and `plg.Plugins(c)` list every plugin a registration's storages hold: `serving`, `degraded`, `serving_last_good` (an update was rejected, with that version's report), `rejected` (never loaded, with the reason and the owner if the manifest parsed) or `retired`, with owner, versions, last reports, panic counts and pool stats.
 - **Admin page:** *(implemented: ticket 10, which answers GET only, HEAD too getting a 405, and documents the JSON shape on `AdminHandler` and in the README.)* `plg.AdminHandler(c)` serves the same as read-only JSON. The service mounts and protects it (it shows owner emails); validation, reload and Check stay Go calls behind the service's own auth.
 
-## Author developer experience (planned)
+## Author developer experience
 
-Agreed in a design session for the first real user: a rewards platform where growth teams set up incentives for cohorts of users, and cohort providers, eligibility conditions and reward delivery are plugins written by many teams. The goal is a self-service experience while authoring, deploying and observing plugins. Tickets in `.scratch/author-dx/issues/`.
+Agreed in a design session for the first real user: a rewards platform where growth teams set up incentives for cohorts of users, and cohort providers, eligibility conditions and reward delivery are plugins written by many teams. The goal is a self-service experience while authoring, deploying and observing plugins. Tickets in `.scratch/author-dx/issues/`, all implemented (01–13; the implementation log's "Author developer experience" entries record how).
 
 ### Boundary
 
