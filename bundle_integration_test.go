@@ -53,9 +53,9 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 
 	ctr := newContainer(t)
 
-	// The plugins meant to load do so under the default limits: a small plugin bundles in about 40 ms, but in more
+	// The plugins meant to load do so under newContainer's hour: a small plugin bundles in about 40 ms, but in more
 	// than 2 s on a busy CI runner under the race detector. Only the plugins that never bundle in time run under
-	// the short one.
+	// the short limit.
 	first := tsFooer(t, ctr, `Foo: (s: string) => s`)
 	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => "v1 " + s`)))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))

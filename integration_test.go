@@ -32,11 +32,14 @@ type lookalike interface {
 }
 
 // newContainer returns a container on the default on-disk compilation cache, so only the first test run on a
-// machine compiles the Go guest cold.
+// machine compiles the Go guest cold. Its bundlings get an hour, not the 10 s default: a small plugin bundles in
+// about 40 ms, but took over 10 s in a `make check` on a machine short of memory, failing a test about something
+// else. The tests of the bundling's time limit set theirs (bundle_integration_test.go).
 func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	tb.Helper()
 
 	ctr := plg.New(opts...)
+	plg.SetBundleLimits(ctr, time.Hour, plg.BundleMemoryLimit)
 
 	tb.Cleanup(func() { assert.NoError(tb, ctr.Close(context.Background())) })
 
