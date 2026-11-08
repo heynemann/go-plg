@@ -136,15 +136,14 @@ var (
 	errHostArgs   = errors.New("malformed host call arguments")
 )
 
-// handler returns the function serving host_call for the instances of the plugin with the given key and
-// language, reporting panics to panics and tracing each Host method call in spans.
-func (h *host) handler(key string, lang Language, owner *ownerTags, panics *panicReporter, spans *pluginSpans,
-) engine.HostFunc {
+// handler returns the function serving host_call for the instances of the plugin version id, reporting panics to
+// panics and tracing each Host method call in spans.
+func (h *host) handler(id pluginID, panics *panicReporter, spans *pluginSpans) engine.HostFunc {
 	if h == nil {
 		return nil
 	}
 
-	caller := &hostCaller{host: h, panics: panics, owner: owner, spans: spans, key: key, lang: lang}
+	caller := &hostCaller{host: h, panics: panics, spans: spans, id: id}
 
 	return caller.serve
 }
@@ -153,10 +152,8 @@ func (h *host) handler(key string, lang Language, owner *ownerTags, panics *pani
 type hostCaller struct {
 	host   *host
 	panics *panicReporter
-	owner  *ownerTags
 	spans  *pluginSpans
-	key    string
-	lang   Language
+	id     pluginID
 }
 
 // serve decodes a host call's arguments, calls the Host method and appends its status-prefixed answer to dst:
@@ -183,8 +180,8 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 		defer func() {
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
 				failure := &PanicError{
-					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.name + "." + meth.name,
-					Owner: hc.owner.owner, tags: hc.owner,
+					Key: hc.id.key, Language: hc.id.lang, Phase: PhaseHost, Method: hst.name + "." + meth.name,
+					Owner: hc.id.owner.owner, tags: hc.id.owner,
 				}
 				hc.panics.recovered(ctx, failure, v)
 

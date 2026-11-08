@@ -118,7 +118,7 @@ func newPool(cfg *poolConfig) *pool {
 	}
 
 	return &pool{
-		logger:       cfg.panics.pluginLogger(cfg.key, cfg.lang, owner),
+		logger:       cfg.panics.pluginLogger(pluginID{owner: owner, key: cfg.key, lang: cfg.lang}),
 		owner:        owner,
 		panics:       cfg.panics,
 		spawn:        cfg.spawn,

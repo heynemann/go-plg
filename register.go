@@ -725,11 +725,14 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key string, src *source,
 	files *memfs.FS, report *Report,
 ) (*launcher, *pluginMeters, error) {
-	owner := newOwnerTags(src.desc.owner(), src.desc.Version, src.storeName)
+	id := pluginID{
+		owner: newOwnerTags(src.desc.owner(), src.desc.Version, src.storeName), key: key, lang: src.desc.Language,
+	}
 
 	if limit := reg.cfg.limit(src.loader); src.desc.MemoryLimit > limit {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: plugin memory limit capped at the Register limit",
-			slog.String("key", key), owner.log, slog.Uint64("asked", src.desc.MemoryLimit), slog.Uint64("limit", limit))
+			slog.String("key", key), id.owner.log, slog.Uint64("asked", src.desc.MemoryLimit),
+			slog.Uint64("limit", limit))
 	}
 
 	err := checkLoad(reg, src, report)
@@ -747,10 +750,10 @@ func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key st
 		return nil, nil, err
 	}
 
-	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.methods)
-	spans := newPluginSpans(c.tracing, key, src.desc.Language, owner, reg.contr.methods, reg.host)
+	meters := newPluginMeters(c.meters, id, reg.contr.methods)
+	spans := newPluginSpans(c.tracing, id, reg.contr.methods, reg.host)
 
-	return c.newLauncher(reg, key, src, owner, spec, mod, meters, spans), meters, nil
+	return c.newLauncher(reg, id, src, spec, mod, meters, spans), meters, nil
 }
 
 // checkLoad checks a plugin about to launch, adding the issues found to report: the contract version it pins
@@ -762,36 +765,35 @@ func checkLoad(reg *registration, src *source, report *Report) error {
 	return report.blocking()
 }
 
-// newLauncher returns the launcher of a plugin version's instances, which start from spec and read the secrets
+// newLauncher returns the launcher of the plugin version id's instances, which start from spec and read the secrets
 // the version declares.
-func (c *Container) newLauncher(reg *registration, key string, src *source, owner *ownerTags, spec launchSpec,
-	mod *engine.Module, meters *pluginMeters, spans *pluginSpans,
+func (c *Container) newLauncher(reg *registration, id pluginID, src *source, spec launchSpec, mod *engine.Module,
+	meters *pluginMeters, spans *pluginSpans,
 ) *launcher {
-	output := c.panics.pluginLogger(key, src.desc.Language, owner)
+	output := c.panics.pluginLogger(id)
 	info := PluginInfo{
-		Owner: *src.desc.owner(), Key: key, Version: src.desc.Version, Language: src.desc.Language,
-		Storage: src.storeName,
+		Owner: *src.desc.owner(), Key: id.key, Version: src.desc.Version, Language: id.lang, Storage: src.storeName,
 	}
-	secrets := newPluginSecrets(reg.cfg, &info, src.desc.Secrets, c.panics, output, owner)
+	secrets := newPluginSecrets(reg.cfg, &info, src.desc.Secrets, c.panics, output, id.owner)
 
 	return &launcher{
 		mod:           mod,
 		output:        output,
 		panics:        c.panics,
-		owner:         owner,
+		owner:         id.owner,
 		spans:         spans,
 		secrets:       secrets,
 		payload:       spec.payload,
 		createTimeout: reg.cfg.createTimeout,
 		opts: engine.InstanceOptions{
 			Mounts:      spec.mounts,
-			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters, spans, secrets.redact),
+			HTTP:        c.httpHandler(reg, id, meters, spans, secrets.redact),
 			HTTPRefuses: reg.http.Refuses,
-			Host:        reg.host.handler(key, src.desc.Language, owner, c.panics, spans),
+			Host:        reg.host.handler(id, c.panics, spans),
 			Secret:      secrets.serve,
 		},
-		key:  key,
-		lang: src.desc.Language,
+		key:  id.key,
+		lang: id.lang,
 	}
 }
 

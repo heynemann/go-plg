@@ -422,11 +422,11 @@ type pluginMeters struct {
 	http         [3]measure                          // {key, outcome}, by httpcap.Outcome
 }
 
-// newPluginMeters returns the measurements of the version of plugin key in lang serving iface.
-func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerTags, methods []*method,
-) *pluginMeters {
-	keyAttr, langAttr := attribute.String("key", key), attribute.String("language", string(lang))
-	plugin := []attribute.KeyValue{keyAttr, owner.metrics[0], owner.metrics[1], owner.metrics[2]}
+// newPluginMeters returns the measurements of the plugin version id serving iface.
+func newPluginMeters(inst *instruments, id pluginID, methods []*method) *pluginMeters {
+	keyAttr, langAttr := attribute.String("key", id.key), attribute.String("language", string(id.lang))
+	tags := id.owner.metrics
+	plugin := []attribute.KeyValue{keyAttr, tags[0], tags[1], tags[2]}
 	with := func(attrs ...attribute.KeyValue) measure { return measureOf(append(attrs, plugin...)...) }
 
 	meters := &pluginMeters{

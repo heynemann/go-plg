@@ -156,13 +156,12 @@ type pluginSpans struct {
 	http    []trace.SpanStartOption
 }
 
-// newPluginSpans returns the spans of the version of plugin key in lang, owned by owner, serving iface with
-// the Host hst (nil without one).
-func newPluginSpans(tracing *tracing, key string, lang Language, owner *ownerTags, methods []*method, hst *host,
-) *pluginSpans {
+// newPluginSpans returns the spans of the plugin version id serving iface with the Host hst (nil without one).
+func newPluginSpans(tracing *tracing, id pluginID, methods []*method, hst *host) *pluginSpans {
+	owner := id.owner
 	plugin := []attribute.KeyValue{
-		attribute.String("key", key), attribute.String("version", owner.version),
-		attribute.String("language", string(lang)), owner.metrics[0], owner.metrics[1], owner.metrics[2],
+		attribute.String("key", id.key), attribute.String("version", owner.version),
+		attribute.String("language", string(id.lang)), owner.metrics[0], owner.metrics[1], owner.metrics[2],
 	}
 	with := func(name, method string) spanStart {
 		attrs := append([]attribute.KeyValue{attribute.String("method", method)}, plugin...)
@@ -172,14 +171,14 @@ func newPluginSpans(tracing *tracing, key string, lang Language, owner *ownerTag
 
 	spans := &pluginSpans{
 		tracing: tracing,
-		key:     key,
-		lang:    lang,
+		key:     id.key,
+		lang:    id.lang,
 		calls:   make([]spanStart, len(methods)),
 		http:    []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(plugin...)},
 	}
 
 	for i, meth := range methods {
-		spans.calls[i] = with("plg.call "+key+"."+meth.name, meth.name)
+		spans.calls[i] = with("plg.call "+id.key+"."+meth.name, meth.name)
 	}
 
 	if hst != nil {

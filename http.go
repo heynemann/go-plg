@@ -92,22 +92,22 @@ func httpClient(cfg *registerConfig, logger *slog.Logger) (*httpcap.Client, erro
 	return client, nil
 }
 
-// httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
+// httpHandler returns the http_roundtrip handler of the instances of the plugin version id, enforcing the
 // Register call's policy, its panics reported, its requests counted in meters and traced in spans, the logged
 // and traced URLs and errors scrubbed of the version's secrets. A validation's requests ([IsValidation]) are
 // logged with validation=true.
-func (c *Container) httpHandler(reg *registration, key string, lang Language, owner *ownerTags,
-	meters *pluginMeters, spans *pluginSpans, secrets *redact.Redactor,
+func (c *Container) httpHandler(reg *registration, id pluginID, meters *pluginMeters, spans *pluginSpans,
+	secrets *redact.Redactor,
 ) engine.HTTPFunc {
 	hooks := &httpcap.Hooks{
-		Panicked: c.httpPanicked(key, lang, owner), Done: c.httpDone(key, lang, meters), Attr: owner.log,
+		Panicked: c.httpPanicked(id), Done: c.httpDone(id, meters), Attr: id.owner.log,
 		Mark: validationMark, Trace: spans.httpRequest,
 	}
 	if secrets != nil {
 		hooks.Scrub = secrets.String
 	}
 
-	return reg.http.Handler(key, hooks)
+	return reg.http.Handler(id.key, hooks)
 }
 
 // validationMark is the attribute an HTTP request is logged with when it is a validation's.
@@ -121,18 +121,18 @@ func validationMark(ctx context.Context) slog.Attr {
 
 // httpDone returns the function the HTTP capability reports each request to: it counts the request in meters, a
 // panic in their instruments reported as a PanicError in [PhaseCallback] (the request goes on as it ended).
-func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) func(context.Context, httpcap.Report) {
+func (c *Container) httpDone(id pluginID, meters *pluginMeters) func(context.Context, httpcap.Report) {
 	return func(ctx context.Context, report httpcap.Report) {
-		c.panics.callback(ctx, key, lang, meterMethod, func() { meters.requested(ctx, &report) })
+		c.panics.callback(ctx, id.key, id.lang, meterMethod, func() { meters.requested(ctx, &report) })
 	}
 }
 
 // httpPanicked returns the function the HTTP capability passes its panics to: they become reported
 // PanicErrors in [PhaseHTTP], and the plugin's request fails with an internal error.
-func (c *Container) httpPanicked(key string, lang Language, owner *ownerTags) func(context.Context, any) {
+func (c *Container) httpPanicked(id pluginID) func(context.Context, any) {
 	return func(ctx context.Context, value any) {
 		c.panics.recovered(ctx, &PanicError{
-			Key: key, Language: lang, Phase: PhaseHTTP, Owner: owner.owner, tags: owner,
+			Key: id.key, Language: id.lang, Phase: PhaseHTTP, Owner: id.owner.owner, tags: id.owner,
 		}, value)
 	}
 }

@@ -48,7 +48,8 @@ func tracedPlugin(t *testing.T, reporter *panicReporter, tracing *tracing, call 
 
 	if tracing != nil {
 		owner := newOwnerTags(&Owner{Team: Team{Name: "t"}, Org: "o", Company: "c"}, "v1", "s")
-		plug.spans = newPluginSpans(tracing, "test/k", LanguageGo, owner, []*method{meth}, nil)
+		plug.spans = newPluginSpans(tracing, pluginID{owner: owner, key: "test/k", lang: LanguageGo}, []*method{meth},
+			nil)
 	}
 
 	return plug, meth

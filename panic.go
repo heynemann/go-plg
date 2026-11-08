@@ -230,11 +230,11 @@ func (r *panicReporter) guardedLogger(key string, lang Language) *slog.Logger {
 	return slog.New(&guardedHandler{handler: r.logger.Handler(), panics: r, key: key, lang: lang})
 }
 
-// pluginLogger is guardedLogger for the records about a plugin version: each carries its owner's log group.
-func (r *panicReporter) pluginLogger(key string, lang Language, owner *ownerTags) *slog.Logger {
-	logger := r.guardedLogger(key, lang)
-	if len(owner.log.Value.Group()) > 0 {
-		logger = slog.New(logger.Handler().WithAttrs([]slog.Attr{owner.log}))
+// pluginLogger is guardedLogger for the records about the plugin version id: each carries its owner's log group.
+func (r *panicReporter) pluginLogger(id pluginID) *slog.Logger {
+	logger := r.guardedLogger(id.key, id.lang)
+	if len(id.owner.log.Value.Group()) > 0 {
+		logger = slog.New(logger.Handler().WithAttrs([]slog.Attr{id.owner.log}))
 	}
 
 	return logger
