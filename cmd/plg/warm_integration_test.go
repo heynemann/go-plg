@@ -43,8 +43,10 @@ func main() {
 	c := plg.New(plg.WithCompilationCacheDir(os.Args[1]), plg.WithLogger(logger))
 
 	store := plg.NewMemoryStorage("mem")
-	err := store.Put(&plg.Descriptor{Key: "g", Language: plg.LanguageGo, Entrypoint: "plugin.go"},
-		fstest.MapFS{"plugin.go": {Data: []byte(plugin)}})
+	err := store.Put(&plg.Descriptor{
+		Key: "g", Implements: "example.com/svc/contract.Greeter@v1.0.0", Language: plg.LanguageGo,
+		Entrypoint: "plugin.go",
+	}, fstest.MapFS{"plugin.go": {Data: []byte(plugin)}})
 	if err == nil {
 		err = plg.Register[contract.Greeter](ctx, c, "greeter", plg.WithStorage(store), plg.WithPool(1, 1))
 	}

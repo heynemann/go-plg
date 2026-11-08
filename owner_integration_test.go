@@ -36,7 +36,8 @@ func ownedPlugin(t *testing.T, lang contractLanguage, manifest string) *plg.FSSt
 	}
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "plugin.yaml"),
-		[]byte("language: "+string(lang.lang)+"\nentrypoint: "+entry+"\n"+manifest), 0o600))
+		[]byte(manifestOf[testcontract.Fooer]("language: "+string(lang.lang)+"\nentrypoint: "+entry+"\n"+manifest)),
+		0o600))
 
 	return plg.NewFSStorage(root)
 }
@@ -88,12 +89,9 @@ func TestOwnerShowsWhereverAPluginFails(t *testing.T) {
 	}
 }
 
-// assertOwnedRecords checks that logs (JSON lines) hold a record with each of the messages about key, and that
-// every record about key carries fullOwner's log group.
-func assertOwnedRecords(t *testing.T, logs []byte, key string, messages ...string) {
-	t.Helper()
-
-	want := map[string]any{
+// fullOwnerLog is fullOwner's log group, as JSON decodes it.
+func fullOwnerLog() map[string]any {
+	return map[string]any{
 		"team": "payments", "department": "finance", "org": "commerce", "company": "Acme Inc.",
 		"maintainer": "Ana Lima", "maintainer_email": "ana@example.com", "maintainer_handle": "@ana",
 		"oncall": "payments-oncall", "channel": "#payments", "email": "payments@example.com",
@@ -101,6 +99,14 @@ func assertOwnedRecords(t *testing.T, logs []byte, key string, messages ...strin
 		"runbook": "https://runbooks.example.com/rules", "issues": "https://git.example.com/payments/rules/issues",
 		"labels": map[string]any{"tier": "1", "cost-center": "42"},
 	}
+}
+
+// assertOwnedRecords checks that logs (JSON lines) hold a record with each of the messages about key, and that
+// every record about key carries fullOwner's log group.
+func assertOwnedRecords(t *testing.T, logs []byte, key string, messages ...string) {
+	t.Helper()
+
+	want := fullOwnerLog()
 	seen := map[string]bool{}
 
 	lines := bufio.NewScanner(bytes.NewReader(logs))
@@ -233,8 +239,9 @@ func TestReloadPicksUpAnOwnerChange(t *testing.T) {
 	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "owned"))
 	assert.Equal(t, 2, count(), "an unchanged owner is no change")
 
-	require.NoError(t, os.WriteFile(manifest, []byte("language: lua\nentrypoint: plugin.lua\nversion: \"1\"\n"+
-		"owner: {team: {name: platform}, org: infra}\n"), 0o600))
+	require.NoError(t, os.WriteFile(manifest, []byte(manifestOf[testcontract.Fooer](
+		"language: lua\nentrypoint: plugin.lua\nversion: \"1\"\nowner: {team: {name: platform}, org: infra}\n")),
+		0o600))
 	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "owned"))
 
 	assert.Equal(t, 1, count(), "the plugin was loaded again")

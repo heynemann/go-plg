@@ -8,6 +8,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 
+	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/layout"
@@ -46,12 +47,14 @@ type Contract struct {
 }
 
 // contract is a registered Contract, prepared once: the method plans, the source snapshot, the dispatcher and
-// init payload of its Go plugins, and the generated adapter constructor, if any.
+// init payload of its Go plugins, the generated adapter constructor, if any, and the module providing the
+// interface's package in the program's build info.
 type contract struct {
 	iface      reflect.Type
 	adapter    reflect.Type
 	fast       func(plgimpl.Invoker) any
 	source     *memfs.FS
+	module     contractref.Module
 	dispatcher []byte
 	payload    []byte
 	methods    []*method
@@ -114,7 +117,9 @@ func prepareContract(spec *Contract) (*contract, error) {
 		return nil, err
 	}
 
-	prepared := &contract{iface: spec.Interface, adapter: spec.Adapter}
+	prepared := &contract{
+		iface: spec.Interface, adapter: spec.Adapter, module: contractref.Built(spec.Interface.PkgPath()),
+	}
 
 	prepared.source, err = snapshotSource(spec.Source)
 	if err != nil {

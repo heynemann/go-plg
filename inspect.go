@@ -29,8 +29,9 @@ const (
 	// StatusRetired is a plugin an on-demand validation unpublished ([Unpublish]): no version serves until a
 	// reload loads it again.
 	StatusRetired Status = "retired"
-	// StatusSkipped is a plugin in a language its Register does not enable ([WithGolangPlugins] and the others):
-	// it is never loaded.
+	// StatusSkipped is a plugin its Register never loads: it implements another interface ([ErrOtherInterface]) or
+	// is in a language the Register does not enable ([WithGolangPlugins] and the others; [ErrUnsupportedLanguage]).
+	// Its Rejection's Err says which.
 	StatusSkipped Status = "skipped"
 )
 
@@ -45,8 +46,8 @@ type PluginState struct {
 	// none serves or none ran on it. The version is degraded while its Err is set.
 	Validation *Report
 	// Rejection is why the storages' listing is not served as listed: the report of the load (or listing) that
-	// failed, for [StatusServingLastGood] and [StatusRejected], or of the on-demand validation that unpublished
-	// the version, for [StatusRetired]; nil otherwise.
+	// failed, for [StatusServingLastGood] and [StatusRejected], of the on-demand validation that unpublished the
+	// version, for [StatusRetired], or of the skip, for [StatusSkipped] (its Err the reason); nil otherwise.
 	Rejection *Report
 	// LastPanic is the newest of the PanicErrors Panics counts; nil when there is none.
 	LastPanic *PanicError
@@ -64,7 +65,8 @@ type PluginState struct {
 	// Version is the version served (its content hash when its descriptor names none); empty when none serves.
 	Version string
 	// RejectedVersion is Rejection's Version: the version a failed load tried (empty when it failed before
-	// reading the files of a descriptor naming none), or the version unpublished; empty without a Rejection.
+	// reading the files of a descriptor naming none), the version unpublished, or the version a skipped plugin's
+	// descriptor names; empty without a Rejection.
 	RejectedVersion string
 	// Owner is the plugin's owner: the version served's, otherwise the one its listing names (zero when it names
 	// none, or when the owner is what listing it found invalid).
@@ -279,9 +281,9 @@ func newListedPlugin() (*listedPlugin, bool) {
 }
 
 // rejection is why a listed plugin is not served as listed: a load (or listing) that failed, an on-demand
-// validation that unpublished it, or a language its Register does not enable.
+// validation that unpublished it, or a skip (another interface, a language its Register does not enable).
 type rejection struct {
-	report   *Report  // the failed load or listing, or the on-demand validation that unpublished it; nil when skipped
+	report   *Report  // the failed load or listing, the on-demand validation that unpublished it, or the skip
 	retired  *plugin  // the version that validation unpublished; nil otherwise
 	owner    *Owner   // as the listing, or the version unpublished, names it
 	storage  string   // the storage listing it, or the version unpublished was loaded from
@@ -311,13 +313,14 @@ func problemRejection(key string, p *problem) *rejection {
 	}
 }
 
-// skipRejection is the rejection of src, in a language its Register does not enable.
-func skipRejection(src *source) *rejection {
+// skipRejection is the rejection of s, a listed plugin its registration skips, under key: its report's Err is
+// the reason.
+func skipRejection(key string, s *skippedSource) *rejection {
+	owner := s.src.desc.owner()
+
 	return &rejection{
-		owner:    src.desc.owner(),
-		storage:  src.storeName,
-		language: src.desc.Language,
-		status:   StatusSkipped,
+		report: &Report{At: time.Now(), Err: s.reason, Owner: *owner, Key: key, Version: s.src.desc.Version},
+		owner:  owner, storage: s.src.storeName, language: s.src.desc.Language, status: StatusSkipped,
 	}
 }
 

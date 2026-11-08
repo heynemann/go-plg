@@ -12,6 +12,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 
+	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/internal/httpcap"
@@ -20,9 +21,17 @@ import (
 
 // Register loads, under name, every plugin its storages list for the interface T, and publishes them in one
 // step: each plugin's key is "<name>/<descriptor key>". It loads synchronously and fails fast: on any error
-// nothing is published. Plugins in a language the language options ([WithGolangPlugins], …) leave out are
-// skipped and logged. Afterwards the registration follows its storages on [Container.Reload],
-// [ReloadInterface] and, with [WithPollInterval], by itself.
+// nothing is published. Plugins declaring another interface ([Descriptor.Implements]) and plugins in a language
+// the language options ([WithGolangPlugins], …) leave out are skipped and logged, each with its reason
+// ([ErrOtherInterface], [ErrUnsupportedLanguage]). Afterwards the registration follows its storages on
+// [Container.Reload], [ReloadInterface] and, with [WithPollInterval], by itself.
+//
+// A plugin implementing T is written against a version of T's contract module, which its Implements names. The
+// program's version of that module is the one its build info records ([runtime/debug.ReadBuildInfo]): a plugin
+// loads when both have the same major version and the plugin's minor version is not newer, and is otherwise
+// rejected with an error issue ([CodeContractVersion]) naming both versions. A program whose contract module is
+// built from a local checkout (its version is "(devel)": tests, go run, a replace directive pointing at a
+// directory) cannot tell, so each load carries a warning issue instead ([CodeContractDevel]).
 //
 // It fails if T breaks the interface contract (every method takes a context.Context first, returns an error
 // last and uses only data types) with [ErrInvalidInterface], if T has no [Contract] with [ErrNoContract], if
@@ -39,6 +48,13 @@ func (c *Container) register(ctx context.Context, iface reflect.Type, name strin
 	if err != nil {
 		return err
 	}
+
+	return c.registerPrepared(ctx, iface, reg)
+}
+
+// registerPrepared loads and publishes reg, a prepared Register call of iface, under its name.
+func (c *Container) registerPrepared(ctx context.Context, iface reflect.Type, reg *registration) error {
+	name := reg.name
 
 	if _, dup := c.names.LoadOrStore(name, reg); dup {
 		reg.http.Close()
@@ -80,7 +96,10 @@ type registration struct {
 	reloads    *reloader       // set once the registration is published
 	// keys are the plugin keys its storages list, as of their latest listing, with why each is not served as
 	// listed and the panics reported under it.
-	keys       *xsync.Map[string, *listedPlugin]
+	keys *xsync.Map[string, *listedPlugin]
+	// module is the contract module the program is built with, which the plugins' pinned versions are checked
+	// against: the contract's.
+	module     contractref.Module
 	name       string
 	dispatcher []byte // the Go dispatcher: the contract's, or the one rendered with the Host and the validation
 	goPayload  []byte // the Go init payload, likewise
@@ -121,7 +140,7 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name string) (*registration, error) {
 	reg := &registration{
 		contr: contr, cfg: cfg, name: name, keys: xsync.NewMap[string, *listedPlugin](),
-		dispatcher: contr.dispatcher, goPayload: contr.payload,
+		module: contr.module, dispatcher: contr.dispatcher, goPayload: contr.payload,
 	}
 
 	var err error
@@ -160,7 +179,8 @@ type source struct {
 	storage   Storage
 	loader    loader
 	guest     guestreg.Guest
-	storeName string // storage.Name(), asked once
+	ref       contractref.Ref // the interface desc.Implements names
+	storeName string          // storage.Name(), asked once
 	desc      Descriptor
 	limit     uint64 // per-instance memory limit, whole pages
 }
@@ -176,16 +196,25 @@ type problem struct {
 
 // pluginList is what listing a registration's storages found.
 type pluginList struct {
-	srcs     []source  // the plugins to load
-	skipped  []source  // the plugins in languages the Register does not enable
-	problems []problem // the plugins that cannot be loaded; none for Register, which fails on the first
+	srcs     []source        // the plugins to load
+	skipped  []skippedSource // the plugins implementing another interface, or in languages the Register leaves out
+	problems []problem       // the plugins that cannot be loaded; none for Register, which fails on the first
+}
+
+// skippedSource is a listed plugin its registration skips, and why: [ErrOtherInterface] or
+// [ErrUnsupportedLanguage].
+type skippedSource struct {
+	reason error
+	src    source
 }
 
 // listPlugins lists the storages for Register, which fails on any problem: a storage that cannot be listed, an
-// invalid descriptor, a key listed twice, a language whose guest is not linked. Plugins in languages the
-// Register did not enable are skipped and logged.
-func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerConfig) (pluginList, error) {
-	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
+// invalid descriptor, a key listed twice, a language whose guest is not linked. Plugins implementing another
+// interface or in languages the Register did not enable are skipped and logged.
+func (c *Container) listPlugins(ctx context.Context, reg *registration) (pluginList, error) {
+	name := reg.name
+
+	listed, problems, err := c.listStorages(ctx, name, reg.cfg.storages)
 	for i := range problems {
 		c.events.problem(ctx, problemRejection(name+"/"+problems[i].desc.Key, &problems[i]))
 	}
@@ -201,7 +230,14 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 	found := pluginList{srcs: listed[:0]}
 
 	for i := range listed {
-		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelInfo)
+		reason := c.skip(ctx, reg, &listed[i], slog.LevelInfo)
+		if reason != nil {
+			found.skipped = append(found.skipped, skippedSource{reason: reason, src: listed[i]})
+
+			continue
+		}
+
+		err := admit(reg, &listed[i])
 		if err != nil {
 			c.events.problem(ctx, problemRejection(name+"/"+listed[i].desc.Key,
 				&problem{err: err, storage: listed[i].storeName, desc: listed[i].desc}))
@@ -209,21 +245,17 @@ func (c *Container) listPlugins(ctx context.Context, name string, cfg *registerC
 			return pluginList{}, err
 		}
 
-		if ok {
-			found.srcs = append(found.srcs, listed[i])
-		} else {
-			found.skipped = append(found.skipped, listed[i])
-		}
+		found.srcs = append(found.srcs, listed[i])
 	}
 
 	return found, nil
 }
 
 // relistPlugins lists the storages for a reload: it returns the plugins to load, those skipped and the problems
-// of the others, and fails only when a storage cannot be listed. Skipped languages are logged at Debug level
-// only, rather than on every poll.
-func (c *Container) relistPlugins(ctx context.Context, name string, cfg *registerConfig) (pluginList, error) {
-	listed, problems, err := c.listStorages(ctx, name, cfg.storages)
+// of the others, and fails only when a storage cannot be listed. Skipped plugins are logged at Debug level only,
+// rather than on every poll.
+func (c *Container) relistPlugins(ctx context.Context, reg *registration) (pluginList, error) {
+	listed, problems, err := c.listStorages(ctx, reg.name, reg.cfg.storages)
 	if err != nil {
 		return pluginList{}, err
 	}
@@ -231,45 +263,89 @@ func (c *Container) relistPlugins(ctx context.Context, name string, cfg *registe
 	found := pluginList{srcs: listed[:0], problems: problems}
 
 	for i := range listed {
-		ok, err := c.admit(ctx, name, cfg, &listed[i], slog.LevelDebug)
+		reason := c.skip(ctx, reg, &listed[i], slog.LevelDebug)
+		if reason != nil {
+			found.skipped = append(found.skipped, skippedSource{reason: reason, src: listed[i]})
 
-		switch {
-		case err != nil:
+			continue
+		}
+
+		err := admit(reg, &listed[i])
+		if err != nil {
 			found.problems = append(found.problems,
 				problem{err: err, storage: listed[i].storeName, desc: listed[i].desc})
-		case ok:
-			found.srcs = append(found.srcs, listed[i])
-		default: // in a language the Register did not enable
-			found.skipped = append(found.skipped, listed[i])
+
+			continue
 		}
+
+		found.srcs = append(found.srcs, listed[i])
 	}
 
 	return found, nil
 }
 
-// admit prepares a listed plugin for loading. It reports false for a plugin in a language the Register did not
-// enable, which it logs at level, and fails when the language's guest is not linked.
-func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig, src *source, level slog.Level) (
-	bool, error,
-) {
-	if !cfg.enabled(src.desc.Language) {
-		key := name + "/" + src.desc.Key
-		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled",
-			slog.String("key", key), slog.String("storage", src.storeName),
-			slog.String("language", string(src.desc.Language)), src.desc.owner().logAttr())
-		c.countSkipped(ctx, key, src.desc.Language, src.desc.owner())
-
-		return false, nil
+// skip returns why reg skips a listed plugin ([registration.skips]), nil when it does not; a skip is logged at level
+// and counted.
+func (c *Container) skip(ctx context.Context, reg *registration, src *source, level slog.Level) error {
+	kind, reason := reg.skips(src)
+	if reason == nil {
+		return nil
 	}
 
-	ld, guest, err := cfg.guestFor(src.desc.Language)
+	key := reg.name + "/" + src.desc.Key
+	attrs := []slog.Attr{
+		slog.String("key", key), slog.String("storage", src.storeName),
+		slog.String("language", string(src.desc.Language)), slog.String("implements", src.desc.Implements),
+		src.desc.owner().logAttr(),
+	}
+
+	if kind == skipInterface {
+		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: it implements another interface", attrs...)
+	} else {
+		c.logger.LogAttrs(ctx, level, "plg: plugin skipped: its language is not enabled", attrs...)
+	}
+
+	c.countSkipped(ctx, key, src.desc.Language, src.desc.owner(), kind)
+
+	return reason
+}
+
+// admit prepares a listed plugin reg serves for loading. It fails when the language's guest is not linked.
+func admit(reg *registration, src *source) error {
+	ld, guest, err := reg.cfg.guestFor(src.desc.Language)
 	if err != nil {
-		return false, fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
+		return fmt.Errorf("plugin %s (storage %s): %w", src.desc.Key, src.storeName, err)
 	}
 
-	src.loader, src.guest, src.limit = ld, guest, instanceLimit(cfg.limit(ld), &src.desc)
+	src.loader, src.guest, src.limit = ld, guest, instanceLimit(reg.cfg.limit(ld), &src.desc)
 
-	return true, nil
+	return nil
+}
+
+// skipKind is why a registration skips a listed plugin, as the plg.plugin.skipped metric's reason attribute says.
+type skipKind string
+
+const (
+	skipInterface skipKind = "interface" // the plugin implements another interface
+	skipLanguage  skipKind = "language"  // the Register does not enable the plugin's language
+)
+
+// skips returns why r skips src, a listed plugin, and the kind of that reason; a nil error when r serves it. It
+// skips a plugin implementing another interface than r's ([ErrOtherInterface]) and, among the others, one in a
+// language the Register does not enable ([ErrUnsupportedLanguage]).
+func (r *registration) skips(src *source) (skipKind, error) {
+	iface := r.contr.iface
+	if src.ref.Package != iface.PkgPath() || src.ref.Interface != iface.Name() {
+		return skipInterface, fmt.Errorf("%w: %s implements %s, not %s.%s", ErrOtherInterface, src.desc.Key,
+			src.ref.Name(), iface.PkgPath(), iface.Name())
+	}
+
+	if !r.cfg.enabled(src.desc.Language) {
+		return skipLanguage, fmt.Errorf("%w: %s plugins are not enabled for %s", ErrUnsupportedLanguage,
+			src.desc.Language, r.name)
+	}
+
+	return "", nil
 }
 
 // instanceLimit returns a plugin's per-instance memory limit: the Register's for its language, lowered by the
@@ -283,9 +359,9 @@ func instanceLimit(limit uint64, desc *Descriptor) uint64 {
 	return wholePages(desc.MemoryLimit)
 }
 
-// listStorages lists every storage, checking that each descriptor has a key and an entrypoint and that no key
-// is listed twice, whatever its language. A key with a problem is not loaded from any storage. A panicking
-// storage fails with a reported [PanicError].
+// listStorages lists every storage, checking each descriptor ([checkDescriptor]) and that no key is listed twice,
+// whatever its interface or language. A key with a problem is not loaded from any storage. A panicking storage
+// fails with a reported [PanicError].
 func (c *Container) listStorages(ctx context.Context, name string, storages []Storage) (
 	[]source, []problem, error,
 ) {
@@ -303,7 +379,7 @@ func (c *Container) listStorages(ctx context.Context, name string, storages []St
 		}
 
 		for _, desc := range descs {
-			err = checkDescriptor(storeName, &desc)
+			ref, err := checkDescriptor(storeName, &desc)
 			if err == nil {
 				if prev, dup := owner[desc.Key]; dup {
 					err = fmt.Errorf("%w %q: listed by storages %s and %s", ErrDuplicateKey, desc.Key, prev,
@@ -318,7 +394,7 @@ func (c *Container) listStorages(ctx context.Context, name string, storages []St
 			}
 
 			owner[desc.Key] = storeName
-			srcs = append(srcs, source{storage: store, storeName: storeName, desc: desc})
+			srcs = append(srcs, source{storage: store, storeName: storeName, desc: desc, ref: ref})
 		}
 	}
 
@@ -374,31 +450,39 @@ func (c *Container) storageCall(ctx context.Context, key, method string, call fu
 	return call()
 }
 
-// checkDescriptor checks that a descriptor has a key and an entrypoint, and a memory limit from one page to
-// 4 GiB if any.
-func checkDescriptor(storeName string, desc *Descriptor) error {
+// checkDescriptor checks that a descriptor has a key, an entrypoint and a well-formed Implements, which it returns
+// parsed, a memory limit from one page to 4 GiB if any, and an owner within the limits.
+func checkDescriptor(storeName string, desc *Descriptor) (contractref.Ref, error) {
 	if desc.Key == "" || desc.Entrypoint == "" {
-		return fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint", ErrInvalidDescriptor,
-			storeName, *desc)
+		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint",
+			ErrInvalidDescriptor, storeName, *desc)
+	}
+
+	ref, err := contractref.Parse(desc.Implements)
+	if err != nil {
+		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %q: %w", ErrInvalidDescriptor, storeName,
+			desc.Key, err)
 	}
 
 	if desc.MemoryLimit != 0 && !validMemoryLimit(desc.MemoryLimit) {
-		return fmt.Errorf("%w: storage %s lists %q with a memory limit of %d bytes, not from one %d-byte page "+
-			"to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, minMemoryLimit)
+		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %q with a memory limit of %d bytes, not from "+
+			"one %d-byte page to 4 GiB", ErrInvalidDescriptor, storeName, desc.Key, desc.MemoryLimit, minMemoryLimit)
 	}
 
-	err := desc.owner().check()
+	err = desc.owner().check()
 	if err != nil {
-		return fmt.Errorf("%w: storage %s lists %q: %w", ErrInvalidDescriptor, storeName, desc.Key, err)
+		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %q: %w", ErrInvalidDescriptor, storeName,
+			desc.Key, err)
 	}
 
-	return nil
+	return ref, nil
 }
 
 // sameDescriptor reports whether a and b describe the same plugin version: every field, the owner included.
 func sameDescriptor(a, b *Descriptor) bool {
-	return a.Key == b.Key && a.Language == b.Language && a.Entrypoint == b.Entrypoint && a.Version == b.Version &&
-		a.MemoryLimit == b.MemoryLimit && a.owner().equal(b.owner())
+	return a.Key == b.Key && a.Implements == b.Implements && a.Language == b.Language &&
+		a.Entrypoint == b.Entrypoint && a.Version == b.Version && a.MemoryLimit == b.MemoryLimit &&
+		a.owner().equal(b.owner())
 }
 
 // loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
@@ -406,16 +490,16 @@ func sameDescriptor(a, b *Descriptor) bool {
 // each load, which may report panics under its key) and the plugins skipped, whose [EventSkipped] events follow
 // their records (each event is kept in its key's record).
 func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, error) {
-	found, err := c.listPlugins(ctx, reg.name, reg.cfg)
+	found, err := c.listPlugins(ctx, reg)
 	if err != nil {
 		return nil, err
 	}
 
 	for i := range found.skipped {
-		key := reg.name + "/" + found.skipped[i].desc.Key
-		rej := skipRejection(&found.skipped[i])
+		key := reg.name + "/" + found.skipped[i].src.desc.Key
+		rej := skipRejection(key, &found.skipped[i])
 		reg.entry(key).rejection.Store(rej)
-		c.events.source(ctx, EventSkipped, key, &found.skipped[i], rej.report)
+		c.events.source(ctx, EventSkipped, key, &found.skipped[i].src, rej.report)
 	}
 
 	srcs := found.srcs
@@ -648,9 +732,10 @@ func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key st
 	return c.newLauncher(reg, key, src, owner, spec, mod, meters, spans), meters, nil
 }
 
-// checkLoad checks a plugin about to launch, adding the issues found to report: it fails when one blocks the
-// load.
+// checkLoad checks a plugin about to launch, adding the issues found to report: the contract version it pins
+// against the program's and its ownership. It fails when an issue blocks the load.
 func checkLoad(reg *registration, src *source, report *Report) error {
+	checkContract(report, reg.module, src.ref)
 	checkOwnership(report, src.desc.owner(), reg.cfg.ownership)
 
 	return report.blocking()

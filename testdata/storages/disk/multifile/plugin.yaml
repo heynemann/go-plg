@@ -1,3 +1,4 @@
+implements: github.com/heynemann/go-plg/internal/testcontract.Fooer@v1.0.0
 language: go
 entrypoint: .
 memoryLimit: 67108864

@@ -36,7 +36,8 @@ func TestStatusAndEventsFromTheCommand(t *testing.T) {
 
 	store := plg.NewMemoryStorage("store")
 	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: "ts", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts", Version: "4",
+		Key: "ts", Implements: "github.com/heynemann/go-plg/internal/testcontract.Fooer@v1.0.0",
+		Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts", Version: "4",
 		Owner: &plg.Owner{Team: plg.Team{Name: "search"}},
 	}, fstest.MapFS{"plugin.ts": {}}))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "svc", plg.WithStorage(store),

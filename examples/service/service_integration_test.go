@@ -33,6 +33,19 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+// ruleImplements is the interface the example plugins declare they implement.
+const ruleImplements = "github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0"
+
+// develIssue is the warning every load and check of a rule carries: the service is built from this checkout, so
+// the rules' pinned contract version cannot be checked.
+func develIssue() issue {
+	return issue{
+		Severity: string(plg.SeverityWarning), Code: plg.CodeContractDevel, Field: "implements",
+		Message: "the service's contract module github.com/heynemann/go-plg/examples is built from a local checkout, " +
+			"version (devel): the plugin's v1.0.0 is not checked",
+	}
+}
+
 var servingLine = regexp.MustCompile(`msg=serving addr=(\S+)`)
 
 // serviceLog is a running service's log, read by [watch].
@@ -294,8 +307,8 @@ func TestServiceFailures(t *testing.T) {
 		filepath.Join(overLimit, "loyalty", "tiers.lua"), []byte("return { gold = 50, silver = 2 }\n"), 0o600))
 
 	unowned := copyPlugins(t)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(unowned, "coupon", "plugin.yaml"), []byte("language: typescript\nentrypoint: rule.ts\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(unowned, "coupon", "plugin.yaml"),
+		[]byte("implements: "+ruleImplements+"\nlanguage: typescript\nentrypoint: rule.ts\n"), 0o600))
 
 	tests := map[string]struct {
 		log  string
@@ -489,7 +502,8 @@ func TestServiceAdminShowsWhoOwnsEachRule(t *testing.T) {
 		assert.Equal(t, "serving", state.Status, state.Key)
 		require.NotNil(t, state.Load, state.Key)
 		assert.Nil(t, state.Load.Error, "validated and loaded")
-		assert.Empty(t, state.Load.Issues, "no ownership warning: every rule names its team and contact")
+		assert.Equal(t, []issue{develIssue()}, state.Load.Issues,
+			"no ownership warning: every rule names its team and contact")
 
 		owners[state.Key] = state.Owner.Team.Name + " " + state.Owner.Contact.Oncall
 	}
@@ -560,7 +574,7 @@ func TestServiceChecksACandidateRule(t *testing.T) {
 		assert.True(t, got.Loads)
 		assert.Equal(t, "pricing/coupon2", got.Key)
 		assert.Empty(t, got.Error)
-		assert.Empty(t, got.Issues)
+		assert.Equal(t, []issue{develIssue()}, got.Issues)
 		assert.NotEmpty(t, got.Version, "the content hash")
 	})
 
@@ -570,7 +584,7 @@ func TestServiceChecksACandidateRule(t *testing.T) {
 		got := check(t, "loyalty2", zipOfLoyalty(t, "return { gold = 5, platinum = 25 }\n"), http.StatusOK)
 		assert.False(t, got.Loads)
 		assert.Contains(t, got.Error, "platinum grants 25% off, over the 10% limit")
-		assert.Equal(t, []issue{{
+		assert.Equal(t, []issue{develIssue(), {
 			Severity: "error", Code: "loyalty.percent", Field: "tiers.platinum",
 			Message: "platinum grants 25% off, over the 10% limit",
 		}}, got.Issues)
@@ -580,13 +594,14 @@ func TestServiceChecksACandidateRule(t *testing.T) {
 		t.Parallel()
 
 		got := check(t, "unowned", zipOfFiles(t, map[string]string{
-			"plugin.yaml": "language: lua\nentrypoint: rule.lua\n",
+			"plugin.yaml": "implements: " + ruleImplements + "\nlanguage: lua\nentrypoint: rule.lua\n",
 			"rule.lua": "function Create() return { Discount = function() return {} end, " +
 				"Validate = function() end } end\n",
 		}), http.StatusOK)
 		assert.False(t, got.Loads)
-		require.Len(t, got.Issues, 1)
-		assert.Equal(t, plg.CodeOwnershipMissing, got.Issues[0].Code)
+		require.Len(t, got.Issues, 2)
+		assert.Equal(t, develIssue(), got.Issues[0])
+		assert.Equal(t, plg.CodeOwnershipMissing, got.Issues[1].Code)
 	})
 
 	t.Run("not a zip archive", func(t *testing.T) {

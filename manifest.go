@@ -8,6 +8,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/strictyaml"
 )
 
@@ -26,6 +27,7 @@ const MaxManifestSize = 64 << 10
 type manifest struct {
 	MemoryLimit *manifestInt `yaml:"memoryLimit"`
 	Owner       *Owner       `yaml:"owner"`
+	Implements  string       `yaml:"implements"`
 	Language    Language     `yaml:"language"`
 	Entrypoint  string       `yaml:"entrypoint"`
 	Version     string       `yaml:"version"`
@@ -90,11 +92,16 @@ func decodeManifest(data []byte) (Descriptor, error) {
 		return Descriptor{}, err //nolint:wrapcheck // strictyaml's errors name the file and the line
 	}
 
-	return checkManifest(parsed)
+	return checkManifest(&parsed)
 }
 
 // checkManifest checks the values of a decoded plugin.yaml and returns its descriptor, without a key.
-func checkManifest(parsed manifest) (Descriptor, error) {
+func checkManifest(parsed *manifest) (Descriptor, error) {
+	_, err := contractref.Parse(parsed.Implements)
+	if err != nil {
+		return Descriptor{}, err //nolint:wrapcheck // it names the key and the value already
+	}
+
 	switch parsed.Language {
 	case LanguageGo, LanguageLua, LanguageTypeScript:
 	default:
@@ -105,7 +112,10 @@ func checkManifest(parsed manifest) (Descriptor, error) {
 		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
 	}
 
-	desc := Descriptor{Language: parsed.Language, Entrypoint: parsed.Entrypoint, Version: parsed.Version}
+	desc := Descriptor{
+		Implements: parsed.Implements, Language: parsed.Language, Entrypoint: parsed.Entrypoint,
+		Version: parsed.Version,
+	}
 
 	if parsed.MemoryLimit != nil {
 		limit := uint64(*parsed.MemoryLimit)
@@ -117,7 +127,7 @@ func checkManifest(parsed manifest) (Descriptor, error) {
 	}
 
 	if parsed.Owner != nil {
-		err := parsed.Owner.check()
+		err = parsed.Owner.check()
 		if err != nil {
 			return Descriptor{}, err
 		}

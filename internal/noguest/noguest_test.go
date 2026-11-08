@@ -45,7 +45,12 @@ func TestRegisterNamesTheMissingGuestImport(t *testing.T) {
 
 			store := plg.NewMemoryStorage("mem")
 			files := fstest.MapFS{tc.entry: {Data: []byte("package p\n")}}
-			require.NoError(t, store.Put(&plg.Descriptor{Key: "k", Language: tc.lang, Entrypoint: tc.entry}, files))
+			require.NoError(t, store.Put(&plg.Descriptor{
+				Key:        "k",
+				Implements: "github.com/heynemann/go-plg/internal/testcontract.Fooer@v1.0.0",
+				Language:   tc.lang,
+				Entrypoint: tc.entry,
+			}, files))
 
 			err := plg.Register[testcontract.Fooer](t.Context(), ctr, string(tc.lang), plg.WithStorage(store))
 			require.ErrorIs(t, err, plg.ErrGuestNotLinked)

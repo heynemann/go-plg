@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/heynemann/go-plg/internal/contractref"
 )
 
 // Severity says how much an [Issue] matters: [SeverityError] blocks a load, [SeverityWarning] and [SeverityInfo]
@@ -44,6 +46,16 @@ func (s Severity) level() slog.Level {
 // (owner.team.name) or any way to reach it (owner.contact.oncall, owner.contact.channel or owner.contact.email).
 // It is a warning, or an error with [WithRequiredOwnership].
 const CodeOwnershipMissing = "plg.ownership.missing"
+
+// CodeContractVersion is the [Issue.Code] of a plugin written against a version of its contract module that the
+// program's cannot serve (see [Register]): another major version, or a newer minor version. It is an error; its
+// message names both versions.
+const CodeContractVersion = "plg.contract.version"
+
+// CodeContractDevel is the [Issue.Code] of a plugin loaded by a program whose contract module is built from a
+// local checkout, version "(devel)" (tests, go run, a replace directive pointing at a directory), or is missing from
+// its build info: the plugin's pinned version cannot be checked. It is a warning.
+const CodeContractDevel = "plg.contract.devel"
 
 // Issue is a problem a load found with a plugin version.
 type Issue struct {
@@ -148,4 +160,36 @@ func checkOwnership(report *Report, owner *Owner, severity Severity) {
 		Message:  "plugin.yaml's owner lacks " + missing,
 		Field:    field,
 	})
+}
+
+// checkContract adds to report the issue of a plugin pinned to ref against the program's contract module built:
+// [CodeContractVersion] when built cannot serve the pinned version, [CodeContractDevel] when built is a local
+// checkout.
+func checkContract(report *Report, built contractref.Module, ref contractref.Ref) {
+	if built.Devel() {
+		where := "built from a local checkout"
+		if built.Dir != "" {
+			where = "replaced by the local directory " + built.Dir
+		}
+
+		report.Issues = append(report.Issues, Issue{
+			Severity: SeverityWarning,
+			Code:     CodeContractDevel,
+			Message: fmt.Sprintf("the service's contract module %s is %s, version %s: the plugin's %s is not checked",
+				built.Path, where, built.Version, ref.Version),
+			Field: "implements",
+		})
+
+		return
+	}
+
+	err := contractref.Compatible(built.Version, ref.Version)
+	if err != nil {
+		report.Issues = append(report.Issues, Issue{
+			Severity: SeverityError,
+			Code:     CodeContractVersion,
+			Message:  built.Path + ": " + err.Error(),
+			Field:    "implements",
+		})
+	}
 }

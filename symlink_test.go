@@ -112,7 +112,10 @@ func TestFSStorageReadsThroughARoot(t *testing.T) {
 	t.Parallel()
 
 	outside := filepath.Join(t.TempDir(), "plugin.yaml")
-	require.NoError(t, os.WriteFile(outside, []byte("language: go\nentrypoint: .\nversion: \"1\"\n"), 0o600))
+	require.NoError(
+		t,
+		os.WriteFile(outside, []byte(implementsLine+"language: go\nentrypoint: .\nversion: \"1\"\n"), 0o600),
+	)
 
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "p"), 0o750))

@@ -43,6 +43,16 @@ func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	return ctr
 }
 
+// develIssue is the warning every load in a test binary reports: the contracts are in the binary's main module,
+// built from a checkout, so the plugins' pinned versions are not checked.
+func develIssue() plg.Issue {
+	return plg.Issue{
+		Severity: plg.SeverityWarning, Code: plg.CodeContractDevel, Field: "implements",
+		Message: "the service's contract module github.com/heynemann/go-plg is built from a local checkout, version " +
+			"(devel): the plugin's v1.0.0 is not checked",
+	}
+}
+
 // pluginFiles returns a Go test plugin's source directory.
 func pluginFiles(name string) fs.FS {
 	return golang().files(name)
@@ -414,7 +424,10 @@ func TestEntrypoints(t *testing.T) {
 			t.Parallel()
 
 			store := plg.NewMemoryStorage("mem")
-			desc := plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: tc.entrypoint}
+			desc := plg.Descriptor{
+				Key: "k", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo,
+				Entrypoint: tc.entrypoint,
+			}
 			require.NoError(t, store.Put(&desc, files))
 
 			name := "entry" + strconv.Itoa(i)
@@ -467,7 +480,10 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 			t.Parallel()
 
 			store := listStorage{name: "s", files: files, descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo, Entrypoint: "pkg/plugin.go", Version: version},
+				{
+					Key: "k", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo,
+					Entrypoint: "pkg/plugin.go", Version: version,
+				},
 			}}
 
 			err := plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer"+version, plg.WithStorage(store))

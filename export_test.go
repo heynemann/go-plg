@@ -32,6 +32,21 @@ func WithHTTPRoots(roots *x509.CertPool) RegisterOption {
 	}
 }
 
+// RegisterBuiltWith is Register[T] in a program built with T's contract module at version: its plugins' pinned
+// versions are checked against version, as a program whose build info records it would check them.
+func RegisterBuiltWith[T any](ctx context.Context, ctr *Container, name, version string, opts ...RegisterOption) error {
+	iface := reflect.TypeFor[T]()
+
+	reg, err := ctr.prepare(iface, name, opts)
+	if err != nil {
+		return err
+	}
+
+	reg.module.Version, reg.module.Dir = version, ""
+
+	return ctr.registerPrepared(ctx, iface, reg)
+}
+
 // Hold takes an instance of the plugin with the given key, as a call in flight would, until the returned
 // release function is called. It lets tests make a plugin busy without a slow plugin method.
 func Hold(ctx context.Context, c *Container, key string) (func(), error) {

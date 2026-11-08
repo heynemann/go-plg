@@ -161,10 +161,16 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	api := newAPIServer(t)
 	ctr := newContainer(t, plg.WithMeterProvider(reader.provider))
 
-	// "m": two Go plugins with one instance each, and a Lua plugin the Register leaves out.
+	// "m": two Go plugins with one instance each, a Lua plugin the Register leaves out and a Shaper plugin.
 	store := goStorage(t, "m", map[string]string{"ref": "fooer", "crash": "fooer"})
-	lua := plg.Descriptor{Key: "lua", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "v1"}
+	lua := plg.Descriptor{
+		Key: "lua", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageLua, Entrypoint: "main.lua",
+		Version: "v1",
+	}
 	require.NoError(t, store.Put(&lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
+
+	shaper := golang().descriptor(t, "shaper", "shaper")
+	require.NoError(t, store.Put(&shaper, golang().files("shaper")))
 	require.NoError(t, plg.Register[testcontract.Fooer](ctx, ctr, "m", plg.WithStorage(store), plg.WithPool(1, 1),
 		plg.WithGolangPlugins()))
 
@@ -227,7 +233,10 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	require.NoError(t, <-done, "the call got the instance the refiller started")
 
 	// Reloads: m/ref's update fails to load and keeps its last good version; the Lua plugin is skipped again.
-	update := plg.Descriptor{Key: "ref", Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v2"}
+	update := plg.Descriptor{
+		Key: "ref", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+		Version: "v2",
+	}
 	require.NoError(t, store.Put(&update, pluginFiles("createfails")))
 	require.Error(t, plg.ReloadInterface(ctx, ctr, "m"))
 
@@ -289,7 +298,9 @@ func TestMetricsObserveEveryInstrument(t *testing.T) {
 	assert.Equal(t, int64(1), got.int64Value(t, "plg.plugin.loads", key("broken/bad"), goLang, outcome("failed")))
 	assert.Equal(t, int64(1), got.int64Value(t, "plg.plugin.reload.failures", key("m/ref")))
 	assert.Equal(t, int64(2), got.int64Value(t, "plg.plugin.skipped", key("m/lua"),
-		attribute.String("language", "lua")), "at Register and at the reload")
+		attribute.String("language", "lua"), attribute.String("reason", "language")), "at Register and at the reload")
+	assert.Equal(t, int64(2), got.int64Value(t, "plg.plugin.skipped", key("m/shaper"),
+		attribute.String("language", "go"), attribute.String("reason", "interface")), "at Register and at the reload")
 
 	web := key("web/fetch")
 	assert.Equal(t, int64(1), got.int64Value(t, "plg.http.requests", web, outcome("ok"), attribute.Int("status", 200)))

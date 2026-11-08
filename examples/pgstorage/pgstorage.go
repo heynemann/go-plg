@@ -8,6 +8,16 @@
 // storages do. A plugin's version is its revision, which the database changes whenever any of its files change,
 // plugin.yaml included (a trigger, see migrations/), whether through [Storage.Put] or plain SQL: a poll costs one
 // small query and plg reloads exactly the plugins that changed. A version in plugin.yaml is not used.
+//
+// Every plugin.yaml must name the interface its plugin implements (implements:, see [plg.ParseManifest]); no
+// migration can add it, as the tables do not record which interface a registration serves. List refuses a plugin
+// whose plugin.yaml lacks it. Manifests stored before implements was required get it with plain SQL, one
+// registration at a time:
+//
+//	UPDATE plg_plugin_files
+//	SET content = convert_to('implements: example.com/contracts/rewards.Cohort@v1.4.0', 'UTF8')
+//		|| E'\n'::bytea || content
+//	WHERE registration = 'rewards' AND path = 'plugin.yaml';
 package pgstorage
 
 import (

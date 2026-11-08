@@ -200,7 +200,8 @@ func TestOnDemandValidationDegradesUntilAPassingOne(t *testing.T) {
 	// A dry run of a candidate validates too, counted as such.
 	owner := validatorOwner()
 	checked, err := plg.Check(t.Context(), ctr, "deg", &plg.Descriptor{
-		Key: "p", Language: plg.LanguageGo, Entrypoint: ".", Version: "2", Owner: &owner,
+		Key: "p", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: ".",
+		Version: "2", Owner: &owner,
 	}, sourceFS(goSource(t, "validator")))
 	require.NoError(t, err)
 	require.NoError(t, checked.Err)
@@ -246,8 +247,9 @@ func TestOnDemandValidationDegradesUntilAPassingOne(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{
+		"WARN " + plg.CodeContractDevel, // the load's: the test binary's contract is a local checkout
 		"ERROR validator.broken", "WARN validator.slow", "WARN validator.slow", "INFO validator.note",
-		"WARN validator.slow", "INFO validator.note", // the check's
+		"WARN " + plg.CodeContractDevel, "WARN validator.slow", "INFO validator.note", // the check's
 	}, codes)
 }
 

@@ -100,6 +100,14 @@ type Descriptor struct {
 	Owner *Owner
 	// Key identifies the plugin within its Register call; its catalogue key is "<name>/<Key>".
 	Key string
+	// Implements names the interface the plugin implements and the version of the contract module it is written
+	// against: "<package path>.<Interface>@<version>", such as
+	// "example.com/contracts/rewards.Cohort@v1.4.0". Required. The package path is the interface's import path,
+	// the version the canonical semantic version of the module holding it (v1.4.0, not 1.4 or v1.4). A
+	// registration loads only the plugins implementing its own interface and skips the others, so one storage
+	// can hold the plugins of several interfaces. A plugin loads when the contract module the program was built
+	// with has the same major version and a minor version at least the plugin's; see [Register].
+	Implements string
 	// Language is the plugin's source language.
 	Language Language
 	// Entrypoint is a path inside the plugin's fs.FS. For Go it names the package directory or a .go file in

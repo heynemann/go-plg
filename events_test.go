@@ -74,14 +74,28 @@ func putSkipped(t *testing.T, store *plg.MemoryStorage, key, version string, own
 	t.Helper()
 
 	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: key, Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts", Version: version, Owner: owner,
+		Key: key, Implements: implementsOf[pinger](), Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts",
+		Version: version, Owner: owner,
 	}, fstest.MapFS{"plugin.ts": {Data: []byte("export function Create() {}\n")}}))
+}
+
+// assertSkipped checks that event is the Skipped event of key, whose report says why: reason.
+func assertSkipped(t *testing.T, event *plg.Event, key string, reason error) {
+	t.Helper()
+
+	require.NotNil(t, event.Report, key)
+	assert.Equal(t, key, event.Report.Key)
+	assert.Equal(t, event.Version, event.Report.Version, key)
+	assert.Equal(t, event.Owner, event.Report.Owner, key)
+	require.ErrorIs(t, event.Report.Err, reason, key)
+	assert.Nil(t, event.Panic, key)
 }
 
 // TestOnEventReportsSkippedAndListingProblems follows the events of plugins that never load: a key listed by two
 // storages is rejected at Register (which fails) and at a reload (which keeps the rest), with its listing problem
-// as the report's Err and what the second storage lists of it; a plugin in a language the Register leaves out is
-// skipped at Register and at every reload, with its descriptor's version, language, storage and owner.
+// as the report's Err and what the second storage lists of it; a plugin in a language the Register leaves out and
+// one implementing another interface are skipped at Register and at every reload, with their descriptor's
+// version, language, storage and owner, and a report whose Err is why.
 func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	t.Parallel()
 
@@ -95,6 +109,10 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	putSkipped(t, first, "skipped", "3", &owner)
 	putSkipped(t, first, "dup", "1", &owner)
 	putSkipped(t, second, "dup", "1", &owner)
+	require.NoError(t, second.Put(&plg.Descriptor{
+		Key: "other", Implements: "example.com/contracts/rewards.Cohort@v1.0.0", Language: plg.LanguageLua,
+		Entrypoint: "plugin.lua", Version: "5", Owner: &owner,
+	}, fstest.MapFS{"plugin.lua": {Data: []byte("function Create() return {} end\n")}}))
 
 	err := plg.Register[pinger](t.Context(), ctr, "dups", plg.WithStorage(first), plg.WithStorage(second),
 		plg.WithLuaPlugins())
@@ -115,15 +133,23 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 		skipped := nextEvent(t, events)
 		assertEvent(t, &skipped, plg.EventSkipped, "ok/"+key, map[string]string{"dup": "1", "skipped": "3"}[key],
 			plg.LanguageTypeScript, "first", &owner)
-		assert.Nil(t, skipped.Report, key)
-		assert.Nil(t, skipped.Panic, key)
+		assertSkipped(t, &skipped, "ok/"+key, plg.ErrUnsupportedLanguage)
 	}
+
+	other := nextEvent(t, events)
+	assertEvent(t, &other, plg.EventSkipped, "ok/other", "5", plg.LanguageLua, "second", &owner)
+	assertSkipped(t, &other, "ok/other", plg.ErrOtherInterface)
 
 	putSkipped(t, second, "dup", "1", &owner)
 	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "ok"), plg.ErrDuplicateKey)
 
 	skipped := nextEvent(t, events)
 	assertEvent(t, &skipped, plg.EventSkipped, "ok/skipped", "3", plg.LanguageTypeScript, "first", &owner)
+	assertSkipped(t, &skipped, "ok/skipped", plg.ErrUnsupportedLanguage)
+
+	other = nextEvent(t, events)
+	assertEvent(t, &other, plg.EventSkipped, "ok/other", "5", plg.LanguageLua, "second", &owner)
+	assertSkipped(t, &other, "ok/other", plg.ErrOtherInterface)
 
 	rejected = nextEvent(t, events)
 	assertEvent(t, &rejected, plg.EventRejected, "ok/dup", "1", plg.LanguageTypeScript, "second", &owner)

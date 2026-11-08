@@ -36,12 +36,17 @@ const contentVersionPrefix = "sha256:"
 // FSStorage is a [Storage] over a file tree holding one plugin per top-level directory. The directory's name is
 // the plugin's key, and the directory holds the plugin's files and a plugin.yaml manifest:
 //
+//	implements: example.com/contracts/rewards.Cohort@v1.4.0
 //	language: go
 //	entrypoint: plugin.go
 //	version: 1.4.0
 //	memoryLimit: 67108864
 //
 // Its keys are:
+//
+//   - implements (required): the interface the plugin implements and the contract module version it is written
+//     against, "<package path>.<Interface>@<version>" with a canonical semantic version; see
+//     [Descriptor.Implements].
 //
 //   - language (required): "go", "lua" or "typescript".
 //

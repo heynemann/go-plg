@@ -68,7 +68,8 @@ func newEnvironment(t *testing.T) *environment {
 		t.Helper()
 
 		require.NoError(t, store.Put(&plg.Descriptor{
-			Key: key, Language: lang, Entrypoint: "plugin", Version: version, Owner: owner,
+			Key: key, Implements: "github.com/heynemann/go-plg/internal/testcontract.Fooer@v1.0.0", Language: lang,
+			Entrypoint: "plugin", Version: version, Owner: owner,
 		}, fstest.MapFS{"plugin": {}}))
 	}
 

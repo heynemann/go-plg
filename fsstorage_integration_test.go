@@ -68,8 +68,10 @@ func TestFSStoragesLoadThroughRegister(t *testing.T) {
 
 	_, err = plg.Get[testcontract.Fooer](t.Context(), ctr, "fooer/scripted")
 	require.ErrorIs(t, err, plg.ErrNotFound, "the Lua plugin is outside the allowlist")
-	assert.Equal(t, []skipRecord{{Level: "INFO", Key: "fooer/scripted", Storage: diskDir, Language: "lua"}},
-		decodeRecords(t, &logs), "and its skip is logged")
+	assert.Equal(t, []skipRecord{{
+		Level: "INFO", Message: "plg: plugin skipped: its language is not enabled", Key: "fooer/scripted",
+		Storage: diskDir, Language: "lua", Implements: implementsOf[testcontract.Fooer](),
+	}}, decodeRecords(t, &logs), "and its skip is logged")
 }
 
 func TestEnabledLuaPluginsLoadFromAStorage(t *testing.T) {
@@ -118,8 +120,9 @@ func TestRegisterHashesVersionlessPlugins(t *testing.T) {
 	// The same files in a memory storage, without a version: Register hashes them as it hashes the FS
 	// storage's.
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "multifile", Language: plg.LanguageGo, Entrypoint: "."},
-		os.DirFS(filepath.Join(diskDir, "multifile"))))
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "multifile", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: ".",
+	}, os.DirFS(filepath.Join(diskDir, "multifile"))))
 
 	var logs bytes.Buffer
 

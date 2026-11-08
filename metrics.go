@@ -45,8 +45,8 @@ const meterName = "github.com/heynemann/go-plg"
 //     Register and reloads;
 //   - plg.plugin.reload.failures {key}: plugins a reload could not load (a new one skipped, an updated one kept
 //     at its last good version), and reloads that could not list their storages (key is the Register name);
-//   - plg.plugin.skipped {key, language}: listed plugins left out because the Register does not enable their
-//     language, at each Register and reload;
+//   - plg.plugin.skipped {key, language, reason}: listed plugins left out, at each Register and reload, because
+//     they implement another interface (reason interface) or the Register does not enable their language (language);
 //   - plg.plugin.validations {key, language, trigger, outcome}: validations ([WithValidation]) run at a load
 //     (trigger load), by [Check] (trigger check) or on demand ([Validate], [ValidateAll]; trigger on_demand),
 //     outcome being passed, failed (an issue of severity error, or Validate failed: see [WithValidation]) or
@@ -125,7 +125,8 @@ func newInstruments(provider metric.MeterProvider) (*instruments, error) {
 	inst.refills = counter("plg.pool.refills", "{instance}", "Instances started by the pool refiller.")
 	inst.loads = counter("plg.plugin.loads", "{load}", "Plugin versions loaded.")
 	inst.reloadFailures = counter("plg.plugin.reload.failures", "{failure}", "Plugins a reload could not load.")
-	inst.skipped = counter("plg.plugin.skipped", "{plugin}", "Plugins skipped: their language is not enabled.")
+	inst.skipped = counter("plg.plugin.skipped", "{plugin}",
+		"Plugins skipped: another interface, or a language not enabled.")
 	inst.validations = counter("plg.plugin.validations", "{validation}", "Plugin validations run.")
 	inst.validationIssues = counter("plg.plugin.validation.issues", "{issue}", "Issues plugin validations found.")
 	inst.httpRequests = counter("plg.http.requests", "{request}", "HTTP requests made by plugins.")
@@ -272,13 +273,14 @@ func (c *Container) countReloadFailure(ctx context.Context, key string, owner *O
 	})
 }
 
-// countSkipped counts a listed plugin, owned by owner, skipped for its language.
-func (c *Container) countSkipped(ctx context.Context, key string, lang Language, owner *Owner) {
+// countSkipped counts a listed plugin, owned by owner, skipped for the reason kind.
+func (c *Container) countSkipped(ctx context.Context, key string, lang Language, owner *Owner, kind skipKind) {
 	tags := owner.metricAttrs()
 
 	c.panics.callback(ctx, key, lang, meterMethod, func() {
 		c.meters.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-			attribute.String("language", string(lang)), tags[0], tags[1], tags[2]))
+			attribute.String("language", string(lang)), attribute.String("reason", string(kind)), tags[0], tags[1],
+			tags[2]))
 	})
 }
 

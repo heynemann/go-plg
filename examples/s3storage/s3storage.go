@@ -2,9 +2,9 @@
 // aws-sdk-go-v2. It keeps plg's built-in layout under a key prefix: one "directory" per plugin, named after the
 // plugin's key, holding the plugin's files and a plugin.yaml manifest read by [plg.ParseManifest]:
 //
-//	plugins/bulk/plugin.yaml      {language: go, entrypoint: .}
+//	plugins/bulk/plugin.yaml      {implements: example.com/pricing.Rule@v1.0.0, language: go, entrypoint: .}
 //	plugins/bulk/bulk.go
-//	plugins/loyalty/plugin.yaml   {language: lua, entrypoint: rule.lua}
+//	plugins/loyalty/plugin.yaml   {implements: example.com/pricing.Rule@v1.0.0, language: lua, entrypoint: rule.lua}
 //	plugins/loyalty/rule.lua
 //
 // Objects directly under the prefix and "directories" whose names start with a dot are not plugins and are

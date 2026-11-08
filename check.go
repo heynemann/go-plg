@@ -25,9 +25,10 @@ const checkStorage = "plg.Check"
 // reservation, as room no plugin reserved: a budget without that room fails the check with [ErrMemoryBudget]
 // at once, never waiting for it, and the charge is given back when Check returns.
 //
-// The report says whether the candidate would load: its Err is why it would not (an invalid descriptor, a
-// language the registration does not enable or link, files over the limits, source that does not compile, a
-// failing Create, an issue that blocks the load, a failed validation), as in the report of a load; Check
+// The report says whether the candidate would load: its Err is why it would not (an invalid descriptor, another
+// interface than the registration's ([ErrOtherInterface]), a language the registration does not enable or link,
+// files over the limits, source that does not compile, a failing Create, an issue that blocks the load (a
+// contract version the program cannot serve among them), a failed validation), as in the report of a load; Check
 // itself then succeeds. Check fails when it cannot check: with [ErrNotFound] when name is not registered and
 // [ErrClosed] once the container is closed (both without a report), with [ErrMemoryBudget] without room for
 // the instance, and with ctx's error when ctx ends; the report's Err is then that error too. It is safe for
@@ -70,14 +71,16 @@ func (c *Container) checkCandidate(ctx context.Context, name string, desc *Descr
 func (c *Container) check(ctx context.Context, reg *registration, key string, src *source, opened fs.FS,
 	report *Report,
 ) error {
-	err := checkDescriptor(src.storeName, &src.desc)
+	var err error
+
+	src.ref, err = checkDescriptor(src.storeName, &src.desc)
 	if err != nil {
 		return err
 	}
 
-	if !reg.cfg.enabled(src.desc.Language) {
-		return fmt.Errorf("%w: %s plugins are not enabled for %s", ErrUnsupportedLanguage, src.desc.Language,
-			reg.name)
+	_, err = reg.skips(src)
+	if err != nil {
+		return err
 	}
 
 	src.loader, src.guest, err = reg.cfg.guestFor(src.desc.Language)

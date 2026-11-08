@@ -46,7 +46,7 @@ func wantFullOwner() plg.Owner {
 func TestParseManifestReadsTheOwner(t *testing.T) {
 	t.Parallel()
 
-	const base = "language: go\nentrypoint: .\n"
+	const base = implementsLine + "language: go\nentrypoint: .\n"
 
 	tests := map[string]struct {
 		manifest string
@@ -148,7 +148,7 @@ func repeatMaintainer(n int) []plg.Maintainer {
 func TestParseManifestEnforcesOwnerLimits(t *testing.T) {
 	t.Parallel()
 
-	const base = "language: go\nentrypoint: .\n"
+	const base = implementsLine + "language: go\nentrypoint: .\n"
 
 	long := strings.Repeat("x", plg.MaxOwnerStringBytes+1)
 

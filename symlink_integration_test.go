@@ -77,8 +77,8 @@ func TestSymlinksOutOfAPluginFailItsLoad(t *testing.T) {
 end
 `
 
-	tsManifest := "language: typescript\nentrypoint: plugin.ts\nversion: \"1\"\n"
-	luaManifest := "language: lua\nentrypoint: main.lua\nversion: \"1\"\n"
+	tsManifest := manifestOf[testcontract.Fooer]("language: typescript\nentrypoint: plugin.ts\nversion: \"1\"\n")
+	luaManifest := manifestOf[testcontract.Fooer]("language: lua\nentrypoint: main.lua\nversion: \"1\"\n")
 	tsImport := tsFooerSource(`import secret from "./x.txt";`, "secret")
 
 	tests := []struct {
@@ -96,8 +96,11 @@ end
 			// The storage's top-level files are not plugins: secret.txt is next to the plugin, outside it.
 			name: "TypeScript import of a file next to the plugin by a relative link",
 			files: map[string]string{
-				"plugin.yaml":   "language: typescript\nentrypoint: lib/plugin.ts\nversion: \"1\"\n",
-				"lib/plugin.ts": tsImport, "../secret.txt": hostSecret,
+				"plugin.yaml": manifestOf[testcontract.Fooer](
+					"language: typescript\nentrypoint: lib/plugin.ts\nversion: \"1\"\n",
+				),
+				"lib/plugin.ts": tsImport,
+				"../secret.txt": hostSecret,
 			},
 			links: map[string]string{"lib/x.txt": "../../secret.txt"},
 			path:  "lib/x.txt",
@@ -109,8 +112,10 @@ end
 			path:  "x.txt",
 		},
 		{
-			name:  "Go entrypoint linked to the root directory",
-			files: map[string]string{"plugin.yaml": "language: go\nentrypoint: src\nversion: \"1\"\n"},
+			name: "Go entrypoint linked to the root directory",
+			files: map[string]string{
+				"plugin.yaml": manifestOf[testcontract.Fooer]("language: go\nentrypoint: src\nversion: \"1\"\n"),
+			},
 			links: map[string]string{"src": "/"},
 			path:  "src",
 		},
@@ -164,7 +169,10 @@ func TestSymlinksOutOfACustomStorageFailTheLoad(t *testing.T) {
 			"plugin.ts": {Data: []byte(tsFooerSource(`import secret from "./x.txt";`, "secret"))},
 			"x.txt":     link("/proc/self/environ"),
 		},
-		descs: []plg.Descriptor{{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"}},
+		descs: []plg.Descriptor{{
+			Key: "p", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageTypeScript,
+			Entrypoint: "plugin.ts",
+		}},
 	}
 
 	err := plg.Register[testcontract.Fooer](t.Context(), newContainer(t), "custom", plg.WithStorage(store))
@@ -179,7 +187,7 @@ func TestSymlinksInsideAPluginAreSkipped(t *testing.T) {
 	t.Parallel()
 
 	files := map[string]string{
-		"plugin.yaml": "language: typescript\nentrypoint: plugin.ts\n",
+		"plugin.yaml": manifestOf[testcontract.Fooer]("language: typescript\nentrypoint: plugin.ts\n"),
 		"plugin.ts":   tsFooerSource(`import data from "./data.txt";`, "data"),
 		"data.txt":    "plugin data",
 	}
@@ -230,7 +238,10 @@ func TestPluginsHashTheFilesTheyLoad(t *testing.T) {
 	store := listStorage{
 		name:  "changing",
 		files: changingFS{opens: &atomic.Int32{}, first: first, second: second},
-		descs: []plg.Descriptor{{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"}},
+		descs: []plg.Descriptor{{
+			Key: "p", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageTypeScript,
+			Entrypoint: "plugin.ts",
+		}},
 	}
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "changing", plg.WithStorage(store)))
 

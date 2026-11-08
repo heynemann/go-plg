@@ -31,6 +31,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestout"
 	"github.com/heynemann/go-plg/internal/httpabi"
@@ -254,11 +255,12 @@ func TestManifestMemoryLimitsMatchRegister(t *testing.T) {
 	t.Parallel()
 
 	for _, limit := range []uint64{1, engine.PageSize - 1, engine.PageSize, engine.PageSize + 1, 4 << 30, 4<<30 + 1} {
-		manifest := fmt.Sprintf("language: go\nentrypoint: .\nmemoryLimit: %d\n", limit)
+		manifest := fmt.Sprintf("implements: example.com/c.I@v1.0.0\nlanguage: go\nentrypoint: .\nmemoryLimit: %d\n",
+			limit)
 		desc, parseErr := ParseManifest([]byte(manifest))
 		desc.Key = "k"
 		desc.MemoryLimit = limit
-		checkErr := checkDescriptor("s", &desc)
+		_, checkErr := checkDescriptor("s", &desc)
 
 		valid := limit >= engine.PageSize && limit <= 4<<30
 		assert.Equal(t, valid, parseErr == nil, "ParseManifest with %d: %v", limit, parseErr)
@@ -268,6 +270,50 @@ func TestManifestMemoryLimitsMatchRegister(t *testing.T) {
 			require.ErrorIs(t, parseErr, ErrInvalidManifest)
 			require.ErrorIs(t, checkErr, ErrInvalidDescriptor)
 		}
+	}
+}
+
+// TestCheckContractJudgesThePinAgainstTheBuild adds the contract issue of a plugin pinned to v1.4.0 against the
+// contract module a program is built with: none for a compatible version, an error naming both versions for an
+// incompatible one, and a warning naming the pin when the module is a local checkout, saying where it is.
+func TestCheckContractJudgesThePinAgainstTheBuild(t *testing.T) {
+	t.Parallel()
+
+	ref := contractref.Ref{Package: "example.com/contracts/rewards", Interface: "Cohort", Version: "v1.4.0"}
+	module := func(version, dir string) contractref.Module {
+		return contractref.Module{Path: "example.com/contracts", Version: version, Dir: dir}
+	}
+
+	for name, tc := range map[string]struct {
+		built contractref.Module
+		want  []Issue
+	}{
+		"same version": {built: module("v1.4.0", "")},
+		"newer minor":  {built: module("v1.7.2", "")},
+		"older minor": {built: module("v1.3.9", ""), want: []Issue{{
+			Severity: SeverityError, Code: CodeContractVersion, Field: "implements",
+			Message: "example.com/contracts: incompatible contract version: the plugin is written against v1.4.0, " +
+				"a minor version newer than the service's v1.3.9",
+		}}},
+		"another major": {built: module("v2.0.0", ""), want: []Issue{{
+			Severity: SeverityError, Code: CodeContractVersion, Field: "implements",
+			Message: "example.com/contracts: incompatible contract version: the plugin is written against v1.4.0, " +
+				"a major version other than the service's v2.0.0",
+		}}},
+		"checkout": {built: module(contractref.Devel, ""), want: []Issue{{
+			Severity: SeverityWarning, Code: CodeContractDevel, Field: "implements",
+			Message: "the service's contract module example.com/contracts is built from a local checkout, version " +
+				"(devel): the plugin's v1.4.0 is not checked",
+		}}},
+		"replaced by a directory": {built: module(contractref.Devel, "../contracts"), want: []Issue{{
+			Severity: SeverityWarning, Code: CodeContractDevel, Field: "implements",
+			Message: "the service's contract module example.com/contracts is replaced by the local directory " +
+				"../contracts, version (devel): the plugin's v1.4.0 is not checked",
+		}}},
+	} {
+		report := &Report{}
+		checkContract(report, tc.built, ref)
+		assert.Equal(t, tc.want, report.Issues, name)
 	}
 }
 
@@ -2683,7 +2729,7 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 	ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
 	ctr.countReloadFailure(t.Context(), "n", &Owner{})
-	ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
+	ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{}, skipLanguage)
 
 	assert.Len(t, ctr.RecentPanics(), 1, "the container kept working")
 	require.NoError(t, ctr.Close(t.Context()))
@@ -2762,7 +2808,7 @@ func TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer(t *testing.T) 
 
 			ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
 			ctr.countReloadFailure(t.Context(), "n", &Owner{})
-			ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
+			ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{}, skipLanguage)
 			ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 
 			require.NotPanics(t, func() { require.NoError(t, ctr.Close(t.Context())) })

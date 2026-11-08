@@ -113,8 +113,11 @@ func files(contents ...string) fstest.MapFS {
 	return fsys
 }
 
+// ruleImplements is the interface the plugins the tests put declare they implement.
+const ruleImplements = "github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0"
+
 // luaManifest is the plugin.yaml of the Lua plugins the tests put.
-const luaManifest = "language: lua\nentrypoint: main.lua\n"
+const luaManifest = "implements: " + ruleImplements + "\nlanguage: lua\nentrypoint: main.lua\n"
 
 // luaFiles returns files, as files does, with luaManifest as plugin.yaml.
 func luaFiles(contents ...string) fstest.MapFS {
@@ -183,8 +186,9 @@ func TestMigrateIsIdempotentAndSafeConcurrently(t *testing.T) {
 }
 
 // testManifestMigration brings an empty database to migration 001, as an earlier pgstorage did, fills it the way
-// that version did (manifests as columns), then migrates it: every plugin lists as before, with a plugin.yaml
-// made from its columns, or the one it already had.
+// that version did (manifests as columns), then migrates it: every plugin gets a plugin.yaml made from its columns,
+// or keeps the one it already had. Those manifests predate implements, so List refuses them until the operator adds
+// it, as the package documentation's SQL does; then every plugin lists as before.
 func testManifestMigration(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
@@ -213,6 +217,29 @@ func testManifestMigration(t *testing.T, pool *pgxpool.Pool) {
 	require.NoError(t, pgstorage.Migrate(t.Context(), pool))
 
 	store := pgstorage.New(pool, "r")
+
+	for key, want := range map[string]string{
+		"has-yaml": "language: lua\nentrypoint: init.lua\n",
+		"limited":  "language: typescript\nentrypoint: \"src/odd: name's \\\"entry\\\".ts\"\nmemoryLimit: 65536\n",
+		"off":      "language: go\nentrypoint: \".\"\n",
+		"plain":    "language: lua\nentrypoint: \"main.lua\"\n",
+	} {
+		got, openErr := store.Open(t.Context(), &plg.Descriptor{Key: key})
+		require.NoError(t, openErr, key)
+
+		data, readErr := fs.ReadFile(got, "plugin.yaml")
+		require.NoError(t, readErr, key)
+		assert.Equal(t, want, string(data), "%s: the columns became plugin.yaml; an existing one is kept", key)
+	}
+
+	_, err = store.List(t.Context())
+	require.ErrorIs(t, err, plg.ErrInvalidManifest, "a manifest without implements is invalid")
+
+	_, err = pool.Exec(t.Context(), `UPDATE plg_plugin_files
+		SET content = convert_to('implements: `+ruleImplements+`', 'UTF8') || E'\n'::bytea || content
+		WHERE registration = 'r' AND path = 'plugin.yaml'`)
+	require.NoError(t, err)
+
 	descs := list(t, store)
 
 	for i := range descs {
@@ -220,15 +247,16 @@ func testManifestMigration(t *testing.T, pool *pgxpool.Pool) {
 	}
 
 	assert.Equal(t, []plg.Descriptor{
-		{Key: "has-yaml", Language: plg.LanguageLua, Entrypoint: "init.lua"},
+		{Key: "has-yaml", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "init.lua"},
 		{
 			Key:         "limited",
+			Implements:  ruleImplements,
 			Language:    plg.LanguageTypeScript,
 			Entrypoint:  `src/odd: name's "entry".ts`,
 			MemoryLimit: 64 << 10,
 		},
-		{Key: "plain", Language: plg.LanguageLua, Entrypoint: "main.lua"},
-	}, descs, "the columns became plugin.yaml files; an existing plugin.yaml is kept")
+		{Key: "plain", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "main.lua"},
+	}, descs, "the migrated manifests, given implements, list as the columns did")
 
 	require.NoError(t, store.SetEnabled(t.Context(), "off", true))
 	assert.Len(t, list(t, store), 4, "a disabled plugin got its plugin.yaml too")
@@ -313,9 +341,18 @@ func TestStorageListsOnlyEnabledPlugins(t *testing.T) {
 	}
 
 	assert.Equal(t, []plg.Descriptor{
-		{Key: "B", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: descs[0].Version},
-		{Key: "a", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: descs[1].Version},
-		{Key: "c", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: descs[2].Version, MemoryLimit: 32 << 20},
+		{
+			Key: "B", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "main.lua",
+			Version: descs[0].Version,
+		},
+		{
+			Key: "a", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "main.lua",
+			Version: descs[1].Version,
+		},
+		{
+			Key: "c", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "main.lua",
+			Version: descs[2].Version, MemoryLimit: 32 << 20,
+		},
 	}, descs, "the enabled plugins of this registration, in byte order")
 
 	require.NoError(t, store.SetEnabled(t.Context(), "b", true))
@@ -371,7 +408,8 @@ func TestStorageVersionsFollowTheRows(t *testing.T) {
 		{name: "a file removed", change: sql(
 			`DELETE FROM plg_plugin_files WHERE registration = $1 AND key = 'p' AND path = 'lib/x.lua'`)},
 		{name: "the manifest edited", change: sql(`UPDATE plg_plugin_files
-			SET content = convert_to(E'language: lua\nentrypoint: lib/y.lua\n', 'UTF8')
+			SET content = convert_to('implements: ` + ruleImplements + `' || E'\nlanguage: lua\nentrypoint: lib/y.lua\n',
+				'UTF8')
 			WHERE registration = $1 AND key = 'p' AND path = 'plugin.yaml'`)},
 		{name: "put again, unchanged", change: func() {
 			require.NoError(t, store.Put(t.Context(), luaPlugin("p"), luaFiles("main.lua", "")))
@@ -452,20 +490,34 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 		},
 		"plugin.json only": {
 			plugin: luaPlugin("p"),
-			files:  files("main.lua", "", "plugin.json", `{"language": "lua", "entrypoint": "main.lua"}`),
+			files: files("main.lua", "", "plugin.json",
+				`{"implements": "`+ruleImplements+`", "language": "lua", "entrypoint": "main.lua"}`),
+			want: plg.ErrInvalidManifest,
+		},
+		"no implements": {
+			plugin: luaPlugin("p"),
+			files:  files("plugin.yaml", "language: lua\nentrypoint: main.lua\n", "main.lua", ""),
 			want:   plg.ErrInvalidManifest,
 		},
-		"unknown language": {
-			plugin: luaPlugin("p"), files: files("plugin.yaml", "language: python\nentrypoint: main.py\n"),
+		"malformed implements": {
+			plugin: luaPlugin("p"),
+			files: files("plugin.yaml", "implements: pricing.Rule\nlanguage: lua\nentrypoint: main.lua\n",
+				"main.lua", ""),
 			want: plg.ErrInvalidManifest,
+		},
+		"unknown language": {
+			plugin: luaPlugin("p"),
+			files:  files("plugin.yaml", "implements: "+ruleImplements+"\nlanguage: python\nentrypoint: main.py\n"),
+			want:   plg.ErrInvalidManifest,
 		},
 		"memory over 4 GiB": {
 			plugin: luaPlugin("p"), files: files("plugin.yaml", luaManifest+"memoryLimit: 4294967297\n"),
 			want: plg.ErrInvalidManifest,
 		},
 		"an alias": {
-			plugin: luaPlugin("p"), files: files("plugin.yaml", "language: &l lua\nentrypoint: *l\n"),
-			want: plg.ErrInvalidManifest,
+			plugin: luaPlugin("p"),
+			files:  files("plugin.yaml", "implements: "+ruleImplements+"\nlanguage: &l lua\nentrypoint: *l\n"),
+			want:   plg.ErrInvalidManifest,
 		},
 	}
 
@@ -488,7 +540,8 @@ func TestStorageRefusesInvalidPlugins(t *testing.T) {
 	at4GiB := files("plugin.yaml", luaManifest+"memoryLimit: 4294967296\n", "main.lua", "")
 	require.NoError(t, store.Put(t.Context(), luaPlugin("p"), at4GiB), "4 GiB is the limit")
 
-	err = store.Put(t.Context(), luaPlugin("p"), files("plugin.yaml", "language: python\n", "main.lua", "-"))
+	err = store.Put(t.Context(), luaPlugin("p"), files("plugin.yaml", "implements: "+ruleImplements+
+		"\nlanguage: python\n", "main.lua", "-"))
 	require.ErrorIs(t, err, plg.ErrInvalidManifest)
 
 	descs := list(t, store)

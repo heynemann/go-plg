@@ -88,10 +88,12 @@ type Greeter interface {
 }
 ```
 
-Write the plugins, one directory each, with a `plugin.yaml` naming the language and the entrypoint. In Go:
+Write the plugins, one directory each, with a `plugin.yaml` naming the interface the plugin implements (with the
+version of the contract module it is written against), its language and its entrypoint. In Go:
 
 <!-- quickstart:file plugins/hello-go/plugin.yaml -->
 ```yaml
+implements: example.com/quickstart/greeter.Greeter@v1.0.0
 language: go
 entrypoint: .
 ```
@@ -122,6 +124,7 @@ In Lua:
 
 <!-- quickstart:file plugins/hello-lua/plugin.yaml -->
 ```yaml
+implements: example.com/quickstart/greeter.Greeter@v1.0.0
 language: lua
 entrypoint: plugin.lua
 ```
@@ -141,6 +144,7 @@ In TypeScript:
 
 <!-- quickstart:file plugins/hello-ts/plugin.yaml -->
 ```yaml
+implements: example.com/quickstart/greeter.Greeter@v1.0.0
 language: typescript
 entrypoint: plugin.ts
 ```
@@ -220,9 +224,11 @@ greeter/hello-ts: Hello, world! (TypeScript)
 ```
 
 The first run compiles the Go guest to machine code, which takes a few seconds; the result is cached on disk
-(see [`plg warm`](#deployment-plg-warm-and-plg-build-guest)), so later runs start in a fraction of a second. This
-quick start is tested: `examples/quickstart` copies the files above out of this README into a fresh module and
-checks the output.
+(see [`plg warm`](#deployment-plg-warm-and-plg-build-guest)), so later runs start in a fraction of a second. Here
+the interface lives in the service's own module, which `go run` builds from the local checkout, so the plugins'
+pinned version cannot be checked: each load logs a `plg.contract.devel` warning (see
+[Declaring the interface](#declaring-the-interface-implements)). This quick start is tested: `examples/quickstart`
+copies the files above out of this README into a fresh module and checks the output.
 
 ## The interface
 
@@ -402,18 +408,55 @@ Link only the languages you accept. A plugin whose guest is not linked fails Reg
 `plg.WithGolangPlugins()`, `plg.WithLuaPlugins()` and/or `plg.WithTypescriptPlugins()` to Register: plugins in
 other languages are then skipped (logged and counted), not errors. Without any of them every language is enabled.
 
+## Declaring the interface: `implements`
+
+Every `plugin.yaml` names the interface its plugin implements, and the version of the contract module it is
+written against:
+
+```yaml
+implements: example.com/contracts/rewards.Cohort@v1.4.0
+```
+
+The value is `<package path>.<Interface>@<version>`: the import path of the interface's package (a valid import
+path), the interface's name (a Go identifier) and a canonical semantic version with its leading `v` (`v1.4.0`,
+`v2.0.0-rc.1` or a pseudo-version; not `1.4.0`, `v1.4` or `v1.4.0+meta`). It is required: a manifest without it,
+or with a malformed value, is `plg.ErrInvalidManifest`, and a `Descriptor` without it is
+`plg.ErrInvalidDescriptor`. `Descriptor.Implements` carries it; changing it is a new descriptor, so a reload
+loads the plugin again.
+
+**Which plugins a Register takes.** A Register loads only the plugins declaring its own interface (the package
+path and name of `T`, an external test package `foo_test` counting as `foo`). The others are skipped, not
+errors, so one storage can hold the plugins of several interfaces and serve several registrations. The interface
+is checked first: a plugin of another interface is skipped with `plg.ErrOtherInterface`, one of this interface in
+a language not enabled with `plg.ErrUnsupportedLanguage`. Either way the skip is logged (each reason its own
+message, at Info at Register and Debug at a reload), counted in `plg.plugin.skipped` with a `reason` attribute
+(`interface` or `language`), emitted as a Skipped event and shown as status `skipped` whose `Rejection` report's
+`Err` is the reason.
+
+**Version rule.** The service's contract version is the version of the module providing `T`'s package in the
+program's build info (`runtime/debug.ReadBuildInfo`; a module replaced by another version counts as that version).
+A plugin loads when its pinned version has the same major version and a minor version not newer: a service built
+with `v1.4.0` loads plugins pinned to `v1.0.0` … `v1.4.x`, and rejects `v1.5.0` (it may rely on methods or fields
+the service lacks) and `v2.0.0` with a `plg.contract.version` error issue (`plg.CodeContractVersion`) naming both
+versions, at Register, at a reload and in `plg.Check`. When the version cannot be told, because the contract module
+is built from a local checkout (a `replace` pointing at a directory, tests and `go run`, or the service's own
+module unless it is built at a tag with no uncommitted changes: the go command stamps an untagged commit with a
+pseudo-version and changes with `+dirty`) or is missing from the build info, the plugin loads with a
+`plg.contract.devel` warning issue (`plg.CodeContractDevel`).
+
 ## Storages
 
 ```go
 type Storage interface {
 	Name() string                                           // for logs and errors
-	List(ctx context.Context) ([]plg.Descriptor, error)     // the plugins, each with a Key, Language, Entrypoint, Version, MemoryLimit, Owner
+	List(ctx context.Context) ([]plg.Descriptor, error)     // the plugins, each with a Key, Implements, Language, Entrypoint, Version, MemoryLimit, Owner
 	Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error) // a plugin's files; d is one List returned, not to be modified
 }
 ```
 
-A storage belongs to one Register call: every plugin it lists implements that call's interface. Register may take
-several storages (`plg.WithStorage` repeated); a key listed twice fails with `plg.ErrDuplicateKey`.
+A storage may list plugins of several interfaces: each Register takes the ones declaring its own (see
+[Declaring the interface](#declaring-the-interface-implements)). Register may take several storages
+(`plg.WithStorage` repeated); a key listed twice fails with `plg.ErrDuplicateKey`.
 
 Register reads an opened plugin's files once, into an in-memory copy that it hashes (for an empty `Version`),
 bundles and loads, so files changing during a load are never half seen. Symbolic links are never followed, in
@@ -440,6 +483,7 @@ Built in:
   …). Each top-level directory is a plugin, its name the key, with a `plugin.yaml`:
 
   ```yaml
+  implements: example.com/contracts/rewards.Cohort@v1.4.0
   language: go
   entrypoint: plugin.go
   version: 1.4.0
@@ -448,7 +492,8 @@ Built in:
 
   An optional `owner` block says who owns the plugin (see [Ownership](#ownership)).
 
-  `language` (`go`, `lua` or `typescript`) and `entrypoint` are required; `version` is optional (without it,
+  `implements` (see [Declaring the interface](#declaring-the-interface-implements)), `language` (`go`, `lua` or
+  `typescript`) and `entrypoint` are required; `version` is optional (without it,
   `List` leaves it empty and Register uses a SHA-256 of the files it loads); `memoryLimit` (bytes, from 65536 — one wasm page — to 4 GiB) may only lower
   the Register's limit. Unknown or misspelt keys are errors (`plg.ErrInvalidManifest`), so a typo never silently
   drops a limit. The file is one YAML document in a strict subset: anchors, aliases, merge keys (`<<`), tags
@@ -959,7 +1004,7 @@ p, err := plg.Info(c, "pricing/discounts") // ErrNotFound for a key the storages
 | `serving_last_good` | the storages list a version (or descriptor) a reload could not load; the last good version serves on |
 | `rejected` | no version serves: what the storages list failed to load, or listing it did (an invalid descriptor, a key listed twice) |
 | `retired` | an on-demand validation unpublished it (`plg.Unpublish`), until a reload loads it again |
-| `skipped` | its language is not enabled for its registration |
+| `skipped` | it implements another interface than its registration's, or its language is not enabled for it (`Rejection.Err` says which) |
 
 A `plg.PluginState` holds the plugin's `Key`, `Registration`, `Storage`, `Language` and `Owner`; the `Version`
 served, when its load ended (`LoadedAt`) and that load's `Report` (`Load`); the `Report` of its latest on-demand
@@ -1129,6 +1174,7 @@ limits:
 
 ```yaml
 # examples/plugins/loyalty/plugin.yaml
+implements: github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0
 language: lua
 entrypoint: rule.lua
 owner:

@@ -38,7 +38,8 @@ func putGo(t *testing.T, store *plg.MemoryStorage, key, version string, files fs
 
 	owner := validatorOwner()
 	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: key, Language: plg.LanguageGo, Entrypoint: ".", Version: version, Owner: &owner,
+		Key: key, Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: ".",
+		Version: version, Owner: &owner,
 	}, files))
 }
 
@@ -47,9 +48,9 @@ func putValidator(t *testing.T, store *plg.MemoryStorage, lang contractLanguage,
 	t.Helper()
 
 	owner := validatorOwner()
-	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: key, Language: lang.lang, Entrypoint: lang.entry, Version: version, Owner: &owner,
-	}, lang.files("validator")))
+	desc := lang.descriptor(t, key, "validator")
+	desc.Version, desc.Owner = version, &owner
+	require.NoError(t, store.Put(&desc, lang.files("validator")))
 }
 
 // goSource returns the plugin.go of a Go test plugin.
@@ -190,11 +191,12 @@ func TestValidationAtRegister(t *testing.T) {
 			return got
 		}
 
-		assert.Empty(t, codes("valid/p"))
-		assert.Equal(t, []string{"WARN validator.slow", "INFO validator.note"}, codes("warn/p"))
-		assert.Equal(t, []string{"ERROR validator.broken", "WARN validator.slow"}, codes("error/p"))
-		assert.Equal(t, []string{"ERROR validator.fatal"}, codes("unknown/p"), "an unknown severity is an error")
-		assert.Equal(t, []string{"ERROR " + plg.CodeValidationInput}, codes("input/input"))
+		devel := "WARN " + plg.CodeContractDevel // every load's first: the test binary's contract is a checkout
+		assert.Equal(t, []string{devel}, codes("valid/p"))
+		assert.Equal(t, []string{devel, "WARN validator.slow", "INFO validator.note"}, codes("warn/p"))
+		assert.Equal(t, []string{devel, "ERROR validator.broken", "WARN validator.slow"}, codes("error/p"))
+		assert.Equal(t, []string{devel, "ERROR validator.fatal"}, codes("unknown/p"), "an unknown severity is an error")
+		assert.Equal(t, []string{devel, "ERROR " + plg.CodeValidationInput}, codes("input/input"))
 	})
 }
 
@@ -205,7 +207,7 @@ func validationGoesLive(t *testing.T, ctr *plg.Container, lang contractLanguage)
 
 	require.NoError(t, registerValidator(t, ctr, lang, "valid", "p", newTestHost(), testcontract.Check{Mode: "valid"}))
 
-	assert.Empty(t, inspect(t, ctr, "valid/p").Load.Issues)
+	assert.Equal(t, []plg.Issue{develIssue()}, inspect(t, ctr, "valid/p").Load.Issues)
 
 	fooer := getFooer(t, ctr, "valid/p")
 	validated, err := fooer.Foo(t.Context(), "validated")
@@ -221,6 +223,7 @@ func validationGoesLive(t *testing.T, ctr *plg.Container, lang contractLanguage)
 	require.NoError(t, registerValidator(t, ctr, lang, "warn", "p", newTestHost(), testcontract.Check{Mode: "warn"}))
 
 	assert.Equal(t, []plg.Issue{
+		develIssue(),
 		{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
 		{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
 	}, inspect(t, ctr, "warn/p").Load.Issues)
@@ -342,6 +345,7 @@ func TestScriptValidationFollowsTheLanguage(t *testing.T) {
 				testcontract.Check{Mode: "async"}))
 
 			assert.Equal(t, []plg.Issue{
+				develIssue(),
 				{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow", Field: "speed"},
 				{Severity: plg.SeverityInfo, Code: "validator.note", Message: "noted"},
 			}, inspect(t, ctr, "async/p").Load.Issues, "the issues the async Validate's Promise settled with")
@@ -480,6 +484,7 @@ func TestValidationWorksWithinTheVersionsReservation(t *testing.T) {
 		assert.Equal(t, uint64(hostileLimit), plg.MemoryInUse(ctr), "and released before the pool's instance started")
 
 		assert.Equal(t, []plg.Issue{
+			develIssue(),
 			{
 				Severity: plg.SeverityInfo,
 				Code:     "validator.host",
@@ -515,8 +520,9 @@ func TestValidationRequestsAreLoggedAsSuch(t *testing.T) {
 			plg.WithHTTP(openPolicy(hostOf(t, api.URL)))))
 
 		report := inspect(t, ctr, "web/p").Load
-		require.Len(t, report.Issues, 1)
-		assert.Equal(t, "200 GET /v1/check  "+hostOf(t, api.URL)+" 0", report.Issues[0].Message)
+		require.Len(t, report.Issues, 2)
+		assert.Equal(t, develIssue(), report.Issues[0])
+		assert.Equal(t, "200 GET /v1/check  "+hostOf(t, api.URL)+" 0", report.Issues[1].Message)
 		assert.Equal(t, int64(1), api.hits.Load())
 
 		require.NoError(t, ctr.Close(t.Context())) // every record is written
@@ -595,6 +601,7 @@ func TestValidationKeepsTheLastGoodVersion(t *testing.T) {
 		assert.Equal(t, "2", rejected.Version)
 		require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
 		assert.Equal(t, []plg.Issue{
+			develIssue(),
 			{Severity: plg.SeverityError, Code: "validator.broken", Message: "broken", Field: "max"},
 			{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow"},
 		}, rejected.Issues)
@@ -610,7 +617,7 @@ func TestValidationKeepsTheLastGoodVersion(t *testing.T) {
 		served := inspect(t, ctr, "kept/p")
 		assert.Equal(t, "4", served.Version)
 		assert.Equal(t, 1, count(), "version 4 serves from a fresh instance")
-		assert.Len(t, served.Load.Issues, 2)
+		assert.Len(t, served.Load.Issues, 3, "the contract's local checkout and the validation's warnings")
 		assert.Nil(t, served.Rejection)
 		assert.Equal(t, plg.StatusServing, served.Status)
 	})

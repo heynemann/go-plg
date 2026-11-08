@@ -76,7 +76,12 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 	}
 
 	// A reload of such a plugin fails the same way, and the version before it serves on.
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key:        "p",
+		Implements: implementsOf[testcontract.Fooer](),
+		Language:   plg.LanguageTypeScript,
+		Entrypoint: "plugin.ts",
+	},
 		exportStarLayers(24)))
 
 	err := plg.ReloadInterface(t.Context(), ctr, "reloaded")
@@ -118,7 +123,12 @@ func TestTypeScriptBundlingStopsWithItsContext(t *testing.T) {
 	// A reload bundling such a plugin stops when the container closes.
 	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => s`)))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key:        "p",
+		Implements: implementsOf[testcontract.Fooer](),
+		Language:   plg.LanguageTypeScript,
+		Entrypoint: "plugin.ts",
+	},
 		nestedArrows(40)))
 
 	waiting, stop := context.WithTimeout(t.Context(), 500*time.Millisecond)

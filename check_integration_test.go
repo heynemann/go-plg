@@ -20,13 +20,17 @@ import (
 func checkCandidate(key, version string) *plg.Descriptor {
 	owner := validatorOwner()
 
-	return &plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: ".", Version: version, Owner: &owner}
+	return &plg.Descriptor{
+		Key: key, Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: ".",
+		Version: version, Owner: &owner,
+	}
 }
 
 // TestCheckDryRunsACandidate checks candidates against a registration validating its plugins and requiring
 // ownership: a good one passes with its issues, broken ones (validation issues, a failed Validate, source that
 // does not compile, missing ownership, files over the snapshot limits, an invalid descriptor, a language the
-// registration does not enable) report why; every check runs Create and Validate in an instance charged beyond
+// registration does not enable, another interface) report why; every check runs Create and Validate in an
+// instance charged beyond
 // the reservations and given back, and leaves the catalogue, the registration's reports and its plugins as they
 // were. An unknown registration name is an error.
 func TestCheckDryRunsACandidate(t *testing.T) {
@@ -90,6 +94,7 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 	assert.NotEmpty(t, report.Version, "the content hash, as from a storage")
 	require.NoError(t, report.Err)
 	assert.Equal(t, []plg.Issue{
+		develIssue(),
 		{
 			Severity: plg.SeverityInfo,
 			Code:     "validator.host",
@@ -116,6 +121,7 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
 	assert.Equal(t, "2", report.Version)
 	assert.Equal(t, []plg.Issue{
+		develIssue(),
 		{Severity: plg.SeverityError, Code: "validator.broken", Message: "broken", Field: "max"},
 		{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow"},
 	}, report.Issues)
@@ -131,9 +137,10 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 	noOwner.Owner = nil
 	report, err = failed("owner", noOwner, sourceFS(goSource(t, "validator")))
 	require.ErrorIs(t, err, plg.ErrBlockingIssue)
-	require.Len(t, report.Issues, 1)
-	assert.Equal(t, plg.CodeOwnershipMissing, report.Issues[0].Code)
-	assert.Equal(t, plg.SeverityError, report.Issues[0].Severity)
+	require.Len(t, report.Issues, 2)
+	assert.Equal(t, develIssue(), report.Issues[0])
+	assert.Equal(t, plg.CodeOwnershipMissing, report.Issues[1].Code)
+	assert.Equal(t, plg.SeverityError, report.Issues[1].Severity)
 
 	big := sourceFS(goSource(t, "validator"))
 	for i := range plg.MaxPluginEntries {
@@ -152,6 +159,12 @@ func TestCheckDryRunsACandidate(t *testing.T) {
 	lua.Language = plg.LanguageLua
 	_, err = failed("lua", lua, fstest.MapFS{"init.lua": {Data: []byte("return {}")}})
 	require.ErrorIs(t, err, plg.ErrUnsupportedLanguage)
+
+	shaper := checkCandidate("shaper", "2")
+	shaper.Implements = implementsOf[testcontract.Shaper]()
+	report, err = failed("shaper", shaper, sourceFS(goSource(t, "validator")))
+	require.ErrorIs(t, err, plg.ErrOtherInterface)
+	assert.Empty(t, report.Issues, "nothing was loaded")
 
 	// An unknown registration is an error, with no report.
 	report, err = plg.Check(t.Context(), ctr, "nope", checkCandidate("good", "2"), sourceFS(goSource(t, "validator")))
@@ -175,7 +188,7 @@ func TestCheckCreatesWithoutValidation(t *testing.T) {
 
 	report, err := plg.Check(t.Context(), ctr, "plain", checkCandidate("q", "2"), sourceFS(goSource(t, "fooer")))
 	require.NoError(t, err)
-	assert.Empty(t, report.Issues)
+	assert.Equal(t, []plg.Issue{develIssue()}, report.Issues)
 
 	failing := strings.Replace(goSource(t, "fooer"), "func Create() (testcontract.Fooer, error) {",
 		"func Create() (testcontract.Fooer, error) {\n\treturn nil, errors.New(\"no Create today\")\n", 1)

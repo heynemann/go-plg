@@ -35,7 +35,9 @@ func TestCancellingRegisterStopsTheCopyOfPluginFiles(t *testing.T) {
 	store := listStorage{
 		name:  "custom",
 		files: files,
-		descs: []plg.Descriptor{{Key: "p", Language: plg.LanguageGo, Entrypoint: "."}},
+		descs: []plg.Descriptor{
+			{Key: "p", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: "."},
+		},
 	}
 
 	err := plg.Register[testcontract.Fooer](ctx, newContainer(t), "fooer", plg.WithStorage(store))

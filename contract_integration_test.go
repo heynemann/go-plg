@@ -99,6 +99,23 @@ func (l contractLanguage) files(name string) fs.FS {
 	return os.DirFS(filepath.Join("testdata", "plugins", l.dir, name))
 }
 
+// descriptor returns the descriptor of the language's test plugin case under key, at version v1: what its
+// plugin.yaml says (the interface it implements, its language and entrypoint).
+func (l contractLanguage) descriptor(tb testing.TB, key, dir string) plg.Descriptor {
+	tb.Helper()
+
+	data, err := fs.ReadFile(l.files(dir), "plugin.yaml")
+	require.NoError(tb, err)
+
+	desc, err := plg.ParseManifest(data)
+	require.NoError(tb, err)
+	require.Equal(tb, l.lang, desc.Language, dir)
+
+	desc.Key, desc.Version = key, "v1"
+
+	return desc
+}
+
 // storage returns a memory storage named name holding the language's test plugins (key -> plugin case).
 func (l contractLanguage) storage(tb testing.TB, name string, cases map[string]string) *plg.MemoryStorage {
 	tb.Helper()
@@ -106,7 +123,7 @@ func (l contractLanguage) storage(tb testing.TB, name string, cases map[string]s
 	store := plg.NewMemoryStorage(name)
 
 	for key, dir := range cases {
-		desc := plg.Descriptor{Key: key, Language: l.lang, Entrypoint: l.entry, Version: "v1"}
+		desc := l.descriptor(tb, key, dir)
 		require.NoError(tb, store.Put(&desc, l.files(dir)))
 	}
 

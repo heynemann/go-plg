@@ -39,8 +39,8 @@ var (
 	// ErrMemoryBudget reports a Register whose plugins' worst-case memory, added to that of the plugins already
 	// registered, exceeds the container's [WithMemoryBudget].
 	ErrMemoryBudget = errors.New("plg: memory budget exceeded")
-	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, or whose MemoryLimit is under
-	// one 64 KiB page or over 4 GiB.
+	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, whose Implements is missing or
+	// malformed, or whose MemoryLimit is under one 64 KiB page or over 4 GiB.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
 	// ErrInvalidManifest reports a plugin.yaml that is missing or malformed: in a plugin directory of an
 	// [FSStorage], or given to [ParseManifest].
@@ -51,8 +51,12 @@ var (
 	ErrPluginTooLarge = errors.New("plg: plugin files too large")
 	// ErrDuplicateKey reports a plugin key listed twice by the storages of one Register call.
 	ErrDuplicateKey = errors.New("plg: duplicate plugin key")
-	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run.
+	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run, or one its registration does not
+	// enable: the reason a plugin in such a language is skipped.
 	ErrUnsupportedLanguage = errors.New("plg: unsupported language")
+	// ErrOtherInterface reports a plugin whose [Descriptor.Implements] names another interface than the one its
+	// registration serves: the reason such a plugin is skipped, and a [Check] candidate's report's Err.
+	ErrOtherInterface = errors.New("plg: plugin implements another interface")
 	// ErrGuestNotLinked reports a plugin whose language guest package is not imported by the program.
 	ErrGuestNotLinked = errors.New("plg: guest not linked")
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not

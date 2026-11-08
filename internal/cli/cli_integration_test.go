@@ -67,7 +67,8 @@ func TestStatusAndEventsOfAServingPlugin(t *testing.T) {
 	owner := searchOwner()
 	store := plg.NewMemoryStorage("rules")
 	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: "p", Language: plg.LanguageLua, Entrypoint: "plugin.lua", Version: "7", Owner: &owner,
+		Key: "p", Implements: "github.com/heynemann/go-plg/internal/testcontract.Fooer@v1.0.0",
+		Language: plg.LanguageLua, Entrypoint: "plugin.lua", Version: "7", Owner: &owner,
 	}, fstest.MapFS{"plugin.lua": {Data: []byte(warningPlugin)}}))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "lua", plg.WithStorage(store),
 		plg.WithPool(1, 1), plg.WithValidation(func(context.Context, plg.PluginInfo) (testcontract.Check, error) {
@@ -109,6 +110,8 @@ func TestStatusAndEventsOfAServingPlugin(t *testing.T) {
 
 	stamp := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
 	issue := []string{"", "warning p.slow (speed): slow"}
+	devel := "the service's contract module github.com/heynemann/go-plg is built from a local checkout, version " +
+		"(devel): the plugin's v1.0.0 is not checked"
 
 	assert.Equal(t, [][]string{
 		{"key", "lua/p"},
@@ -125,6 +128,7 @@ func TestStatusAndEventsOfAServingPlugin(t *testing.T) {
 		{"panics", "1"},
 		{"last panic", stamp(stopped.Time) + " " + stopped.Error()},
 		{"load", stamp(state.Load.At) + " version 7: ok"},
+		{"", "warning plg.contract.devel (implements): " + devel},
 		issue,
 		{"validation", stamp(validated.At) + " version 7: ok"},
 		issue,
@@ -136,7 +140,7 @@ func TestStatusAndEventsOfAServingPlugin(t *testing.T) {
 
 	assert.Equal(t, [][]string{
 		{"AT", "KIND", "VERSION", "DETAIL"},
-		{stamp(events[0].At), "loaded", "7", "warning p.slow: slow"},
+		{stamp(events[0].At), "loaded", "7", "warning plg.contract.devel: " + devel + "; warning p.slow: slow"},
 		{stamp(stopped.Time), "panicked", "7", stopped.Error()},
 		{stamp(events[2].At), "validated", "7", "warning p.slow: slow"},
 	}, cells(env.ok(t, "events", "lua/p")))

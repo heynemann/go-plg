@@ -33,7 +33,8 @@ func TestAdminHandlerDescribesPluginsNoVersionServes(t *testing.T) {
 		t.Helper()
 
 		require.NoError(t, store.Put(&plg.Descriptor{
-			Key: key, Language: lang, Entrypoint: "plugin", Version: version, Owner: by,
+			Key: key, Implements: implementsOf[pinger](), Language: lang, Entrypoint: "plugin", Version: version,
+			Owner: by,
 		}, fstest.MapFS{"plugin": {}}))
 	}
 
@@ -78,6 +79,13 @@ func TestAdminHandlerDescribesPluginsNoVersionServes(t *testing.T) {
 	}, body["owner"], "the second storage's listing names no owner")
 	assert.Nil(t, body["pool"])
 	assert.Nil(t, body["loadedAt"])
+
+	// A skipped plugin's rejection says why it is skipped.
+	body = getAdmin(t, handler, "/plugins/ping/lua", http.StatusOK)
+	rejection, ok = body["rejection"].(map[string]any)
+	require.True(t, ok, "rejection: %v", body["rejection"])
+	assert.Equal(t, "plg: unsupported language: lua plugins are not enabled for ping", rejection["error"])
+	assert.Equal(t, "skipped", body["status"])
 }
 
 // TestAdminHandlerServesAPluginsEvents serves, as their documented JSON form, the events Events keeps of plugins
@@ -94,7 +102,8 @@ func TestAdminHandlerServesAPluginsEvents(t *testing.T) {
 		t.Helper()
 
 		require.NoError(t, store.Put(&plg.Descriptor{
-			Key: key, Language: plg.LanguageLua, Entrypoint: "plugin", Version: version, Owner: &full,
+			Key: key, Implements: implementsOf[pinger](), Language: plg.LanguageLua, Entrypoint: "plugin",
+			Version: version, Owner: &full,
 		}, fstest.MapFS{"plugin": {}}))
 	}
 
@@ -161,8 +170,9 @@ func TestAdminHandlerAnswersOnlyGETOnItsPaths(t *testing.T) {
 	t.Parallel()
 
 	store := plg.NewMemoryStorage("store")
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "lua", Language: plg.LanguageLua, Entrypoint: "plugin"},
-		fstest.MapFS{"plugin": {}}))
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "lua", Implements: implementsOf[pinger](), Language: plg.LanguageLua, Entrypoint: "plugin",
+	}, fstest.MapFS{"plugin": {}}))
 
 	ctr := newUnitContainer(t)
 	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "ping", plg.WithStorage(store),
@@ -281,8 +291,9 @@ func TestAdminHandlerOfAClosedContainer(t *testing.T) {
 	t.Parallel()
 
 	store := plg.NewMemoryStorage("store")
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "lua", Language: plg.LanguageLua, Entrypoint: "plugin"},
-		fstest.MapFS{"plugin": {}}))
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "lua", Implements: implementsOf[pinger](), Language: plg.LanguageLua, Entrypoint: "plugin",
+	}, fstest.MapFS{"plugin": {}}))
 
 	ctr := plg.New()
 	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "ping", plg.WithStorage(store),

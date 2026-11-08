@@ -371,7 +371,9 @@ func TestLuaEntrypointMustBeALuaFile(t *testing.T) {
 		"invalid path": {entry: "../plugin.lua", want: `a Lua entrypoint is a .lua file: "../plugin.lua"`},
 	} {
 		store := plg.NewMemoryStorage(name)
-		require.NoError(t, store.Put(&plg.Descriptor{Key: "k", Language: plg.LanguageLua, Entrypoint: tc.entry}, files))
+		require.NoError(t, store.Put(&plg.Descriptor{
+			Key: "k", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageLua, Entrypoint: tc.entry,
+		}, files))
 
 		err := plg.Register[testcontract.Fooer](t.Context(), ctr, strings.ReplaceAll(name, " ", "-"),
 			plg.WithStorage(store))
@@ -521,7 +523,9 @@ func TestLuaNestedHostCallsKeepTheirOwnAnswers(t *testing.T) {
 
 	api := newAPIServer(t)
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageLua, Entrypoint: "plugin.lua"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "p", Implements: implementsOf[testcontract.Hosted](), Language: plg.LanguageLua, Entrypoint: "plugin.lua",
+	},
 		fstest.MapFS{"plugin.lua": {Data: []byte(nestedHostCalls)}}))
 
 	policy := openPolicy(hostOf(t, api.URL))

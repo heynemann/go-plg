@@ -79,14 +79,16 @@ func TestReloadSkipsNewPluginsItCannotLoad(t *testing.T) {
 	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "ping", plg.WithStorage(first), plg.WithStorage(second)))
 
 	for store, desc := range map[*plg.MemoryStorage]plg.Descriptor{
-		first:  {Key: "cobol", Language: "cobol", Entrypoint: "main.cbl"},
-		second: {Key: "noentry", Language: plg.LanguageGo},
+		first:  {Key: "cobol", Implements: implementsOf[pinger](), Language: "cobol", Entrypoint: "main.cbl"},
+		second: {Key: "noentry", Implements: implementsOf[pinger](), Language: plg.LanguageGo},
 	} {
 		require.NoError(t, store.Put(&desc, fstest.MapFS{"main.cbl": {}}))
 	}
 
 	for _, store := range []*plg.MemoryStorage{first, second} {
-		desc := plg.Descriptor{Key: "dup", Language: plg.LanguageGo, Entrypoint: "plugin.go"}
+		desc := plg.Descriptor{
+			Key: "dup", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+		}
 		require.NoError(t, store.Put(&desc, fstest.MapFS{"plugin.go": {}}))
 	}
 
@@ -278,7 +280,12 @@ func TestCountingSkippedPluginsContainsAPanickingMeterProvider(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 
 	store := plg.NewMemoryStorage("scripts")
-	lua := plg.Descriptor{Key: "l", Language: plg.LanguageLua, Entrypoint: "main.lua"}
+	lua := plg.Descriptor{
+		Key:        "l",
+		Implements: implementsOf[pinger](),
+		Language:   plg.LanguageLua,
+		Entrypoint: "main.lua",
+	}
 	require.NoError(t, store.Put(&lua, fstest.MapFS{"main.lua": {Data: []byte("return {}")}}))
 
 	var err error

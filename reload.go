@@ -240,7 +240,7 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 func (c *Container) refresh(ctx context.Context, reg *registration, changes *reloadChanges) error {
 	current := c.generations(reg)
 
-	found, err := c.relistPlugins(ctx, reg.name, reg.cfg)
+	found, err := c.relistPlugins(ctx, reg)
 	if err != nil {
 		err = fmt.Errorf("plg: reloading %s: %w", reg.name, err)
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload failed", slog.String("name", reg.name),
@@ -255,12 +255,12 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	listed := make(map[string]bool, len(srcs)+len(problems)+len(found.skipped))
 	errs := make([]error, 0, len(problems)+1)
 
-	for i := range found.skipped {
-		key := reg.name + "/" + found.skipped[i].desc.Key
+	for i := range found.skipped { // before the problems, as they are found in the listing
+		key := reg.name + "/" + found.skipped[i].src.desc.Key
 		listed[key] = false
-		rej := skipRejection(&found.skipped[i])
+		rej := skipRejection(key, &found.skipped[i])
 		reg.entry(key).rejection.Store(rej)
-		c.events.source(ctx, EventSkipped, key, &found.skipped[i], rej.report)
+		c.events.source(ctx, EventSkipped, key, &found.skipped[i].src, rej.report)
 	}
 
 	for i := range problems {

@@ -83,7 +83,7 @@ func TestAdminHandlerServesLivePluginsAndRunsNoPluginCode(t *testing.T) {
 	lastGood := answersAsInfo("an update rejected")
 	require.Equal(t, plg.StatusServingLastGood, lastGood.Status)
 	require.NotNil(t, lastGood.Rejection)
-	require.Len(t, lastGood.Rejection.Issues, 2)
+	require.Len(t, lastGood.Rejection.Issues, 3, "the contract's local checkout, the validation's error and warning")
 	assert.Equal(t, "2", lastGood.RejectedVersion)
 	assert.Equal(t, uint64(1), lastGood.Panics, "the key's panic is kept")
 
