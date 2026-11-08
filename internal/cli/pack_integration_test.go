@@ -182,14 +182,15 @@ func TestPackWritesReproducibleArtifacts(t *testing.T) {
 	}, "the test cases ran and are reported")
 }
 
-// packedSteps is the part of a packed report the tests read: each plugin's steps.
+// packedSteps is the part of a packed report the tests read: each plugin's name and steps.
 type packedSteps struct {
 	Plugins []packedPlugin `json:"plugins"`
 }
 
 // packedPlugin is a plugin of [packedSteps].
 type packedPlugin struct {
-	Steps []packedStep `json:"steps"`
+	Plugin string       `json:"plugin"`
+	Steps  []packedStep `json:"steps"`
 }
 
 // packedStep is a step of a [packedPlugin].
@@ -286,6 +287,48 @@ func TestPackRefusesInvalidPluginsAndReplacedContracts(t *testing.T) {
 	assert.Contains(t, got.stderr, "choose another with -o: dist is inside "+plugin+"\n", "-o is named as given")
 }
 
+// TestPackNamesNoMachineForAPlugin packs one plugin, outside an author repository, named as gold, ./gold and its
+// absolute path: the three artifacts are byte for byte the same, and the report they hold names the plugin and its
+// directory relative to the plugin's directory, never the path given.
+func TestPackNamesNoMachineForAPlugin(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	parent := t.TempDir()
+	plugin := filepath.Join(parent, "gold")
+	require.NoError(t, os.CopyFS(plugin, os.DirFS(abs(t, "luagood"))))
+
+	var first []byte
+
+	for _, arg := range []string{"gold", "./gold", plugin} {
+		out := t.TempDir()
+		got := packIn(environ, parent, "-o", out, arg)
+		require.Equal(t, 0, got.code, "%s: %s%s", arg, got.stdout, got.stderr)
+
+		name := filepath.Join(out, "gold.plg")
+		data, err := os.ReadFile(name) //nolint:gosec // G304: the test's artifact
+		require.NoError(t, err)
+
+		if first == nil {
+			first = data
+		}
+
+		assert.Equal(t, first, data, "%s packs to the same bytes as gold", arg)
+
+		provenance := openPacked(t, name).Provenance()
+		assert.NotContains(t, string(provenance.Report), parent, "%s: the report names no machine's directory", arg)
+
+		plugins, ok := packedReport(t, openPacked(t, name))["plugins"].([]any)
+		require.True(t, ok, arg)
+		require.Len(t, plugins, 1, arg)
+
+		shown, ok := plugins[0].(map[string]any)
+		require.True(t, ok, arg)
+		assert.Equal(t, ".", shown["plugin"], arg)
+		assert.Equal(t, ".", shown["dir"], arg)
+	}
+}
+
 // gitIn returns a function running git with its arguments in the repository repo, in the environment environ, as
 // an author committing with no configuration of their own, and returning its trimmed output.
 func gitIn(t *testing.T, environ []string, repo string) func(args ...string) string {
@@ -308,9 +351,10 @@ func gitIn(t *testing.T, environ []string, repo string) func(args ...string) str
 	}
 }
 
-// TestPackRecordsTheGitCommit packs a plugin of an author repository committed to git: the provenance records the
-// commit, clean; changing the repository's shared directory, adding a file to the plugin (even an ignored one) or
-// editing plg.yaml makes it dirty, changing another plugin of the repository does not.
+// TestPackRecordsTheGitCommit packs a plugin of an author repository committed to git, named by its absolute path:
+// the provenance records the commit, clean, and its report names the plugin as plg.yaml lists it; changing the
+// repository's shared directory, adding a file to the plugin (even an ignored one) or editing plg.yaml makes it
+// dirty, changing another plugin of the repository does not.
 func TestPackRecordsTheGitCommit(t *testing.T) {
 	t.Parallel()
 
@@ -339,6 +383,12 @@ func TestPackRecordsTheGitCommit(t *testing.T) {
 	clean := packOnce("clean")
 	assert.Equal(t, head, clean.Commit)
 	assert.False(t, clean.Dirty)
+
+	var named packedSteps
+
+	require.NoError(t, sonic.ConfigStd.Unmarshal(clean.Report, &named))
+	require.Len(t, named.Plugins, 1)
+	assert.Equal(t, "rules/silver", named.Plugins[0].Plugin, "named relative to the repository, not as given")
 
 	write := func(name, content string) {
 		t.Helper()

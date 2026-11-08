@@ -232,7 +232,9 @@ func writeArtifacts(rep *report, plugins []*packed, out, shown string) (string, 
 }
 
 // provenance returns the provenance record of the plugin, validated as rep reports; its report's paths are
-// relative to the plugin's root.
+// relative to the plugin's root. The plugin is named by its directory relative to the root too: plg.yaml's entry
+// for it, or "." for a plugin outside an author repository, never the path the command line gave, which names
+// the machine's directories and differs between `plg pack gold` and `plg pack ./gold`.
 func provenance(rep *report, plugin *packed) (*adminjson.Provenance, error) {
 	own := report{Version: reportVersion, Valid: plugin.report.Valid}
 	if rep.Repository != "" {
@@ -241,6 +243,7 @@ func provenance(rep *report, plugin *packed) (*adminjson.Provenance, error) {
 
 	shown := *plugin.report
 	shown.Dir = relativeTo(plugin.root, shown.Dir)
+	shown.Plugin = shown.Dir
 	own.Plugins = []*pluginReport{&shown}
 
 	data, err := sonic.ConfigStd.Marshal(&own)
