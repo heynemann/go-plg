@@ -88,8 +88,9 @@ func runCase(ctx context.Context, contract *offline.Contract, files fs.FS, runne
 
 // Invoke calls the method call (or Validate) of the plugin in a fresh instance by runner, with the arguments of
 // the input file name of files: a mapping of the parameters by name, as a case's input ($ref paths relative to
-// files' root); an empty name gives none. There are no stubs: runner's Host and HTTP policy answer, as they were
-// opened with. It returns what the call returned, written as test cases write values, or why it failed.
+// files' root); an empty name gives none. There are no stubs: runner's Host answers as it was opened with, and the
+// call has no HTTP policy, so every request the plugin makes is refused. It returns what the call returned,
+// written as test cases write values, or why it failed.
 func Invoke(ctx context.Context, contract *offline.Contract, files fs.FS, runner offline.Runner, call, name string,
 ) (string, error) {
 	tc := &Case{Name: call, call: call, pos: position{file: "call " + call}}
