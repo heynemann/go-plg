@@ -27,7 +27,7 @@ func TestStringReplacesEveryValueByItsSecretsMask(t *testing.T) {
 	secrets.Add("api_key", "s3cret")
 	secrets.Add("token", "s3cret-long") // contains api_key's value: replaced whole
 	secrets.Add("empty", "")            // would match everywhere: not recorded
-	secrets.Add("again", "s3cret")      // recorded already, under api_key
+	secrets.Add("again", "s3cret")      // api_key's value too: masked as api_key, which recorded it first
 
 	assert.Equal(t, "a=[secret api_key] b=[secret token] c=[secret api_key][secret api_key]",
 		secrets.String("a=s3cret b=s3cret-long c=s3crets3cret"))
@@ -60,6 +60,42 @@ func TestEachSecretKeepsItsNewestValues(t *testing.T) {
 	}
 
 	assert.Equal(t, "[secret other]", secrets.String("other-value"), "another secret keeps its value")
+}
+
+// TestAValueTwoSecretsHoldOutlivesEitherRotating: a value recorded under two secrets is a value of each, so one of
+// them rotating away from it leaves it scrubbed as the other's.
+func TestAValueTwoSecretsHoldOutlivesEitherRotating(t *testing.T) {
+	t.Parallel()
+
+	var secrets redact.Redactor
+
+	secrets.Add("a", "shared")
+	secrets.Add("b", "shared")
+
+	for i := range redact.MaxKept {
+		secrets.Add("a", "a-value-"+strconv.Itoa(i))
+	}
+
+	assert.Equal(t, "b is [secret b]", secrets.String("b is shared"))
+}
+
+// TestAValueResolvedAgainBecomesNewest: a secret resolving a value it had before keeps it as its newest, so later
+// rotations evict the values older than it instead.
+func TestAValueResolvedAgainBecomesNewest(t *testing.T) {
+	t.Parallel()
+
+	var secrets redact.Redactor
+
+	secrets.Add("a", "xval")
+
+	for i := 1; i < redact.MaxKept; i++ {
+		secrets.Add("a", "y"+strconv.Itoa(i))
+	}
+
+	secrets.Add("a", "xval")
+	secrets.Add("a", "y8")
+
+	assert.Equal(t, "[secret a] y1", secrets.String("xval y1"), "y1 is the oldest, xval the second newest")
 }
 
 func TestAddIsSafeForConcurrentUse(t *testing.T) {

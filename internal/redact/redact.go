@@ -40,9 +40,10 @@ func Mask(name string) string {
 	return "[secret " + name + "]"
 }
 
-// Add records value as a value of the secret name. An empty value is not recorded (it would match everywhere);
-// a value recorded already, under any name, is kept once. The name's oldest value goes once it has more than
-// [MaxKept].
+// Add records value as the newest value of the secret name. An empty value is not recorded (it would match
+// everywhere). A value the name had already becomes its newest again, so that resolving a value seen before keeps
+// it; one recorded under another name stays recorded under both, so that either secret rotating away from it does
+// not stop it being scrubbed. The name's oldest value goes once it has more than [MaxKept].
 func (r *Redactor) Add(name, value string) {
 	if value == "" {
 		return
@@ -50,7 +51,7 @@ func (r *Redactor) Add(name, value string) {
 
 	for {
 		old := r.set.Load()
-		if old.has(value) {
+		if old.newest(name) == value {
 			return
 		}
 
@@ -60,21 +61,33 @@ func (r *Redactor) Add(name, value string) {
 	}
 }
 
-// has reports whether the set holds value.
-func (s *set) has(value string) bool {
-	return s != nil && slices.ContainsFunc(s.entries, func(e entry) bool { return e.value == value })
+// newest returns name's newest value in s, "" when it has none.
+func (s *set) newest(name string) string {
+	if s == nil {
+		return ""
+	}
+
+	for _, e := range slices.Backward(s.entries) {
+		if e.name == name {
+			return e.value
+		}
+	}
+
+	return ""
 }
 
-// with returns a new set holding s's entries and value, without name's oldest value when it then has more than
-// MaxKept.
+// with returns a new set holding s's entries and value as name's newest value, without name's oldest value when it
+// then has more than MaxKept.
 func (s *set) with(name, value string) *set {
+	added := entry{name: name, value: value}
+
 	var entries []entry
 
 	if s != nil {
-		entries = slices.Clone(s.entries)
+		entries = slices.DeleteFunc(slices.Clone(s.entries), func(e entry) bool { return e == added })
 	}
 
-	entries = append(entries, entry{name: name, value: value})
+	entries = append(entries, added)
 
 	if kept := countOf(entries, name); kept > MaxKept {
 		oldest := slices.IndexFunc(entries, func(e entry) bool { return e.name == name })
@@ -82,7 +95,7 @@ func (s *set) with(name, value string) *set {
 	}
 
 	// The replacer tries its pairs in order at each position: longer values first, so that a value containing
-	// another is replaced whole.
+	// another is replaced whole. A value two secrets hold is masked as the one that recorded it longest ago.
 	sorted := slices.Clone(entries)
 	slices.SortStableFunc(sorted, func(a, b entry) int { return len(b.value) - len(a.value) })
 
