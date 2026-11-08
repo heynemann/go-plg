@@ -1234,7 +1234,7 @@ func createHost(files fs.FS, entrypoint, pkgPath, pkgName string) string {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.Type().IsRegular() || path.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+		if !gorestrict.IsSource(name, entry) {
 			continue
 		}
 
