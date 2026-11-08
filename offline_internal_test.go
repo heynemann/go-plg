@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -117,4 +118,56 @@ func TestOfflineDefaultsAreRegistersDefaults(t *testing.T) {
 		assert.Equal(t, directive.Limits{Memory: memory, PoolMin: 1, PoolMax: pool}, offline.Defaults(string(lang)),
 			lang)
 	}
+}
+
+// TestLuaLongStringHoldsAnyText embeds texts holding the closing brackets of the shorter long strings, at their end
+// too, and a first newline (which Lua skips after the opening bracket): each is closed only at its end, by the
+// first level it never closes.
+func TestLuaLongStringHoldsAnyText(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ text, level string }{
+		{"", ""},
+		{"plain", ""},
+		{"]]", "="},
+		{"x]", "="},
+		{"]=]]]", "=="},
+		{"x]=", ""},
+		{"x]=]", "=="},
+		{"\nfirst", ""},
+	} {
+		got := luaLongString(tc.text)
+		assert.Equal(t, "["+tc.level+"[\n"+tc.text+"]"+tc.level+"]", got, "%q", tc.text)
+		assert.Equal(t, len(got)-len(tc.level)-2, strings.Index(got, "]"+tc.level+"]"), "%q: closed at its end only",
+			tc.text)
+	}
+}
+
+// TestOfflineOwnershipIsTheLoadsRule returns the missing-ownership issue a load adds: a warning, an error when
+// required, none for a complete owner; an invalid manifest fails.
+func TestOfflineOwnershipIsTheLoadsRule(t *testing.T) {
+	t.Parallel()
+
+	const head = "implements: example.com/c/p.I@v1.0.0\nlanguage: lua\nentrypoint: p.lua\n"
+
+	issues, err := offlineOwnership([]byte(head+"owner: {team: {name: growth}}\n"), false)
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "warning", issues[0].Severity)
+	assert.Equal(t, CodeOwnershipMissing, issues[0].Code)
+	assert.Equal(t, "owner.contact", issues[0].Field)
+
+	issues, err = offlineOwnership([]byte(head), true)
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "error", issues[0].Severity)
+	assert.Equal(t, "owner", issues[0].Field)
+
+	issues, err = offlineOwnership([]byte(head+"owner: {team: {name: growth}, contact: {email: g@example.com}}\n"),
+		true)
+	require.NoError(t, err)
+	assert.Empty(t, issues)
+
+	_, err = offlineOwnership([]byte("language: lua\n"), false)
+	require.ErrorIs(t, err, ErrInvalidManifest)
 }

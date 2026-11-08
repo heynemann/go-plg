@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/offline"
 )
@@ -202,10 +203,12 @@ func (r *offlineRunner) explain(ctx context.Context, timedOut bool, subject stri
 // otherwise.
 func (r *offlineRunner) call(ctx context.Context, launch *offlineLaunch, meth *method, args []reflect.Value,
 ) offline.Outcome {
-	inst, err := r.start(ctx, launch)
+	started, err := r.start(ctx, launch)
 	if err != nil {
 		return offline.Outcome{Err: err}
 	}
+
+	inst := &measuredInstance{instance: started}
 
 	var taken atomic.Bool
 
@@ -228,7 +231,9 @@ func (r *offlineRunner) call(ctx context.Context, launch *offlineLaunch, meth *m
 
 	callCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	call := reflectCall{meth: meth, args: append([]reflect.Value{reflect.ValueOf(callCtx)}, args...)}
+	began := time.Now()
 	err = gen.call(callCtx, meth, &call)
+	took := time.Since(began)
 	err = r.explain(ctx, callCtx.Err() != nil, "it", err)
 
 	cancel()
@@ -241,12 +246,33 @@ func (r *offlineRunner) call(ctx context.Context, launch *offlineLaunch, meth *m
 		err = errors.Join(err, inst.Close(closeCtx))
 	}
 
-	outcome := offline.Outcome{Err: err, Returned: returned(err)}
+	outcome := offline.Outcome{Err: err, Returned: returned(err), Resources: r.resources(launch, inst.memory.Load(),
+		took)}
 	if err == nil {
 		outcome.Results = call.out[:len(call.out)-1]
 	}
 
 	return outcome
+}
+
+// resources are what a call took, memory bytes in took, in an instance of launch.
+func (r *offlineRunner) resources(launch *offlineLaunch, memory uint64, took time.Duration) offline.Resources {
+	return offline.Resources{Memory: memory, MemoryLimit: launch.src.limit, Duration: took, Timeout: r.timeout}
+}
+
+// measuredInstance is the instance of a test case's call, whose memory it reads once each call returns, before
+// the pool may discard (and close) it: wasm memory only grows, so that is the instance's peak.
+type measuredInstance struct {
+	instance
+
+	memory atomic.Uint64
+}
+
+func (m *measuredInstance) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {
+	res, err := m.instance.Call(ctx, method, args)
+	m.memory.Store(m.Memory())
+
+	return res, err //nolint:wrapcheck // the instance's own result
 }
 
 // validate calls the plugin's Validate with input in a fresh instance, as a load validates a plugin version.
@@ -265,7 +291,9 @@ func (r *offlineRunner) validate(ctx context.Context, launch *offlineLaunch, inp
 		return offline.Outcome{Err: err}
 	}
 
+	began := time.Now()
 	issues, discard, err := r.ctr.callValidate(ctx, val, launch.cand.launch, inst, args)
+	used := r.resources(launch, inst.Memory(), time.Since(began))
 
 	closeTimeout := r.ctr.closeTimeout
 	if discard { // whatever failed may leave Close unable to end
@@ -276,7 +304,7 @@ func (r *offlineRunner) validate(ctx context.Context, launch *offlineLaunch, inp
 
 	err = explainNoValidate(err, &launch.src, launch.cand.files, val)
 
-	return offline.Outcome{Err: err, Returned: returned(err), Issues: newAdminIssues(issues)}
+	return offline.Outcome{Err: err, Returned: returned(err), Issues: newAdminIssues(issues), Resources: used}
 }
 
 // returned is the message of the error the plugin returned that err wraps; empty when err wraps none.

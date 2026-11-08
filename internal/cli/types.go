@@ -22,13 +22,12 @@ func runTypes(env *Env, args []string) outcome {
 	}
 
 	dir := resolve(env.Dir, operands[0])
-	run := &validation{env: env, dir: dir, arg: operands[0], host: *host, table: newStepTable(env.Stdout)}
-
-	run.table.row("STEP", "RESULT", "DETAIL")
+	run := &validation{env: env, dir: dir, arg: operands[0], host: *host, report: newPluginReport(operands[0], dir)}
 
 	written := run.writeTypings(context.Background())
+	run.report.finish()
 
-	err := run.table.flush()
+	err := run.report.steps(env.Stdout, wantsColour(env, colourAuto))
 	if err != nil {
 		return failure("types", err)
 	}
@@ -79,7 +78,7 @@ func (v *validation) writeTypings(ctx context.Context) bool {
 		detail = append(detail, strings.Join(unchanged, ", ")+" already up to date")
 	}
 
-	v.table.row("typings", stepOK, strings.Join(detail, "; "))
+	v.report.row("typings", resultOK, strings.Join(detail, "; "))
 
 	return true
 }

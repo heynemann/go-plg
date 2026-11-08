@@ -5,6 +5,7 @@ package cli_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -27,7 +28,9 @@ func withCases(t *testing.T, dir string, extra ...string) string {
 	require.NoError(t, os.CopyFS(plugin, os.DirFS(filepath.Join(testdata, "cases"))))
 
 	for i := 0; i+1 < len(extra); i += 2 {
-		require.NoError(t, os.WriteFile(filepath.Join(plugin, extra[i]), []byte(extra[i+1]), 0o600))
+		name := filepath.Join(plugin, filepath.FromSlash(extra[i]))
+		require.NoError(t, os.MkdirAll(filepath.Dir(name), 0o750))
+		require.NoError(t, os.WriteFile(name, []byte(extra[i+1]), 0o600))
 	}
 
 	return plugin
@@ -176,7 +179,18 @@ func TestValidateRunsTestCasesInEveryLanguage(t *testing.T) {
 
 		assert.Equal(t, "test FAIL tests/broken.yaml: parsing: yaml: line 1: did not find expected node content",
 			following(got.stdout, "test FAIL tests/broken.yaml: ").row, tc.dir)
-		assert.Equal(t, "tests FAIL test cases failed: 16 failed, 10 passed", printed[len(printed)-1], tc.dir)
+		assert.Equal(t, "tests FAIL test cases failed: 16 failed, 10 passed", following(got.stdout, "tests ").row,
+			tc.dir)
+
+		// The resource report follows the test cases: a row per case that ran, and the case stopped at its 20s
+		// deadline took all of its time.
+		for _, name := range passed {
+			assert.Regexp(t, `(?m)^resources +(ok|warning) +tests/pass.yaml: `+regexp.QuoteMeta(name)+
+				`: memory [0-9.]+ MiB of [0-9.]+ MiB \([0-9]+%\), time `, got.stdout, "%s: %s", tc.dir, name)
+		}
+
+		assert.Regexp(t, `(?m)^resources +warning +tests/fail.yaml: a timeout: memory .* time 20(\.[0-9]+)?s of 20s `+
+			`\(10[0-9]%\); at or above 80% of its (memory and )?time limits?$`, got.stdout, tc.dir)
 	}
 }
 
@@ -191,7 +205,7 @@ func TestValidatePassesWhenEveryCasePasses(t *testing.T) {
 
 	got := validate(environ, plugin)
 	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
-	assert.Equal(t, "tests ok 10 passed", rows(got.stdout)[len(rows(got.stdout))-1])
+	assert.Equal(t, "tests ok 10 passed", following(got.stdout, "tests ").row)
 }
 
 // TestValidateFakesSecretsInTestCases validates the secrets plugin of each language, whose Coupon sends the secret
@@ -229,6 +243,6 @@ func TestValidateFakesSecretsInTestCases(t *testing.T) {
 			`tests/secrets.yaml:33:14: secrets fakes "api_key", which plugin.yaml does not declare `+
 			`(secrets: [coupon_token])`,
 			following(got.stdout, "test FAIL tests/secrets.yaml: a fake plugin.yaml does not declare").row, dir)
-		assert.Equal(t, "tests FAIL test cases failed: 2 failed, 2 passed", printed[len(printed)-1], dir)
+		assert.Contains(t, printed, "tests FAIL test cases failed: 2 failed, 2 passed", dir)
 	}
 }

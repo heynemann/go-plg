@@ -3,6 +3,7 @@ package plg
 import (
 	"errors"
 
+	"github.com/heynemann/go-plg/internal/gorestrict"
 	"github.com/heynemann/go-plg/internal/httpcap"
 )
 
@@ -80,7 +81,7 @@ var (
 	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
 	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance
 	// pool instead.
-	ErrGoStatement = errors.New("plg: go statements are not allowed in plugins")
+	ErrGoStatement = gorestrict.ErrGoStatement
 	// ErrInvalidHTTPPolicy reports an [HTTPPolicy] Register cannot accept.
 	ErrInvalidHTTPPolicy = httpcap.ErrInvalidPolicy
 	// ErrCall reports a call that failed outside the plugin's own code: the guest trapped, panicked, was

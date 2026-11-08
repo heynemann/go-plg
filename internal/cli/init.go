@@ -74,14 +74,14 @@ func runInit(env *Env, args []string) outcome {
 	}
 
 	run := &validation{
-		env: env, dir: resolve(env.Dir, arg), arg: arg, host: *host, table: newStepTable(env.Stdout), newPlugin: true,
+		env: env, dir: resolve(env.Dir, arg), arg: arg, host: *host, newPlugin: true,
 	}
 
-	run.table.row("STEP", "RESULT", "DETAIL")
-
+	run.report = newPluginReport(arg, run.dir)
 	created := run.scaffold(context.Background(), ref, language)
+	run.report.finish()
 
-	err = run.table.flush()
+	err = run.report.steps(env.Stdout, wantsColour(env, colourAuto))
 	if err != nil {
 		return failure("init", err)
 	}
@@ -113,7 +113,7 @@ func (v *validation) scaffold(ctx context.Context, ref contractref.Ref, language
 	}
 
 	if len(v.hosts) > 0 {
-		v.table.row("", stepHint, fmt.Sprintf("for a Create taking a Host, pass -host <%s>",
+		v.report.hint(fmt.Sprintf("for a Create taking a Host, pass -host <%s>",
 			strings.Join(v.hosts, "|")))
 	}
 
@@ -335,17 +335,17 @@ func (v *validation) create(files []typings.File, goMod *goModule) bool {
 			return v.failed("go.mod", err)
 		}
 
-		v.table.row("go.mod", stepOK, goMod.path+" requires the contract module")
+		v.report.row("go.mod", resultOK, goMod.path+" requires the contract module")
 	}
 
-	v.table.row("owner", stepWarning, "fill in plugin.yaml's owner block")
+	v.report.row("owner", resultWarning, "fill in plugin.yaml's owner block")
 
 	next := "plg validate " + v.arg + ", or plg dev " + v.arg + " to validate on each save"
 	if goMod.data != nil {
 		next = "go mod tidy (in " + filepath.Dir(goMod.path) + "), then " + next
 	}
 
-	v.table.row("next", stepHint, next)
+	v.report.row("next", shownHint, next)
 
 	return true
 }
@@ -378,7 +378,7 @@ func (v *validation) writePlugin(files []typings.File, goMod *goModule) (func(),
 		names[i] = file.Name
 	}
 
-	v.table.row("files", stepOK, "wrote "+strings.Join(names, ", ")+" in "+v.dir)
+	v.report.row("files", resultOK, "wrote "+strings.Join(names, ", ")+" in "+v.dir)
 
 	return undo, true
 }
@@ -402,7 +402,7 @@ func (v *validation) list(undo func()) (func(), bool) {
 	}
 
 	rel, _ := v.repo.Lists(v.dir)
-	v.table.row(authorrepo.FileName, stepOK, "lists "+rel)
+	v.report.row(authorrepo.FileName, resultOK, "lists "+rel)
 
 	return func() {
 		undo()

@@ -8,9 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -25,15 +28,7 @@ import (
 func TestValidateFromTheCommand(t *testing.T) {
 	t.Parallel()
 
-	bin := filepath.Join(t.TempDir(), "plg")
-
-	//nolint:gosec // G204: builds this module's plg command
-	build := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".")
-
-	build.Env = append(os.Environ(), "GOWORK=off")
-
-	out, err := build.CombinedOutput()
-	require.NoError(t, err, string(out))
+	bin := buildCommand(t)
 
 	testdata, err := filepath.Abs(filepath.Join("..", "..", "testdata", "validate"))
 	require.NoError(t, err)
@@ -43,22 +38,7 @@ func TestValidateFromTheCommand(t *testing.T) {
 	plg := func(command, plugin string) (string, string, int) {
 		t.Helper()
 
-		//nolint:gosec // G204: runs the plg command the test built
-		cmd := exec.CommandContext(t.Context(), bin, command, plugin)
-		cmd.Env = environ
-
-		var stdout, stderr bytes.Buffer
-
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-
-		err := cmd.Run()
-		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
-			return stdout.String(), stderr.String(), exit.ExitCode()
-		}
-
-		require.NoError(t, err)
-
-		return stdout.String(), stderr.String(), 0
+		return runCommand(t, bin, environ, command, plugin)
 	}
 
 	plgValidate := func(plugin string) (string, string, int) {
@@ -92,7 +72,7 @@ func TestValidateFromTheCommand(t *testing.T) {
 
 	stdout, stderr, code = plgValidate(pricing)
 	require.Equal(t, 0, code, stdout+stderr)
-	assert.True(t, strings.HasSuffix(stdout, "\ntests      ok      10 passed\n"), stdout)
+	assert.Contains(t, stdout, "\ntests      ok      10 passed\nresources  ok      tests/pass.yaml: ", stdout)
 
 	untyped := filepath.Join(t.TempDir(), "untyped")
 	require.NoError(t, os.CopyFS(untyped, os.DirFS(filepath.Join(testdata, "plugins", "tsgood"))))
@@ -110,4 +90,119 @@ func TestValidateFromTheCommand(t *testing.T) {
 	stdout, stderr, code = plg("validate", untyped)
 	require.Equal(t, 0, code, stdout+stderr)
 	assert.Contains(t, stdout, "types      ok      the plugin type-checks against cohort.Provider (plg.d.ts)\n")
+}
+
+// TestValidateReportFromTheCommand runs the plg command's report formats. A Go plugin of a contract with
+// //plg:guest-packages, validated without a user cache directory for its custom guest (no HOME, no
+// XDG_CACHE_HOME, no -guest-cache), fails at the guest step: in the coloured table (-color always), in the JSON
+// report on stdout (-format json) and in the JUnit file (-junit), and the command exits 1. A plugin whose only
+// problem is a warning (its owner is missing) exits 0, the warning counted in the JSON report.
+func TestValidateReportFromTheCommand(t *testing.T) {
+	t.Parallel()
+
+	bin := buildCommand(t)
+
+	testdata, err := filepath.Abs(filepath.Join("..", "..", "testdata", "validate"))
+	require.NoError(t, err)
+
+	environ := slices.DeleteFunc(testproxy.Environ(testproxy.New(t, filepath.Join(testdata, "modules")),
+		t.TempDir()), func(kv string) bool {
+		return strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CACHE_HOME=")
+	})
+	environ = append(environ, "GOCACHE="+t.TempDir())
+	goxml := filepath.Join(testdata, "plugins", "goxml")
+
+	stdout, stderr, code := runCommand(t, bin, environ, "validate", "-color", "always", goxml)
+	assert.Equal(t, 1, code, stdout+stderr)
+	assert.Contains(t, stdout, "\nguest      \x1b[31mFAIL\x1b[0m    finding the guest cache: ")
+	assert.Contains(t, stderr, "plg validate: "+goxml+" is not a valid plugin\n")
+
+	junit := filepath.Join(t.TempDir(), "plg.xml")
+	stdout, stderr, code = runCommand(t, bin, environ, "validate", "-format", "json", "-junit", junit, goxml)
+	assert.Equal(t, 1, code, stdout+stderr)
+
+	var report validateReport
+
+	require.NoError(t, sonic.ConfigDefault.UnmarshalFromString(stdout, &report), stdout)
+	require.Len(t, report.Plugins, 1)
+	assert.False(t, report.Valid)
+	assert.Equal(t, "guest", report.Plugins[0].FailedStep)
+
+	last := report.Plugins[0].Steps[len(report.Plugins[0].Steps)-1]
+	assert.Equal(t, "guest", last.Step)
+	assert.Equal(t, "failed", last.Result)
+	assert.Contains(t, last.Detail, "finding the guest cache: ")
+
+	data, err := os.ReadFile(junit) //nolint:gosec // G304: the test's file
+	require.NoError(t, err)
+	assert.Regexp(t, `<testsuites name="plg validate" tests="[0-9]+" failures="1">`, string(data))
+	assert.Regexp(t, `<testcase name="guest" classname="`+regexp.QuoteMeta(goxml)+`">\s*`+
+		`<failure message="finding the guest cache: `, string(data))
+
+	stdout, stderr, code = runCommand(t, bin, environ, "validate", "-format", "json",
+		filepath.Join(testdata, "plugins", "noowner"))
+	require.Equal(t, 0, code, "a warning does not fail validate\n%s%s", stdout, stderr)
+	assert.Contains(t, stdout, `"warnings": 1,`)
+	assert.Contains(t, stdout, `"valid": true`)
+}
+
+// buildCommand builds this module's plg command into a temporary directory and returns its path.
+func buildCommand(t *testing.T) string {
+	t.Helper()
+
+	bin := filepath.Join(t.TempDir(), "plg")
+
+	//nolint:gosec // G204: builds this module's plg command
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".")
+
+	build.Env = append(os.Environ(), "GOWORK=off")
+
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	return bin
+}
+
+// validateReport is the part of plg validate's JSON report the binary's test reads.
+type validateReport struct {
+	Plugins []validatedPlugin `json:"plugins"`
+	Valid   bool              `json:"valid"`
+}
+
+// validatedPlugin is a plugin of a [validateReport].
+type validatedPlugin struct {
+	FailedStep string          `json:"failedStep"`
+	Steps      []validatedStep `json:"steps"`
+	Valid      bool            `json:"valid"`
+}
+
+// validatedStep is a step of a [validatedPlugin].
+type validatedStep struct {
+	Step   string `json:"step"`
+	Result string `json:"result"`
+	Detail string `json:"detail"`
+}
+
+// runCommand runs the plg command bin with args in environ and returns its stdout, stderr and exit code.
+//
+//nolint:revive,gocritic // stdout then stderr, as documented (nonamedreturns forbids naming them)
+func runCommand(t *testing.T, bin string, environ []string, args ...string) (string, string, int) {
+	t.Helper()
+
+	//nolint:gosec // G204: runs the plg command the test built
+	cmd := exec.CommandContext(t.Context(), bin, args...)
+	cmd.Env = environ
+
+	var out, errOut bytes.Buffer
+
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+
+	err := cmd.Run()
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		return out.String(), errOut.String(), exit.ExitCode()
+	}
+
+	require.NoError(t, err)
+
+	return out.String(), errOut.String(), 0
 }

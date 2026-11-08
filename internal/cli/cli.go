@@ -51,24 +51,33 @@ commands:
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
                       requires); pass it to plg.WithGoGuest
-  validate [-host Interface] [-cache-dir dir] [-guest-cache dir] <plugin dir or author repository>
-                      check a plugin before registering it, exiting non-zero on any error: read its plugin.yaml,
-                      resolve the contract module it pins with the go command (go mod download: GOPROXY,
-                      GOPRIVATE and credentials apply, and a module in the Go module cache needs no network),
-                      type-check the contract and read its directives, check that a Go plugin's go.mod requires
-                      the pinned version and that a Lua or TypeScript plugin's typings are what types writes,
-                      type-check a Go or TypeScript plugin, then load the plugin and run its Create in the real
-                      guest, with a Host whose every call fails, under plg.yaml's limits over the contract's
-                      //plg:limits over plg's defaults (memory, pool; timeout bounds Create); a Go plugin of a
-                      contract with //plg:guest-packages runs in that custom guest, built from the plugin's module
-                      as build-guest builds one and kept in -guest-cache (default: the user cache directory's
-                      plg/guests); a directory holding plg.yaml is an author repository: every plugin it lists is
-                      validated, then summarised, and its settings (shared directories, limits, requireOwnership,
-                      replace) apply, also to one of its plugins validated alone;
+  validate [-host Interface] [-cache-dir dir] [-guest-cache dir] [-format table|json] [-junit file]
+           [-color auto|always|never] [-near-limit share] <plugin dir or author repository>
+                      check a plugin before registering it, exiting 1 on any error (0 with warnings): read its
+                      plugin.yaml and check its ownership, resolve the contract module it pins with the go command
+                      (go mod download: GOPROXY, GOPRIVATE and credentials apply, and a module in the Go module
+                      cache needs no network), type-check the contract and read its directives; run the language
+                      checks: a Go plugin's go.mod requires the pinned version, it starts no goroutines and
+                      imports only what the Go guest provides, and it type-checks; a Lua or TypeScript plugin's
+                      typings are what types writes, a TypeScript plugin type-checks, every Lua file compiles;
+                      then load the plugin and run its Create in the real guest, with a Host whose every call
+                      fails, under plg.yaml's limits over the contract's //plg:limits over plg's defaults
+                      (memory, pool; timeout bounds Create); run Validate with each examples/validation/*.yaml
+                      input, the test cases (tests/*.yaml), and report each case's peak memory and time against
+                      the limits; a Go plugin of a contract with //plg:guest-packages runs in that custom guest,
+                      built from the plugin's module as build-guest builds one and kept in -guest-cache (default:
+                      the user cache directory's plg/guests); a directory holding plg.yaml is an author
+                      repository: every plugin it lists is validated, then summarised, and its settings (shared
+                      directories, limits, requireOwnership, replace) apply, also to one of its plugins validated
+                      alone;
                       -host names the contract's Host interface a Lua or TypeScript plugin uses (a Go plugin's
                       Create names it; by default the one the plugin's typings were written for, else the
                       contract's only interface that can be a Host),
-                      -cache-dir is the compilation cache directory, as for warm
+                      -cache-dir is the compilation cache directory, as for warm,
+                      -format json prints the report as JSON (its schema: the README) instead of a table,
+                      -junit also writes it as JUnit XML to file, -color colours the table (auto: on a terminal
+                      without NO_COLOR or TERM=dumb), -near-limit flags test cases at or above that share of a
+                      limit (default 0.8)
   types [-host Interface] <plugin dir>
                       write a Lua or TypeScript plugin's typings, to commit with it, from the contract its
                       plugin.yaml pins (resolved as validate resolves it): TypeScript declarations (plg.d.ts) and

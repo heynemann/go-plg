@@ -14,8 +14,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 
@@ -28,6 +30,8 @@ import (
 	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
+	"github.com/heynemann/go-plg/internal/goallow"
+	"github.com/heynemann/go-plg/internal/gorestrict"
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/internal/testcase"
@@ -38,13 +42,15 @@ import (
 // plgModule is plg's module, whose version as this command was built decides the custom Go guests' plg.
 const plgModule = "github.com/heynemann/go-plg"
 
-// Step results.
+// Colour modes of -color.
 const (
-	stepOK      = "ok"
-	stepFailed  = "FAIL"
-	stepWarning = "warning"
-	stepHint    = "hint"
+	colourAuto   = "auto"
+	colourAlways = "always"
+	colourNever  = "never"
 )
+
+// defaultNearLimit is -near-limit's default: a call is near a limit at 80% of it.
+const defaultNearLimit = 0.8
 
 // runValidate runs `plg validate`.
 func runValidate(env *Env, args []string) outcome {
@@ -53,51 +59,104 @@ func runValidate(env *Env, args []string) outcome {
 	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
 	guestCache := flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
 		"//plg:guest-packages (default <user cache>/plg/guests)")
+	format := flags.String("format", formatTable, "table or json")
+	junit := flags.String("junit", "", "also write the report as JUnit XML to this file")
+	colour := flags.String("color", colourAuto, "colour the table: auto (on a terminal), always or never")
+	nearLimit := flags.Float64("near-limit", defaultNearLimit, "flag test cases whose peak memory or time is at "+
+		"or above this share of its limit")
 
 	operands, res, ok := parseMixed("validate", flags, args)
 	if !ok {
 		return res
 	}
 
-	if len(operands) != 1 {
-		return usageError("validate", "name one plugin directory or author repository")
+	if msg := validateUsage(operands, *format, *colour, *nearLimit); msg != "" {
+		return usageError("validate", msg)
 	}
 
 	dir := resolve(env.Dir, operands[0])
-	run := validation{env: env, dir: dir, arg: operands[0], host: *host, cacheDir: resolve(env.Dir, *cacheDir)}
+	run := validation{
+		env: env, dir: dir, arg: operands[0], host: *host, cacheDir: resolve(env.Dir, *cacheDir),
+		nearLimit: *nearLimit, ownership: true,
+	}
 
 	if *guestCache != "" {
 		run.guestCache = resolve(env.Dir, *guestCache)
 	}
 
-	if authorrepo.Exists(dir) {
-		return validateRepo(&run)
+	out := &output{format: *format, colour: wantsColour(env, *colour)}
+	if *junit != "" {
+		out.junit = resolve(env.Dir, *junit)
 	}
 
-	run.table = newStepTable(env.Stdout)
-	run.table.row("STEP", "RESULT", "DETAIL")
+	if authorrepo.Exists(dir) {
+		return validateRepo(&run, out)
+	}
 
-	valid := run.run(context.Background())
+	run.report = newPluginReport(operands[0], dir)
+	rep := &report{Version: reportVersion, Plugins: []*pluginReport{run.report}}
+	rep.Valid = run.run(context.Background())
 
-	err := run.table.flush()
+	err := out.plugin(env.Stdout, rep, run.report)
+	if err == nil {
+		err = out.show(env.Stdout, rep)
+	}
+
 	if err != nil {
 		return failure("validate", err)
 	}
 
-	if !valid {
+	if !rep.Valid {
 		return outcome{code: exitFailure, msg: fmt.Sprintf("plg validate: %s is not a valid plugin\n", dir)}
 	}
 
 	return outcome{code: exitOK}
 }
 
+// validateUsage returns what is wrong with validate's operands and flags; empty when nothing is.
+func validateUsage(operands []string, format, colour string, nearLimit float64) string {
+	switch {
+	case len(operands) != 1:
+		return "name one plugin directory or author repository"
+	case format != formatTable && format != formatJSON:
+		return fmt.Sprintf("-format must be table or json, not %q", format)
+	case colour != colourAuto && colour != colourAlways && colour != colourNever:
+		return fmt.Sprintf("-color must be auto, always or never, not %q", colour)
+	case !(nearLimit > 0 && nearLimit <= 1):
+		return fmt.Sprintf("-near-limit must be above 0 and at most 1, not %v", nearLimit)
+	default:
+		return ""
+	}
+}
+
+// wantsColour reports whether the table is coloured in mode (-color): always, never, or on a terminal unless
+// NO_COLOR is set or TERM is dumb.
+func wantsColour(env *Env, mode string) bool {
+	switch mode {
+	case colourAlways:
+		return true
+	case colourNever:
+		return false
+	default:
+	}
+
+	file, ok := env.Stdout.(*os.File)
+	if !ok || env.Getenv("NO_COLOR") != "" || env.Getenv("TERM") == "dumb" {
+		return false
+	}
+
+	info, err := file.Stat()
+
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
 // validation is one run of plg validate (or plg types) on the plugin directory dir, named arg on the command line;
-// each step adds its rows to table. repo is the author repository listing the plugin, if any, and files the
+// each step records itself in report. repo is the author repository listing the plugin, if any, and files the
 // plugin's files, the repository's shared directories copied in.
 type validation struct {
-	env   *Env
-	table *stepTable
-	repo  *authorrepo.Repo
+	env    *Env
+	report *pluginReport
+	repo   *authorrepo.Repo
 	// modules, when set, keeps the contract modules resolved, so that later runs (plg dev's) reuse them.
 	modules    *modules
 	files      fs.FS
@@ -107,6 +166,8 @@ type validation struct {
 	cacheDir   string
 	guestCache string   // empty means the default, <user cache>/plg/guests
 	hosts      []string // the contract's Host candidates when there are several and none was chosen
+	nearLimit  float64  // the share of a limit a test case's call is near it at (-near-limit)
+	ownership  bool     // check the manifest's owner (validate does, types does not)
 	// newPlugin is set by plg init: the plugin has no source yet, so its Host is -host's or the contract's only
 	// candidate.
 	newPlugin bool
@@ -121,19 +182,29 @@ type resolved struct {
 	desc     plg.Descriptor
 }
 
-// run runs the steps in order, stopping at the first that fails; it reports whether every step passed.
+// run runs the steps in order and reports whether none failed. It stops at the first that fails, until the plugin
+// loaded: then Validate's examples, the test cases and the resource report all run.
 func (v *validation) run(ctx context.Context) bool {
+	v.steps(ctx)
+	v.report.finish()
+
+	return v.report.Valid
+}
+
+// steps runs the steps.
+func (v *validation) steps(ctx context.Context) {
 	res, cleanup, ok := v.resolveContract(ctx)
 	if !ok {
-		return false
+		return
 	}
 
 	defer cleanup()
 
 	opts := v.options(&res.desc, res.loaded.Directives.Limits)
 
-	return v.languageChecks(ctx, res, opts) && v.load(ctx, res.loaded.Contract, res.manifest, &res.desc, opts) &&
-		v.tests(ctx, res.loaded.Contract, res.manifest, opts)
+	if v.languageChecks(ctx, res, opts) && v.load(ctx, res.loaded.Contract, res.manifest, &res.desc, opts) {
+		v.exercise(ctx, res.loaded.Contract, res.manifest, opts)
+	}
 }
 
 // options are the options the plugin loads and its test cases run with: what it writes and what plg logs go to
@@ -150,16 +221,24 @@ func (v *validation) options(desc *plg.Descriptor, declared directive.Limits) *o
 	return opts
 }
 
-// languageChecks runs the steps of the plugin's language: a Go plugin's go.mod pin, type-check and custom guest,
-// which it sets in opts; a Lua or TypeScript plugin's typings, and a TypeScript plugin's type-check against them.
+// languageChecks runs the steps of the plugin's language: a Go plugin's go.mod pin, sandbox rules, type-check and
+// custom guest, which it sets in opts; a Lua or TypeScript plugin's typings, then a Lua plugin's syntax and a
+// TypeScript plugin's type-check against the typings.
 func (v *validation) languageChecks(ctx context.Context, res *resolved, opts *offline.Options) bool {
 	if res.desc.Language == plg.LanguageGo {
-		return v.goSteps(ctx, res.ref, res.mod, res.loaded, &res.desc, opts)
+		return v.goSteps(ctx, res, opts)
 	}
 
 	typ, fresh := v.typings(res)
+	if !fresh {
+		return false
+	}
 
-	return fresh && (res.desc.Language != plg.LanguageTypeScript || v.tsTypes(ctx, typ, res))
+	if res.desc.Language == plg.LanguageTypeScript {
+		return v.tsTypes(ctx, typ, res)
+	}
+
+	return v.luaSyntax(ctx, opts)
 }
 
 // resolveContract runs the steps up to the interface: the author repository, the manifest, the shared
@@ -210,20 +289,77 @@ func (v *validation) interfaceSteps(ctx context.Context, manifest []byte, desc *
 	return &resolved{loaded: loaded, mod: mod, ref: ref, manifest: manifest, desc: *desc}, true
 }
 
-// goSteps runs a Go plugin's own steps: its go.mod's pin, its type-check and its custom guest, which it sets in
-// opts.
-func (v *validation) goSteps(ctx context.Context, ref contractref.Ref, mod modfetch.Module, loaded *contractload.Loaded,
-	desc *plg.Descriptor, opts *offline.Options,
-) bool {
-	if !v.goMod(ref, mod) || !v.goTypes(loaded, desc) {
+// goSteps runs a Go plugin's own steps: its go.mod's pin, its sandbox rules, its type-check and its custom guest,
+// which it sets in opts.
+func (v *validation) goSteps(ctx context.Context, res *resolved, opts *offline.Options) bool {
+	guestPackages := res.loaded.Directives.GuestPackages
+	if !v.goMod(res.ref, res.mod) || !v.sandbox(res.ref.Package, &res.desc, guestPackages) ||
+		!v.goTypes(res.loaded, &res.desc) {
 		return false
 	}
 
 	var ok bool
 
-	opts.GoGuest, ok = v.goGuest(ctx, loaded.Directives.GuestPackages)
+	opts.GoGuest, ok = v.goGuest(ctx, guestPackages)
 
 	return ok
+}
+
+// sandbox checks a Go plugin's source (its package directory, vendored packages included) against what the Go
+// guest runs: no go statements, and imports only of what the guest provides: its allowlist, the contract package
+// contract, the plugin's vendored packages and the contract's //plg:guest-packages, guestPackages.
+func (v *validation) sandbox(contract string, desc *plg.Descriptor, guestPackages []string) bool {
+	dir := goPackageDir(desc.Entrypoint)
+	vendor := path.Join(dir, "vendor")
+
+	err := gorestrict.Check(v.files, dir, func(imp string) bool {
+		if goallow.Allowed(imp) || imp == contract || slices.Contains(guestPackages, imp) {
+			return true
+		}
+
+		info, err := fs.Stat(v.files, path.Join(vendor, imp))
+
+		return err == nil && info.IsDir()
+	})
+	if err != nil {
+		v.failed("sandbox", err)
+
+		if errors.Is(err, gorestrict.ErrImport) {
+			v.report.hint("the Go guest provides its allowlist (the standard library packages plg lists and " +
+				"github.com/heynemann/go-plg/plugin), the contract package, the plugin's vendor/ packages and the " +
+				"contract's //plg:guest-packages")
+		}
+
+		return false
+	}
+
+	v.report.row("sandbox", resultOK, "no go statements, and imports only what the Go guest provides")
+
+	return true
+}
+
+// luaSyntax compiles every .lua file of a Lua plugin, the modules it requires only when a call needs them
+// included, with the Lua guest's compiler.
+func (v *validation) luaSyntax(ctx context.Context, opts *offline.Options) bool {
+	errs, err := offline.LuaSyntax(ctx, v.files, opts)
+	if err != nil {
+		return v.failed("syntax", err)
+	}
+
+	if len(errs) > 0 {
+		v.report.row("syntax", resultFailed, fmt.Sprintf("%d .lua %s not compile", len(errs),
+			plural(len(errs), "file does", "files do")))
+
+		for _, msg := range errs {
+			v.report.line(msg)
+		}
+
+		return false
+	}
+
+	v.report.row("syntax", resultOK, "every .lua file compiles")
+
+	return true
 }
 
 // limits returns the limits the plugin runs under: the author repository's plg.yaml limits over the contract's
@@ -244,7 +380,7 @@ func (v *validation) limits(desc *plg.Descriptor, declared directive.Limits) dir
 		detail += ", no timeout"
 	}
 
-	v.table.row("limits", stepOK, detail+" ("+limitsOrigin(declared, repo)+")")
+	v.report.row("limits", resultOK, detail+" ("+limitsOrigin(declared, repo)+")")
 
 	return limits
 }
@@ -321,7 +457,7 @@ func (v *validation) goGuest(ctx context.Context, pkgs []string) ([]byte, bool) 
 		how = "found in"
 	}
 
-	v.table.row("guest", stepOK, fmt.Sprintf("a custom Go guest with %s, %s the guest cache (%s)",
+	v.report.row("guest", resultOK, fmt.Sprintf("a custom Go guest with %s, %s the guest cache (%s)",
 		strings.Join(pkgs, " "), how, guest.Path))
 
 	return wasm, true
@@ -329,12 +465,13 @@ func (v *validation) goGuest(ctx context.Context, pkgs []string) ([]byte, bool) 
 
 // failed adds the failed step's row.
 func (v *validation) failed(step string, err error) bool {
-	v.table.row(step, stepFailed, err.Error())
+	v.report.row(step, resultFailed, err.Error())
 
 	return false
 }
 
-// manifest reads and parses the plugin's plugin.yaml.
+// manifest reads and parses the plugin's plugin.yaml and, for validate, checks its owner as a load does: the
+// missing-ownership issue is a warning, an error (failing the step) when the author repository requires ownership.
 func (v *validation) manifest() ([]byte, plg.Descriptor, bool) {
 	data, err := os.ReadFile(filepath.Join(v.dir, "plugin.yaml"))
 	if err != nil {
@@ -346,10 +483,42 @@ func (v *validation) manifest() ([]byte, plg.Descriptor, bool) {
 		return nil, plg.Descriptor{}, v.failed("manifest", err)
 	}
 
-	v.table.row("manifest", stepOK, fmt.Sprintf("%s plugin %s implementing %s", desc.Language, v.key(),
+	var missing []adminjson.Issue
+
+	if v.ownership {
+		missing, err = offline.Ownership(data, v.repo != nil && v.repo.RequireOwnership)
+		if err != nil {
+			return nil, plg.Descriptor{}, v.failed("manifest", err)
+		}
+	}
+
+	result := issuesResult(missing)
+	v.report.row("manifest", result, fmt.Sprintf("%s plugin %s implementing %s", desc.Language, v.key(),
 		desc.Implements))
 
-	return data, desc, true
+	for _, issue := range missing {
+		v.report.issue(issue)
+	}
+
+	return data, desc, result != resultFailed
+}
+
+// issuesResult is the result of a step reporting issues: failed with an error issue, else warning with a warning
+// issue, else ok.
+func issuesResult(issues []adminjson.Issue) string {
+	result := resultOK
+
+	for _, issue := range issues {
+		switch {
+		case issue.Severity == string(plg.SeverityError):
+			return resultFailed
+		case issue.Severity == string(plg.SeverityWarning):
+			result = resultWarning
+		default:
+		}
+	}
+
+	return result
 }
 
 // key is the plugin's key: its directory's name.
@@ -371,7 +540,7 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	}
 
 	if mod, ok := v.modules.find(ref); ok {
-		v.table.row("contract", stepOK, fmt.Sprintf("module %s %s (%s; resolved by an earlier run)", mod.Path,
+		v.report.row("contract", resultOK, fmt.Sprintf("module %s %s (%s; resolved by an earlier run)", mod.Path,
 			mod.Version, mod.Dir))
 
 		return mod, true
@@ -385,7 +554,7 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	}
 
 	v.modules.keep(ref, mod)
-	v.table.row("contract", stepOK, fmt.Sprintf("module %s %s (%s)", mod.Path, mod.Version, mod.Dir))
+	v.report.row("contract", resultOK, fmt.Sprintf("module %s %s (%s)", mod.Path, mod.Version, mod.Dir))
 
 	return mod, true
 }
@@ -420,7 +589,7 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 			methodNames(contract.Host.Interface.Methods))
 	}
 
-	v.table.row("interface", stepOK, detail)
+	v.report.row("interface", resultOK, detail)
 
 	return loaded, true
 }
@@ -481,7 +650,7 @@ func (v *validation) typings(res *resolved) (*typings.Typings, bool) {
 			typings.ErrStale, strings.Join(stale, ", "), res.desc.Implements, v.typesCommand(res)))
 	}
 
-	v.table.row("typings", stepOK, strings.Join(typ.Names(), ", ")+" up to date")
+	v.report.row("typings", resultOK, strings.Join(typ.Names(), ", ")+" up to date")
 
 	return typ, true
 }
@@ -541,14 +710,14 @@ func (v *validation) tsTypes(ctx context.Context, typ *typings.Typings, res *res
 	}
 
 	if len(diags) == 0 {
-		v.table.row("types", stepOK, fmt.Sprintf("the plugin type-checks against %s (%s)",
+		v.report.row("types", resultOK, fmt.Sprintf("the plugin type-checks against %s (%s)",
 			res.loaded.Contract.Interface.Type, typings.TypeScriptFile))
 
 		return true
 	}
 
 	for i := range diags {
-		v.table.row("types", stepFailed, diags[i].String())
+		v.report.row("types", resultFailed, diags[i].String())
 	}
 
 	return false
@@ -582,11 +751,11 @@ func (v *validation) goTypes(loaded *contractload.Loaded, desc *plg.Descriptor) 
 
 	switch {
 	case errors.Is(err, contractload.ErrGoUnchecked):
-		v.table.row("types", stepWarning, err.Error())
+		v.report.row("types", resultWarning, err.Error())
 	case err != nil:
 		return v.failed("types", err)
 	default:
-		v.table.row("types", stepOK, "the plugin's package type-checks against "+
+		v.report.row("types", resultOK, "the plugin's package type-checks against "+
 			loaded.Contract.Interface.Type.String())
 	}
 
@@ -613,7 +782,7 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 
 	switch {
 	case req.Dir != "":
-		v.table.row("go.mod", stepWarning, fmt.Sprintf("%s replaces %s by the directory %s: the pin %s is not "+
+		v.report.row("go.mod", resultWarning, fmt.Sprintf("%s replaces %s by the directory %s: the pin %s is not "+
 			"checked against it", req.GoMod, mod.Path, req.Dir, ref.Version))
 	case req.Version != ref.Version:
 		change := fmt.Sprintf("raise the pin in %s to %s@%s", filepath.Join(v.dir, "plugin.yaml"), ref.Name(),
@@ -626,14 +795,14 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 		return v.failed("go.mod", fmt.Errorf("%w: %s requires %s %s, plugin.yaml pins %s: %s", modfetch.ErrGoMod,
 			req.GoMod, mod.Path, req.Version, ref.Version, change))
 	default:
-		v.table.row("go.mod", stepOK, fmt.Sprintf("%s requires %s %s", req.GoMod, mod.Path, req.Version))
+		v.report.row("go.mod", resultOK, fmt.Sprintf("%s requires %s %s", req.GoMod, mod.Path, req.Version))
 	}
 
 	return true
 }
 
 // load loads the plugin with plg's own loading code and runs its Create in the real guest, with opts: its limits,
-// the author repository's ownership rule and its Go guest.
+// the author repository's ownership rule and its Go guest. The manifest step reported the ownership issue.
 func (v *validation) load(ctx context.Context, contract *offline.Contract, manifest []byte, desc *plg.Descriptor,
 	opts *offline.Options,
 ) bool {
@@ -644,18 +813,21 @@ func (v *validation) load(ctx context.Context, contract *offline.Contract, manif
 
 	ok := report.Error == nil
 	if ok {
-		v.table.row("load", stepOK, fmt.Sprintf("Create ran in the %s guest (version %s)", desc.Language,
+		v.report.row("load", resultOK, fmt.Sprintf("Create ran in the %s guest (version %s)", desc.Language,
 			report.Version))
 	} else {
-		v.table.row("load", stepFailed, *report.Error)
+		v.report.row("load", resultFailed, *report.Error)
 	}
 
 	if !ok && len(v.hosts) > 0 {
-		v.table.row("", stepHint, fmt.Sprintf("if Create takes a Host, pass -host <%s>",
-			strings.Join(v.hosts, "|")))
+		v.report.hint(fmt.Sprintf("if Create takes a Host, pass -host <%s>", strings.Join(v.hosts, "|")))
 	}
 
-	issues(v.table, report)
+	for _, issue := range report.Issues {
+		if issue.Code != plg.CodeOwnershipMissing {
+			v.report.issue(issue)
+		}
+	}
 
 	return ok
 }
@@ -665,19 +837,15 @@ func (v *validation) plugin(manifest []byte) *offline.Plugin {
 	return &offline.Plugin{Files: v.files, Key: v.key(), Manifest: manifest}
 }
 
-// tests runs the plugin's test cases, each in a fresh instance of the real guest, adding a row per case (and the
-// lines showing why it failed) and one summing them up.
-func (v *validation) tests(ctx context.Context, contract *offline.Contract, manifest []byte,
+// exercise runs the steps of the loaded plugin, each call in a fresh instance of the real guest, with contract's
+// Host answered by the test cases' stubs (failing every call outside a case): Validate with each example input,
+// the test cases, then the resource report of the cases' calls.
+func (v *validation) exercise(ctx context.Context, contract *offline.Contract, manifest []byte,
 	opts *offline.Options,
-) bool {
+) {
 	plugin := v.plugin(manifest)
-
+	examples := testcase.Examples(contract, plugin.Files)
 	files := testcase.Load(plugin.Files)
-	if len(files) == 0 {
-		v.table.row("tests", stepOK, "no test cases ("+testcase.Glob+")")
-
-		return true
-	}
 
 	stubbed := *contract
 	if contract.Host != nil {
@@ -686,13 +854,122 @@ func (v *validation) tests(ctx context.Context, contract *offline.Contract, mani
 		stubbed.Host = &host
 	}
 
-	faking := *opts
-	faking.Secrets = testcase.Secret // the running case's fakes
+	var runner offline.Runner
 
-	runner, err := offline.Open(ctx, &stubbed, plugin, &faking)
-	if err != nil {
-		return v.failed("tests", err)
+	if len(examples) > 0 || len(files) > 0 {
+		faking := *opts
+		faking.Secrets = testcase.Secret // the running case's fakes
+
+		var err error
+
+		runner, err = offline.Open(ctx, &stubbed, plugin, &faking)
+		if err != nil {
+			v.failed("tests", err)
+
+			return
+		}
 	}
+
+	v.examples(ctx, &stubbed, runner, examples)
+
+	calls := v.tests(ctx, &stubbed, plugin.Files, runner, files)
+
+	if runner != nil {
+		err := runner.Close(context.WithoutCancel(ctx))
+		if err != nil {
+			v.failed("tests", err)
+		}
+	}
+
+	v.resources(calls)
+}
+
+// examples calls the plugin's Validate with each example validation input, as a service registered with
+// plg.WithValidation would, adding a row per example (an error issue fails it: such a service would reject the
+// plugin) and one summing them up; without examples, a contract declaring a validation input gets a row saying so.
+func (v *validation) examples(ctx context.Context, contract *offline.Contract, runner offline.Runner,
+	examples []testcase.Example,
+) {
+	if len(examples) == 0 {
+		if contract.Validation != nil {
+			v.report.row("validate", resultOK, "no example inputs ("+testcase.ExamplesGlob+")")
+		}
+
+		return
+	}
+
+	failed := 0
+
+	for i := range examples {
+		if !v.example(ctx, contract, runner, &examples[i]) {
+			failed++
+		}
+	}
+
+	if failed > 0 {
+		v.failed("validate", fmt.Errorf("%w: %d of %d", errExamplesFailed, failed, len(examples)))
+
+		return
+	}
+
+	v.report.row("validate", resultOK, fmt.Sprintf("%d example %s", len(examples),
+		plural(len(examples), "input passes", "inputs pass")))
+}
+
+// errExamplesFailed reports example validation inputs that failed.
+var errExamplesFailed = errors.New("example validation inputs failed")
+
+// example calls Validate with the example input and adds its row; it reports whether the example passed.
+func (v *validation) example(ctx context.Context, contract *offline.Contract, runner offline.Runner,
+	example *testcase.Example,
+) bool {
+	switch {
+	case errors.Is(example.Err, testcase.ErrNoValidation):
+		v.report.about("example", resultWarning, example.Name, "not used: "+testcase.ErrNoValidation.Error())
+
+		return true
+	case example.Err != nil:
+		v.report.about("example", resultFailed, example.Name, example.Err.Error())
+
+		return false
+	default:
+	}
+
+	outcome := runner.Run(ctx, testcase.ValidateWith(contract, example.Input))
+	if outcome.Err != nil {
+		v.report.about("example", resultFailed, example.Name, "Validate failed: "+outcome.Err.Error())
+
+		return false
+	}
+
+	result, detail := exampleResult(outcome.Issues)
+	v.report.about("example", result, example.Name, detail)
+
+	for _, issue := range outcome.Issues {
+		v.report.issue(issue)
+	}
+
+	return result != resultFailed
+}
+
+// measured is what a test case's call took.
+type measured struct {
+	call string // the case: its file and name
+	used offline.Resources
+}
+
+// tests runs the test cases of files, each in a fresh instance by runner, adding a row per case (and the lines
+// showing why it failed) and one summing them up. It returns what the calls that ran took.
+func (v *validation) tests(ctx context.Context, contract *offline.Contract, plugin fs.FS, runner offline.Runner,
+	files []*testcase.File,
+) []measured {
+	if len(files) == 0 {
+		v.report.row("tests", resultOK, "no test cases ("+testcase.Glob+")")
+
+		return nil
+	}
+
+	var calls []measured
 
 	passed, failed := 0, 0
 
@@ -700,47 +977,48 @@ func (v *validation) tests(ctx context.Context, contract *offline.Contract, mani
 		if file.Err != nil {
 			failed++
 
-			v.table.row("test", stepFailed, file.Err.Error())
+			v.report.row("test", resultFailed, file.Err.Error())
 
 			continue
 		}
 
-		for _, result := range testcase.Run(ctx, &stubbed, plugin.Files, runner, file) {
+		for _, result := range testcase.Run(ctx, contract, plugin, runner, file) {
 			if v.result(file, &result) {
 				passed++
 			} else {
 				failed++
 			}
+
+			if result.Resources.Memory > 0 {
+				calls = append(calls, measured{call: file.Name + ": " + result.Case, used: result.Resources})
+			}
 		}
 	}
 
-	err = runner.Close(context.WithoutCancel(ctx))
-	if err != nil {
-		return v.failed("tests", err)
-	}
-
 	if failed > 0 {
-		return v.failed("tests", fmt.Errorf("%w: %d failed, %d passed", errTestsFailed, failed, passed))
+		v.failed("tests", fmt.Errorf("%w: %d failed, %d passed", errTestsFailed, failed, passed))
+	} else {
+		v.report.row("tests", resultOK, fmt.Sprintf("%d passed", passed))
 	}
 
-	v.table.row("tests", stepOK, fmt.Sprintf("%d passed", passed))
-
-	return true
+	return calls
 }
 
 // result adds the rows of a case of file that ran: one, and the lines showing why it failed. It reports whether the
 // case passed.
 func (v *validation) result(file *testcase.File, result *testcase.Result) bool {
+	subject := file.Name + ": " + result.Case
+
 	if result.Passed() {
-		v.table.row("test", stepOK, file.Name+": "+result.Case)
+		v.report.about("test", resultOK, subject, "")
 
 		return true
 	}
 
-	v.table.row("test", stepFailed, file.Name+": "+result.Case+": "+result.Failure)
+	v.report.about("test", resultFailed, subject, result.Failure)
 
 	for _, detail := range result.Details {
-		v.table.row("", "", detail)
+		v.report.line(detail)
 	}
 
 	return false
@@ -749,16 +1027,81 @@ func (v *validation) result(file *testcase.File, result *testcase.Result) bool {
 // errTestsFailed reports test cases that failed.
 var errTestsFailed = errors.New("test cases failed")
 
-// issues adds a row per issue of report.
-func issues(table *stepTable, report *adminjson.Report) {
-	for _, issue := range report.Issues {
-		at := ""
-		if issue.Field != "" {
-			at = " (" + issue.Field + ")"
+// resources adds the resource report: a row per test case's call, with its peak memory and time against its
+// limits, a warning when either is at or above the -near-limit share of its limit.
+func (v *validation) resources(calls []measured) {
+	for _, call := range calls {
+		used := call.used
+		memShare, timeShare := share(used.Memory, used.MemoryLimit), share(used.Duration, used.Timeout)
+
+		var near []string
+
+		if memShare >= v.nearLimit {
+			near = append(near, "memory")
 		}
 
-		table.row("", issue.Severity, fmt.Sprintf("%s%s: %s", issue.Code, at, issue.Message))
+		if timeShare >= v.nearLimit {
+			near = append(near, "time")
+		}
+
+		result, detail := resultOK, fmt.Sprintf("memory %s of %s (%.0f%%), time %s of %s (%.0f%%)",
+			mebibytes(used.Memory), mebibytes(used.MemoryLimit), percent*memShare, used.Duration.Round(roundTo),
+			used.Timeout, percent*timeShare)
+		if len(near) > 0 {
+			result = resultWarning
+			detail += fmt.Sprintf("; at or above %.0f%% of its %s %s", percent*v.nearLimit,
+				strings.Join(near, " and "), plural(len(near), "limit", "limits"))
+		}
+
+		v.report.about("resources", result, call.call, detail)
+
+		v.report.Resources = append(v.report.Resources, &callResources{
+			Call: call.call, NearLimit: near, MemoryBytes: used.Memory, MemoryLimitBytes: used.MemoryLimit,
+			DurationMs: durationMs(used.Duration), TimeoutMs: durationMs(used.Timeout),
+		})
 	}
+}
+
+// roundTo is what a call's time is rounded to in the resource report.
+const roundTo = 10 * time.Microsecond
+
+// percent turns a share into a percentage.
+const percent = 100
+
+// exampleResult is the result and detail of an example input Validate returned issues for.
+//
+//nolint:revive,gocritic // the result, then its detail (nonamedreturns forbids naming them)
+func exampleResult(issues []adminjson.Issue) (string, string) {
+	count := map[string]int{}
+	for _, issue := range issues {
+		count[issue.Severity]++
+	}
+
+	switch errs, warnings := count[string(plg.SeverityError)], count[string(plg.SeverityWarning)]; {
+	case errs > 0:
+		return resultFailed, fmt.Sprintf("%d error %s: a service validating with this input would reject the "+
+			"plugin", errs, plural(errs, "issue", "issues"))
+	case warnings > 0:
+		return resultWarning, fmt.Sprintf("%d warning %s", warnings, plural(warnings, "issue", "issues"))
+	case len(issues) > 0:
+		return resultOK, fmt.Sprintf("%d %s", len(issues), plural(len(issues), "issue", "issues"))
+	default:
+		return resultOK, "no issues"
+	}
+}
+
+// share returns used's share of limit; 0 without a limit.
+func share[N uint64 | time.Duration](used, limit N) float64 {
+	if limit <= 0 {
+		return 0
+	}
+
+	return float64(used) / float64(limit)
+}
+
+// mebibytes formats bytes in MiB.
+func mebibytes(bytes uint64) string {
+	return fmt.Sprintf("%.1f MiB", float64(bytes)/(1<<20)) //nolint:mnd // a MiB
 }
 
 // methodNames lists methods by name.

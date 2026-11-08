@@ -66,8 +66,8 @@ func TestValidateRunsPluginsUnderTheContractsLimits(t *testing.T) {
 // TestValidateBuildsAndCachesTheContractsGoGuest validates Go plugins importing encoding/xml, outside the default
 // Go guest's allowlist: one implements XMLParser, whose //plg:guest-packages encoding/xml makes validate build
 // that custom guest from the plugin's module and load the plugin in it; the other implements Parser, the same
-// interface without the directive, and fails to load in the default guest. Validating again finds the guest in
-// the guest cache: the same file, not rebuilt.
+// interface without the directive, and fails the sandbox step, which names the import the default guest cannot
+// provide. Validating again finds the guest in the guest cache: the same file, not rebuilt.
 func TestValidateBuildsAndCachesTheContractsGoGuest(t *testing.T) {
 	t.Parallel()
 
@@ -77,11 +77,13 @@ func TestValidateBuildsAndCachesTheContractsGoGuest(t *testing.T) {
 
 	plain := validate(environ, "goxmlplain", "-guest-cache", guests)
 	require.Equal(t, 1, plain.code, "%s%s", plain.stdout, plain.stderr)
-	assert.NotContains(t, plain.stdout, "guest ", "no directive, no custom guest")
-	assert.Regexp(t, `(?m)^load +FAIL +.*encoding/xml`, plain.stdout)
+	assert.NotRegexp(t, `(?m)^guest `, plain.stdout, "no directive, no custom guest")
+	assert.Regexp(t, `(?m)^sandbox +FAIL +plg: the plugin imports packages the Go guest cannot provide: `+
+		`plugin.go:7:2: "encoding/xml"$`, plain.stdout)
 
 	first := validate(environ, "goxml", "-guest-cache", guests)
 	require.Equal(t, 0, first.code, "%s%s", first.stdout, first.stderr)
+	assertOK(t, first.stdout, "sandbox", "no go statements, and imports only what the Go guest provides")
 
 	entries, err := os.ReadDir(guests)
 	require.NoError(t, err)

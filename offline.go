@@ -32,6 +32,30 @@ func init() {
 	offline.Defaults = offlineDefaults
 	offline.Open = openOffline
 	offline.CheckContract = checkOfflineContract
+	offline.Ownership = offlineOwnership
+	offline.LuaSyntax = checkLuaSyntax
+}
+
+// offlineOwnership is [offline.Ownership]: the missing-ownership issue a load adds to the manifest's report, an
+// error when required.
+//
+//nolint:revive // flag-parameter: required is the repository's requireOwnership setting, not a control flag
+func offlineOwnership(manifest []byte, required bool) ([]adminjson.Issue, error) {
+	desc, err := ParseManifest(manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	severity := SeverityWarning
+	if required {
+		severity = SeverityError
+	}
+
+	var report Report
+
+	checkOwnership(&report, desc.owner(), severity)
+
+	return newAdminIssues(report.Issues), nil
 }
 
 // checkOfflineContract is [offline.CheckContract]: it checks spec's interface and Host as checkOffline does.

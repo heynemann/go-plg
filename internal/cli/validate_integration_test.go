@@ -66,7 +66,8 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 					abs(t, "gogood"),
 					"go.mod",
 				) + " requires example.com/rewards v1.2.0\n",
-				"types      ok      the plugin's package type-checks against cohort.Provider\n",
+				"sandbox    ok      no go statements, and imports only what the Go guest provides\n" +
+					"types      ok      the plugin's package type-checks against cohort.Provider\n",
 				"load       ok      Create ran in the go guest (version ",
 			},
 		},
@@ -74,7 +75,7 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 			"manifest   ok      lua plugin luagood implementing example.com/rewards/cohort.Provider@v1.2.0\n",
 			"contract   ok      " + module + "\n",
 			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
-			"typings    ok      plg.d.lua up to date\n",
+			"typings    ok      plg.d.lua up to date\nsyntax     ok      every .lua file compiles\n",
 			"load       ok      Create ran in the lua guest (version ",
 		}},
 		{"tsgood", []string{
@@ -235,10 +236,12 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 			"import beyond the contract and the standard library",
 			[]string{"goimportsother"},
 			[]string{
-				"types      warning  the plugin was not type-checked: it imports example.com/other, and only the contract " +
-					"package, vendored packages and the standard library are type-checked\n",
-				"load       FAIL     plugin source failed to load: loading plugin: ",
-				`import "example.com/other" error: unable to find source related to: "example.com/other"`,
+				"go.mod     ok      ",
+				"sandbox    FAIL    plg: the plugin imports packages the Go guest cannot provide: plugin.go:5:2: " +
+					"\"example.com/other\"\n",
+				"           hint    the Go guest provides its allowlist (the standard library packages plg lists " +
+					"and github.com/heynemann/go-plg/plugin), the contract package, the plugin's vendor/ packages and " +
+					"the contract's //plg:guest-packages\n",
 			},
 		},
 		{"pinned to a version adding a method", []string{"newerpin"}, []string{
@@ -246,6 +249,15 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 			"interface  ok      cohort.Provider: IsMember, List, Size; Host cohort.Users: Tier (a stub: every call " +
 				"fails)\n",
 			"load       FAIL    plugin source failed to load: the table Create returned has no method Size\n",
+		}},
+		{"go statements", []string{"gogoroutine"}, []string{
+			"go.mod     ok      ",
+			"sandbox    FAIL    plg: go statements are not allowed in plugins: plugin.go:15:2, plugin.go:22:3\n",
+		}},
+		{"a module that does not compile, which only a call requires", []string{"luasyntax"}, []string{
+			"typings    ok      plg.d.lua up to date\n",
+			"syntax     FAIL    1 .lua file does not compile\n" +
+				"                   lib/tiers.lua:8: '}' expected near ']'\n",
 		}},
 	}
 
@@ -287,10 +299,31 @@ func TestValidateExplainsWhatItCannotResolve(t *testing.T) {
 func TestValidateUsage(t *testing.T) {
 	t.Parallel()
 
-	for _, args := range [][]string{nil, {"a", "b"}, {"-nope", "a"}} {
-		got := validate(nil, args...)
-		assert.Equal(t, 2, got.code, args)
-		assert.Contains(t, got.stderr, "plg validate: ", args)
+	const (
+		noOperand = "plg validate: name one plugin directory or author repository\n"
+		nearLimit = "plg validate: -near-limit must be above 0 and at most 1, not "
+	)
+
+	for _, tc := range []struct {
+		want string
+		args []string
+	}{
+		{args: nil, want: noOperand},
+		{args: []string{"a", "b"}, want: noOperand},
+		{args: []string{"-nope", "a"}, want: "plg validate: flag provided but not defined: -nope\n"},
+		{args: []string{"-format", "xml", "a"}, want: "plg validate: -format must be table or json, not \"xml\"\n"},
+		{
+			args: []string{"-color", "sometimes", "a"},
+			want: "plg validate: -color must be auto, always or never, not \"sometimes\"\n",
+		},
+		{args: []string{"-near-limit", "0", "a"}, want: nearLimit + "0\n"},
+		{args: []string{"-near-limit", "1.5", "a"}, want: nearLimit + "1.5\n"},
+		{args: []string{"-near-limit", "NaN", "a"}, want: nearLimit + "NaN\n"},
+	} {
+		got := validate(nil, tc.args...)
+		assert.Equal(t, 2, got.code, tc.args)
+		assert.True(t, strings.HasPrefix(got.stderr, tc.want), "%v: %s", tc.args, got.stderr)
+		assert.Empty(t, got.stdout, tc.args)
 	}
 }
 

@@ -3,10 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/heynemann/go-plg"
@@ -16,16 +14,16 @@ import (
 	"github.com/heynemann/go-plg/internal/typings"
 )
 
-// validateRepo validates every plugin the author repository in run.dir lists, in its plg.yaml's order: a section
-// per plugin (its directory, then the steps' table), then a summary table with a row per plugin.
-func validateRepo(base *validation) outcome {
+// validateRepo validates every plugin the author repository in run.dir lists, in its plg.yaml's order, and shows
+// the report: as a table, a section per plugin (its name, then its steps) as each is validated, then a summary
+// table with a row per plugin.
+func validateRepo(base *validation, out *output) outcome {
 	repo, err := authorrepo.Load(base.dir)
 	if err != nil {
 		return failure("validate", err)
 	}
 
-	summary := newTable(base.env.Stdout)
-	summary.row("PLUGIN", "RESULT", "DETAIL")
+	rep := &report{Version: reportVersion, Repository: repo.File(), Valid: true}
 
 	var invalid []string
 
@@ -33,37 +31,22 @@ func validateRepo(base *validation) outcome {
 		run := *base
 		run.dir, run.repo = filepath.Join(repo.Dir, filepath.FromSlash(plugin)), repo
 		run.arg = filepath.Join(base.arg, filepath.FromSlash(plugin))
-		run.table = newStepTable(base.env.Stdout)
+		run.report = newPluginReport(plugin, run.dir)
+		rep.Plugins = append(rep.Plugins, run.report)
 
-		_, err = fmt.Fprintf(base.env.Stdout, "%s\n", plugin)
-		if err != nil {
-			return failure("validate", err)
-		}
-
-		run.table.row("STEP", "RESULT", "DETAIL")
-
-		valid := run.run(context.Background())
-
-		err = run.table.flush()
-		if err == nil {
-			_, err = fmt.Fprintln(base.env.Stdout)
-		}
-
-		if err != nil {
-			return failure("validate", err)
-		}
-
-		result := stepOK
-		if !valid {
-			result = stepFailed
+		if !run.run(context.Background()) {
+			rep.Valid = false
 
 			invalid = append(invalid, plugin)
 		}
 
-		summary.row(plugin, result, run.table.summary())
+		err = out.plugin(base.env.Stdout, rep, run.report)
+		if err != nil {
+			return failure("validate", err)
+		}
 	}
 
-	err = summary.flush()
+	err = out.show(base.env.Stdout, rep)
 	if err != nil {
 		return failure("validate", err)
 	}
@@ -93,7 +76,7 @@ func (v *validation) repository() bool {
 		return v.findRepository()
 	}
 
-	v.table.row(authorrepo.FileName, stepOK, settings(v.repo))
+	v.report.row(authorrepo.FileName, resultOK, settings(v.repo))
 
 	return true
 }
@@ -112,7 +95,7 @@ func (v *validation) findRepository() bool {
 	}
 
 	if _, listed := repo.Lists(v.dir); !listed {
-		v.table.row(authorrepo.FileName, stepWarning, repo.File()+" does not list this plugin: it is validated "+
+		v.report.row(authorrepo.FileName, resultWarning, repo.File()+" does not list this plugin: it is validated "+
 			"without the repository's settings")
 
 		return true
@@ -182,7 +165,7 @@ func (v *validation) shared(desc *plg.Descriptor) (func(), bool) {
 		detail = "copied " + strings.Join(copied, ", ")
 	}
 
-	v.table.row("shared", stepOK, detail)
+	v.report.row("shared", resultOK, detail)
 
 	v.files = os.DirFS(dir)
 
@@ -210,50 +193,10 @@ func (v *validation) replaced(ref contractref.Ref) (*modfetch.Module, error) {
 			ref.Package, authorrepo.FileName, replace.Path, replace.Dir, pkgDir)
 	}
 
-	v.table.row("contract", stepWarning, fmt.Sprintf("module %s replaced by the directory %s (%s): the pin %s is "+
+	v.report.row("contract", resultWarning, fmt.Sprintf("module %s replaced by the directory %s (%s): the pin %s is "+
 		"not checked against it", replace.Path, replace.Dir, authorrepo.FileName, ref.Version))
 
 	return &modfetch.Module{Path: replace.Path, Version: contractref.Devel, Dir: replace.Dir}, nil
-}
-
-// stepTable is a validation's table of steps, which also counts its warnings and remembers the first step that
-// failed.
-type stepTable struct {
-	*table
-
-	failedStep string
-	warnings   int
-}
-
-func newStepTable(out io.Writer) *stepTable {
-	return &stepTable{table: newTable(out)}
-}
-
-// row writes one row of cells: step, result, detail.
-func (t *stepTable) row(cells ...string) {
-	if len(cells) > 1 {
-		switch {
-		case cells[1] == stepFailed && t.failedStep == "":
-			t.failedStep = cells[0]
-		case cells[1] == stepWarning:
-			t.warnings++
-		default:
-		}
-	}
-
-	t.table.row(cells...)
-}
-
-// summary describes the validation in a word: the step that failed, or the warnings.
-func (t *stepTable) summary() string {
-	switch {
-	case t.failedStep != "":
-		return "failed at " + t.failedStep
-	case t.warnings > 0:
-		return strconv.Itoa(t.warnings) + " " + plural(t.warnings, "warning", "warnings")
-	default:
-		return ""
-	}
 }
 
 // sharedDirs is where the plugin finds its repository's shared directories, for the editor configuration its

@@ -1305,3 +1305,81 @@ func TestFormatWritesValuesAsCasesDo(t *testing.T) {
 		assert.Equal(t, tc.want, testcase.Format(reflect.ValueOf(tc.value)))
 	}
 }
+
+// TestExamplesDecodeTheValidationInput reads the example validation inputs, examples/validation/*.yaml, in name
+// order: each decodes into the contract's validation input, a $ref taking it from a fixture; one that does not parse
+// or decode fails alone, naming where; without a validation input in the contract every example fails with
+// ErrNoValidation. ValidateWith is the call of Validate with an example.
+func TestExamplesDecodeTheValidationInput(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"examples/validation/b.yaml":    {Data: []byte("maxPercent: 5\n")},
+		"examples/validation/a.yaml":    {Data: []byte("{$ref: fixtures/limits.yaml}\n")},
+		"examples/validation/c.yaml":    {Data: []byte("maxPercent: high\n")},
+		"examples/validation/d.yaml":    {Data: []byte("maxPercent: [\n")},
+		"examples/validation/notes.txt": {Data: []byte("not an example")},
+		"examples/other.yaml":           {Data: []byte("maxPercent: 1\n")},
+		"fixtures/limits.yaml":          {Data: []byte("maxPercent: 20\n")},
+	}
+
+	contract := newContract()
+	got := testcase.Examples(contract, files)
+	require.Len(t, got, 4)
+
+	for i, name := range []string{"a", "b", "c", "d"} {
+		assert.Equal(t, "examples/validation/"+name+".yaml", got[i].Name)
+	}
+
+	require.NoError(t, got[0].Err)
+	assert.Equal(t, limits{MaxPercent: 20}, got[0].Input.Interface())
+	require.NoError(t, got[1].Err)
+	assert.Equal(t, limits{MaxPercent: 5}, got[1].Input.Interface())
+	require.EqualError(t, got[2].Err, `examples/validation/c.yaml:1:13: example.maxPercent: str "high" is not an `+
+		`integer (int)`)
+	require.ErrorContains(t, got[3].Err, "examples/validation/d.yaml: ")
+
+	call := testcase.ValidateWith(contract, got[1].Input)
+	assert.Equal(t, validateMethod, call.Method)
+	assert.Equal(t, []reflect.Value{got[1].Input}, call.Args)
+	assert.Nil(t, call.HTTP, "Validate's examples make no requests")
+
+	contract.Validation = nil
+
+	for _, example := range testcase.Examples(contract, files) {
+		require.ErrorIs(t, example.Err, testcase.ErrNoValidation, example.Name)
+		require.ErrorContains(t, example.Err, example.Name+": the contract declares no validation input "+
+			"(//plg:validation)")
+		assert.False(t, example.Input.IsValid())
+	}
+
+	assert.Empty(t, testcase.Examples(newContract(), fstest.MapFS{}), "no examples")
+}
+
+// TestResultsCarryWhatTheCallTook keeps the resources the runner measured for a case's call, passed or failed, and
+// none for a case that did not run.
+func TestResultsCarryWhatTheCallTook(t *testing.T) {
+	t.Parallel()
+
+	used := offline.Resources{Memory: 3 << 20, MemoryLimit: 16 << 20, Duration: time.Millisecond, Timeout: time.Second}
+	plugin := &runner{play: func(context.Context, *offline.Call) offline.Outcome {
+		return offline.Outcome{
+			Results:   []reflect.Value{reflect.ValueOf([]int{5, 5}), reflect.ValueOf(0)},
+			Resources: used,
+		}
+	}}
+
+	got := run(t, cases(`
+  - {name: passes, call: Split, input: {cents: 10, parts: 2}, expect: {result: [[5, 5], 0]}}
+  - {name: fails, call: Split, input: {cents: 10, parts: 2}, expect: {result: [[10], 0]}}
+  - {name: malformed, call: Split, input: {cents: ten, parts: 2}}
+`), plugin)
+	require.Len(t, got, 3)
+	assert.True(t, got[0].Passed())
+	assert.Equal(t, used, got[0].Resources)
+	assert.False(t, got[1].Passed())
+	assert.Equal(t, used, got[1].Resources)
+	assert.False(t, got[2].Passed())
+	assert.Zero(t, got[2].Resources, "never ran")
+	assert.Len(t, plugin.calls, 2)
+}

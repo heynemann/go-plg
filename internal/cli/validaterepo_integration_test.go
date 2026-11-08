@@ -133,9 +133,9 @@ func TestValidateRepoValidatesEveryPlugin(t *testing.T) {
 
 // TestValidateRepoAppliesItsSettings validates plugins under a plg.yaml setting limits and requiring ownership:
 // the memory limit fails the plugin whose Create holds 24 MiB, the timeout stops the one whose Create never
-// returns, and the plugin without an owner fails; the summary names the step each failed at and plg validate
-// exits 1. The same plugins pass without those settings (but the one never returning), the missing owner a
-// warning.
+// returns, and the plugin without an owner fails its manifest step, before anything is loaded; the summary names
+// the step each failed at and plg validate exits 1. The same plugins pass without those settings (but the one never
+// returning), the missing owner a warning.
 func TestValidateRepoAppliesItsSettings(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +149,7 @@ func TestValidateRepoAppliesItsSettings(t *testing.T) {
 	assert.Equal(t, "plg validate: 3 of the 3 plugins "+filepath.Join(strict, "plg.yaml")+" lists are not valid: "+
 		"hungry, spins, unowned\n", got.stderr[strings.LastIndex(strings.TrimSuffix(got.stderr, "\n"), "\n")+1:])
 
-	for _, plugin := range []string{"hungry", "spins", "unowned"} {
+	for _, plugin := range []string{"hungry", "spins"} {
 		steps := section(t, got.stdout, plugin)
 		assert.Contains(t, steps, "plg.yaml   ok      "+filepath.Join(strict, "plg.yaml")+"; ownership required\n",
 			plugin)
@@ -160,13 +160,15 @@ func TestValidateRepoAppliesItsSettings(t *testing.T) {
 		"not enough memory")
 	assert.Contains(t, section(t, got.stdout, "spins"), "load       FAIL    ")
 	assert.Contains(t, section(t, got.stdout, "spins"), "deadline exceeded")
-	assert.Contains(t, section(t, got.stdout, "unowned"), "load       FAIL    plg: load blocked by an error issue: "+
-		"plg.ownership.missing: plugin.yaml's owner lacks team.name and one of contact.oncall, contact.channel, "+
-		"contact.email\n           error   plg.ownership.missing (owner): ")
+	assert.Equal(t, "     RESULT  DETAIL\n"+ // after "STEP "
+		"plg.yaml  ok      "+filepath.Join(strict, "plg.yaml")+"; ownership required\n"+
+		"manifest  FAIL    lua plugin unowned implementing example.com/rewards/cohort.Provider@v1.2.0\n"+
+		"          error   plg.ownership.missing (owner): plugin.yaml's owner lacks team.name and one of "+
+		"contact.oncall, contact.channel, contact.email", section(t, got.stdout, "unowned"))
 	assert.True(t, strings.HasSuffix(got.stdout, "PLUGIN   RESULT  DETAIL\n"+
 		"hungry   FAIL    failed at load\n"+
 		"spins    FAIL    failed at load\n"+
-		"unowned  FAIL    failed at load\n"), got.stdout)
+		"unowned  FAIL    failed at manifest\n"), got.stdout)
 
 	lenient := copyRepo(t, "plugins: [hungry, unowned]\n", map[string]string{})
 

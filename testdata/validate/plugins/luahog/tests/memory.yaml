@@ -1,0 +1,9 @@
+cases:
+  - name: a small string
+    call: Apply
+    input: {n: 0}
+    expect: {result: 0}
+  - name: a big string
+    call: Apply
+    input: {n: 6}
+    expect: {result: 6291456}

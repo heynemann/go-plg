@@ -174,6 +174,21 @@ type Outcome struct {
 	Results []reflect.Value
 	// Issues are the issues Validate returned, when it succeeded.
 	Issues []adminjson.Issue
+	// Resources are what the call took in its instance; zero when no instance started (its Create failed).
+	Resources Resources
+}
+
+// Resources are what a [Runner] call took, against the limits it ran under.
+type Resources struct {
+	// Memory is the size of the instance's linear memory once the call returned: its peak, since wasm memory
+	// only grows (what Create took included).
+	Memory uint64
+	// MemoryLimit is the instance's memory limit.
+	MemoryLimit uint64
+	// Duration is how long the call ran, Create not included.
+	Duration time.Duration
+	// Timeout bounds the call.
+	Timeout time.Duration
 }
 
 // CheckContract checks contract's interface and Host as [Check] checks them before loading a plugin, failing with
@@ -182,3 +197,18 @@ type Outcome struct {
 //
 //nolint:gochecknoglobals // the seam's third entry, set with Check from plg's init
 var CheckContract func(contract *Contract) error
+
+// Ownership checks the owner block of the plugin.yaml manifest as a load checks it: it returns the missing-
+// ownership issue (an error when required, as plg.WithRequiredOwnership makes it, else a warning), none when the
+// owner is complete; it fails when the manifest is invalid. Package plg sets it.
+//
+//nolint:gochecknoglobals // the seam's fourth entry, set with Check from plg's init
+var Ownership func(manifest []byte, required bool) ([]adminjson.Issue, error)
+
+// LuaSyntax compiles every .lua file of a Lua plugin's files with the Lua guest's compiler, without running any,
+// and returns the syntax error of each that does not compile (file:line: message), in name order: plg validate
+// checks the modules a plugin requires only when a call needs them too. It fails when the guest cannot run. Package
+// plg sets it.
+//
+//nolint:gochecknoglobals // the seam's fifth entry, set with Check from plg's init
+var LuaSyntax func(ctx context.Context, files fs.FS, opts *Options) ([]string, error)

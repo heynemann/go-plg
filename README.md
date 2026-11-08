@@ -513,11 +513,16 @@ test       ok      tests/members.yaml: the directory's error is the call's
 tests      ok      2 passed
 ```
 
-The steps run in order and stop at the first that fails; the command then exits 1 (2 for a usage error), the
-table on stdout and `plg validate: <dir> is not a valid plugin` on stderr, where plg's log (the plugin's own
-output, compiles, issues) also goes.
+The steps run in order (plg.yaml, manifest, shared, contract, interface, limits, then the language checks: go.mod,
+sandbox, types and guest for Go plugins, typings and types for TypeScript, typings and syntax for Lua; then load,
+Validate's examples, the test cases and the resource report) and stop at the first that fails, except that once
+the plugin loads the examples, the test cases and the resource report all run. The command exits 1 when any step
+failed (2 for a usage error) and 0 when there are only warnings, with `plg validate: <dir> is not a valid plugin`
+on stderr, where plg's log (the plugin's own output, compiles, issues) also goes.
 
-- **manifest:** `plugin.yaml` is read with `plg.ParseManifest`; the plugin's key is its directory's name.
+- **manifest:** `plugin.yaml` is read with `plg.ParseManifest`; the plugin's key is its directory's name. Its
+  ownership is checked here: a missing owner is a warning issue, or fails the step when the author repository sets
+  `requireOwnership`.
 - **contract:** the contract module is resolved at the version `implements` pins, through the local `go` command
   (`go mod download -json`), so `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `.netrc` credentials and the Go module cache
   work as for any Go build: once the module is in the cache, validating needs no network (`GOPROXY=off` works). The
@@ -567,14 +572,59 @@ output, compiles, issues) also goes.
   finds it there and builds nothing; being the same bytes, its compiled form is a compilation-cache hit too.
 - **load:** the plugin is checked as [`plg.Check`](#checking-a-candidate-plgcheck) checks a candidate, against a
   registration of the resolved contract (its module's version is the one the pin is checked against, by the same
-  rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
-  guest's own checks, then `Create` in one throwaway instance of the real guest. The plugins get a stub Host whose
+  rule as at Register): the snapshot limits, the guest's own checks, then `Create` in one throwaway instance of the
+  real guest (ownership is the manifest step's). The plugins get a stub Host whose
   every method fails with `plg validate runs plugins without the service's Host: <Host>.<Method> was called`.
   A Go plugin's `Create` names its Host. Lua and TypeScript plugins name none: their Host is the one their typings
   were written for (the `Host:` line of their header); without typings, when the contract package declares exactly
   one other interface that passes plg's Host checks, it is their Host; with several, a failed `load` row is
   followed by the hint `pass -host <A|B>`, and `-host <Interface>` (an interface of the contract package) picks one.
   Issues follow the `load` row, one row each.
+- **sandbox** (Go plugins, before `types`): the plugin may not start goroutines (a `go` statement, the check
+  Register and `plg gen` make too) nor import what the Go guest cannot provide: only the guest's allowlisted
+  standard library, the contract package, its `vendor/` packages and the contract's `//plg:guest-packages`. Each
+  offending statement or import is named at its file:line:column, with a hint.
+- **syntax** (Lua plugins): every `.lua` file of the plugin is compiled, without running it, by the real Lua
+  guest, so a module only `require`d later, inside a call, is checked too (`lib/tiers.lua:4: 'end' expected …`).
+- **validate / example:** each `examples/validation/*.yaml` file is an input of the plugin's `Validate`, decoded
+  strictly (as test case inputs, `{$ref: …}` reading test fixtures) into the contract's `//plg:validation` type,
+  one `example` row each: an issue of error severity fails it, a warning issue is a warning. Examples of a
+  contract with no validation input are warnings; the `validate` row sums them up (`no example inputs` without).
+- **resources:** after the [test cases](#test-cases-testsyaml), one row per case: the peak memory of its instance
+  (Create's included; WebAssembly memory only grows) against the memory limit, and the call's time against its
+  timeout. A case at or above `-near-limit` of either (a share, default 0.8) is a warning:
+  `resources  warning  tests/memory.yaml: a big string: memory 14.1 MiB of 16.0 MiB (88%), time 3ms of 300ms (1%);
+  at or above 80% of its memory limit`.
+
+**Output.** The table is coloured (`-color auto|always|never`; `auto` colours only a terminal, and never with
+`NO_COLOR` set or `TERM=dumb`). `-format json` prints, instead of the tables, a JSON report whose schema is
+stable: fields are only added within a `version`; removing or changing one raises it.
+
+```jsonc
+{
+  "version": 1,
+  "valid": false,                      // every plugin valid
+  "repository": "/repo/plg.yaml",      // only for an author repository
+  "plugins": [{
+    "plugin": "rules/gold", "dir": "/repo/rules/gold",
+    "valid": false, "failedStep": "test", "warnings": 2,
+    "steps": [                         // in the order they ran; a test case or an example is one step each
+      {"step": "manifest", "result": "warning", "detail": "lua plugin gold implementing …",
+       "issues": [{"severity": "warning", "code": "plg.ownership.missing", "message": "no owner", "field": "owner"}]},
+      {"step": "test", "result": "failed", "subject": "tests/a.yaml: silver members",
+       "detail": "IsMember returned other results", "lines": ["result: expected true, got false"]},
+      {"step": "load", "result": "failed", "detail": "…", "hint": "if Create takes a Host, pass -host <A|B>"}
+    ],
+    "resources": [{"call": "tests/a.yaml: gold members", "nearLimit": ["memory"], "memoryBytes": 15728640,
+                   "memoryLimitBytes": 16777216, "durationMs": 1.5, "timeoutMs": 300}]
+  }]
+}
+```
+
+`result` is `ok`, `failed` or `warning`; `subject`, `hint`, `lines`, `issues`, `failedStep`, `nearLimit` and
+`resources` are left out when empty; `warnings` counts the warning issues and the warning steps holding none.
+`-junit <file>` also writes the report as JUnit XML for CI: a `testsuite` per plugin and a `testcase` per step
+(named `<step>` or `<step>: <subject>`), failed when the step failed, with its detail as the message.
 
 `-cache-dir` sets the guests' (and the TypeScript compiler's) compilation cache, as for
 [`plg warm`](#deployment-plg-warm-and-plg-build-guest); `plg warm -validate` compiles the TypeScript compiler

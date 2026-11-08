@@ -13,6 +13,7 @@ import (
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
+	"github.com/heynemann/go-plg/internal/gorestrict"
 	"github.com/heynemann/go-plg/internal/memfs"
 )
 
@@ -132,12 +133,6 @@ func (v *validation) goType() (*goabi.Type, error) {
 // goExt is the extension of Go source files.
 const goExt = ".go"
 
-// isGoSource reports whether the entry named name is a Go source file a plugin instance receives: a regular .go
-// file that is not a test.
-func isGoSource(name string, entry fs.DirEntry) bool {
-	return entry.Type().IsRegular() && path.Ext(name) == goExt && !strings.HasSuffix(name, "_test.go")
-}
-
 // goValidateMissing explains a Go plugin version whose instance has no method want (Validate of the expected
 // signature), from the plugin's package source (the directory of its entrypoint): the Validate methods it
 // declares, with their positions, or that it declares none. yaegi binds a Validate of another signature as no
@@ -155,7 +150,7 @@ func goValidateMissing(files fs.FS, entrypoint, want string) string {
 
 	for _, entry := range entries {
 		name := path.Join(dir, entry.Name())
-		if isGoSource(name, entry) {
+		if gorestrict.IsSource(name, entry) {
 			declared = append(declared, declaredValidates(files, fset, name)...)
 		}
 	}
@@ -287,47 +282,15 @@ func goPackageDir(files fs.FS, entrypoint string) (string, error) {
 	}
 }
 
-// checkNoGoStatements parses every regular .go file below dir except tests, the source a Go plugin instance
-// receives (symbolic links are not copied into it), and fails with [ErrGoStatement] naming the position
+// checkNoGoStatements checks the source a Go plugin instance receives, every Go source file below dir (symbolic
+// links are not copied into it), with [gorestrict.Check]: it fails with [ErrGoStatement] naming the position
 // (file:line:column, the file relative to the plugin's fs.FS) of every go statement. A file that does not parse
 // fails the load as the guest would.
 func checkNoGoStatements(files fs.FS, dir string) error {
-	fset := token.NewFileSet()
-
-	var found []string
-
-	err := fs.WalkDir(files, dir, func(name string, entry fs.DirEntry, err error) error {
-		if err != nil || !isGoSource(name, entry) {
-			return err
-		}
-
-		src, err := fs.ReadFile(files, name)
-		if err != nil {
-			return fmt.Errorf("reading the plugin source: %w", err)
-		}
-
-		file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
-		if err != nil {
-			return fmt.Errorf("%w: %w", errGuestLoad, err)
-		}
-
-		ast.Inspect(file, func(node ast.Node) bool {
-			if stmt, ok := node.(*ast.GoStmt); ok {
-				found = append(found, fset.Position(stmt.Go).String())
-			}
-
-			return true
-		})
-
-		return nil
-	})
-	if err != nil {
-		return err //nolint:wrapcheck // the callback's errors are wrapped already; WalkDir adds the path to its own
+	err := gorestrict.Check(files, dir, nil)
+	if syntax, ok := errors.AsType[*gorestrict.SyntaxError](err); ok {
+		return fmt.Errorf("%w: %w", errGuestLoad, syntax.Err)
 	}
 
-	if len(found) > 0 {
-		return fmt.Errorf("%w: %s", ErrGoStatement, strings.Join(found, ", "))
-	}
-
-	return nil
+	return err //nolint:wrapcheck // gorestrict's errors name the positions, plg's sentinel among them
 }

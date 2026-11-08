@@ -33,6 +33,7 @@ import (
 	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goallow"
+	"github.com/heynemann/go-plg/internal/gorestrict"
 )
 
 // Errors returned by [Generate] and [Write], wrapped with details.
@@ -191,7 +192,9 @@ func Load(dir, importPath string, imp types.Importer) (*Package, error) {
 			continue
 		}
 
-		disallowed = append(disallowed, disallowedImports(fset, file)...)
+		for _, refused := range gorestrict.Refused(fset, file, goallow.Allowed) {
+			disallowed = append(disallowed, "\t"+refused)
+		}
 
 		if builds {
 			files = append(files, file)
@@ -331,20 +334,6 @@ func parseFile(fset *token.FileSet, dir string, pkgDir fs.FS, entry fs.DirEntry)
 	}
 
 	return file, match, nil
-}
-
-// disallowedImports lists the imports of file outside the guest allowlist, with their positions.
-func disallowedImports(fset *token.FileSet, file *ast.File) []string {
-	var disallowed []string
-
-	for _, imp := range file.Imports {
-		// Import paths cannot contain quotes; one spelled with escapes (legal, unheard of) is refused as written.
-		if !goallow.Allowed(strings.Trim(imp.Path.Value, "\"`")) {
-			disallowed = append(disallowed, fmt.Sprintf("\t%s: %s", fset.Position(imp.Path.Pos()), imp.Path.Value))
-		}
-	}
-
-	return disallowed
 }
 
 // Interface returns the interface the package declares as name, and its underlying interface: a named,

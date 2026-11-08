@@ -87,7 +87,8 @@ func runDev(env *Env, args []string) outcome {
 	session := &devSession{
 		env: env, base: validation{
 			env: env, dir: resolve(env.Dir, arg), arg: arg, host: *host, cacheDir: resolve(env.Dir, *cacheDir),
-			modules: &modules{resolved: map[contractref.Ref]modfetch.Module{}},
+			modules: &modules{resolved: map[contractref.Ref]modfetch.Module{}}, nearLimit: defaultNearLimit,
+			ownership: true,
 		},
 	}
 
@@ -194,22 +195,21 @@ func (s *devSession) watched() []string {
 	return paths
 }
 
-// run returns a fresh validation of the plugin, its steps' rows going to out.
-func (s *devSession) run(out io.Writer) *validation {
+// run returns a fresh validation of the plugin.
+func (s *devSession) run() *validation {
 	v := s.base
-	v.table = newStepTable(out)
+	v.report = newPluginReport(v.arg, v.dir)
 
 	return &v
 }
 
 // validate validates the plugin as plg validate does, reusing the contract modules earlier runs resolved.
 func (s *devSession) validate(ctx context.Context) {
-	run := s.run(s.env.Stdout)
-	run.table.row("STEP", "RESULT", "DETAIL")
-
+	run := s.run()
 	valid := run.run(ctx)
+	run.report.finish()
 
-	err := run.table.flush()
+	err := run.report.steps(s.env.Stdout, wantsColour(s.env, colourAuto))
 	if err != nil {
 		return
 	}
@@ -263,12 +263,11 @@ func (s *devSession) callCommand(ctx context.Context, args []string) {
 func (s *devSession) call(ctx context.Context, method, input string) {
 	var steps strings.Builder
 
-	v := s.run(&steps)
-	v.table.row("STEP", "RESULT", "DETAIL") // shown when a step fails, to say why
+	v := s.run()
 
 	result, err := v.invoke(ctx, method, input)
-	if errors.Is(err, errSteps) {
-		_ = v.table.flush() //nolint:errcheck // a Builder never fails
+	if errors.Is(err, errSteps) { // the steps say why
+		_ = v.report.steps(&steps, false) //nolint:errcheck // a Builder never fails
 
 		s.printf("%s%s failed: %v\n", steps.String(), method, err)
 

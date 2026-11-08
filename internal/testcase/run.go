@@ -28,6 +28,9 @@ type Result struct {
 	// Details are the lines showing the failure: the expected and actual values (for structs, lists and maps, a
 	// line per difference), and the stubs' problems.
 	Details []string
+	// Resources are what the case's call took; zero when it did not run (the case is malformed or its instance
+	// did not start).
+	Resources offline.Resources
 }
 
 // Passed reports whether the case passed.
@@ -71,7 +74,7 @@ func runCase(ctx context.Context, contract *offline.Contract, files fs.FS, runne
 	})
 
 	verdict := prepared.check(&outcome)
-	result.Failure, result.Details = verdict.failure, verdict.details
+	result.Failure, result.Details, result.Resources = verdict.failure, verdict.details, outcome.Resources
 
 	problems := prepared.state.problems()
 	if len(problems) > 0 && result.Failure == "" {
