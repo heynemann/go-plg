@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"testing/fstest"
@@ -594,6 +595,55 @@ func TestStatusFailures(t *testing.T) {
 			assert.NotContains(t, stderr, "s3cret", "no error shows a URL's password")
 		})
 	}
+}
+
+// TestStatusFollowsNoRedirect: an admin URL answering with a redirect, here to another port of the same host, where
+// Go's client would carry the bearer token, fails plg status and plg events with the redirect's status and target,
+// and the token never reaches the target; a redirect without a target fails likewise.
+func TestStatusFollowsNoRedirect(t *testing.T) {
+	t.Parallel()
+
+	var reached atomic.Int32 // requests the redirect's target got
+
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		reached.Add(1)
+		assert.Empty(t, req.Header.Get("Authorization"), "the token never reaches the redirect's target")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+
+	redirecting := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/nowhere/") {
+			writer.WriteHeader(http.StatusMultipleChoices)
+
+			return
+		}
+
+		writer.Header().Set("Location", target.URL+req.URL.Path)
+		writer.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(redirecting.Close)
+
+	env := &environment{srv: redirecting, home: t.TempDir()}
+	profiles := func(mount string) string {
+		return "profiles:\n  - name: p\n    url: " + redirecting.URL + mount + "\n    token: {env: PLG_STAGING_TOKEN}\n"
+	}
+
+	const advice = " (plg follows no redirect, which would carry the token: set the profile's url to where the " +
+		"handler is)\n"
+
+	writeProfiles(t, filepath.Join(env.home, ".config"), profiles("/admin"))
+	assert.Equal(t, "plg status: profile p: GET "+redirecting.URL+"/admin/plugins: the admin handler answered 302 "+
+		"Found to "+target.URL+"/admin/plugins"+advice, env.fails(t, nil, "status"))
+	assert.Equal(t, "plg events: profile p: GET "+redirecting.URL+"/admin/plugins/ping/search/events: the admin "+
+		"handler answered 302 Found to "+target.URL+"/admin/plugins/ping/search/events"+advice,
+		env.fails(t, nil, "events", "ping/search"))
+
+	writeProfiles(t, filepath.Join(env.home, ".config"), profiles("/nowhere"))
+	assert.Equal(t, "plg status: profile p: GET "+redirecting.URL+"/nowhere/plugins: the admin handler answered "+
+		"300 Multiple Choices"+advice, env.fails(t, nil, "status"))
+
+	assert.Zero(t, reached.Load(), "plg follows no redirect")
 }
 
 // TestStatusOfAClosedContainer reports the handler's 503 once the service closed its container.

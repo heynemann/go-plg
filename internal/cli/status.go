@@ -154,8 +154,16 @@ func (f adminFlags) client(ctx context.Context, cmd string, env *Env) (*adminCli
 	}
 
 	return &adminClient{
-		http: &http.Client{Timeout: adminTimeout}, base: prof.base, token: token, profile: prof.Name,
+		http: &http.Client{Timeout: adminTimeout, CheckRedirect: followNoRedirect}, base: prof.base, token: token,
+		profile: prof.Name,
 	}, outcome{}, true
+}
+
+// followNoRedirect stops the admin client at a redirect, which refused then reports: Go's client would follow it
+// with the bearer token to the same host on any port or scheme, or to a subdomain, and plg.AdminHandler never
+// redirects.
+func followNoRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // show writes answer to out in the chosen format: indented JSON, or what table writes.
@@ -282,8 +290,12 @@ func (c *adminClient) get(ctx context.Context, target *url.URL, out any) error {
 
 // refused explains an answer other than 200: its status and the handler's message ({"error": …}) or, from
 // anything else (the service's own authentication, a proxy), the start of its body, on one line without control
-// characters.
+// characters. A redirect is explained by redirected.
 func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
+	if answer.StatusCode >= http.StatusMultipleChoices && answer.StatusCode < http.StatusBadRequest {
+		return c.redirected(target, answer)
+	}
+
 	body, err := io.ReadAll(io.LimitReader(answer.Body, maxErrorAnswer))
 	if err != nil { // the status alone says what happened
 		body = nil
@@ -306,4 +318,18 @@ func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
 	}
 
 	return fmt.Errorf("profile %s: GET %s: %w %s", c.profile, target.Redacted(), errAnswer, msg)
+}
+
+// redirected explains a redirect, which the client does not follow (see followNoRedirect): its status and where
+// it led, when it says.
+func (c *adminClient) redirected(target *url.URL, answer *http.Response) error {
+	msg := answer.Status
+
+	to, err := answer.Location()
+	if err == nil {
+		msg += " to " + to.Redacted()
+	}
+
+	return fmt.Errorf("profile %s: GET %s: %w %s (plg follows no redirect, which would carry the token: set the "+
+		"profile's url to where the handler is)", c.profile, target.Redacted(), errAnswer, msg)
 }
