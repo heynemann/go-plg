@@ -384,9 +384,10 @@ func TestCheckGoChecksVendoredPackages(t *testing.T) {
 }
 
 // TestCheckGoChecksTheFilesTheGuestLoads leaves out the files the Go guest's interpreter skips, in the plugin and
-// its vendored packages: names starting with "_" or ".", names of another GOOS or GOARCH than wasip1/wasm, and
-// files whose `// +build` lines do not hold. It reads no `//go:build` line, so a file only that line excludes is
-// checked, and refused as the guest refuses it.
+// its vendored packages (see gorestrict.GuestLoads): names starting with "_" or ".", names of another GOOS or GOARCH
+// than wasip1/wasm that yaegi knows, and files whose `// +build` lines do not hold; it checks names ending in a GOOS
+// or GOARCH yaegi does not know, which the guest loads. It reads no `//go:build` line, so a file only that line
+// excludes is checked, and refused as the guest refuses it.
 //
 //nolint:paralleltest // as TestDescribesContractsAsReflectionDoes
 func TestCheckGoChecksTheFilesTheGuestLoads(t *testing.T) {
@@ -397,7 +398,9 @@ func TestCheckGoChecksTheFilesTheGuestLoads(t *testing.T) {
 	redeclared := file("package p\n\nconst Word = 1\n")
 	plugin := fstest.MapFS{
 		"p/plugin.go": file("package p\n\nimport \"example.com/repo/lib\"\n\n" +
-			"func Greet() string { return Word + Arch + Wasm + Built + lib.Word }\n"),
+			"func Greet() string { return Word + Arch + Wasm + Built + Risc + Hurd + lib.Word }\n"),
+		"p/risc_riscv64.go":      file("package p\n\nconst Risc = \"r\"\n"),
+		"p/hurd_hurd.go":         file("package p\n\nconst Hurd = \"h\"\n"),
 		"p/word_wasip1.go":       file("package p\n\nconst Word = \"w\"\n"),
 		"p/arch_wasip1_wasm.go":  file("package p\n\nconst Arch = \"a\"\n"),
 		"p/wasm.go":              file("package p\n\nconst Wasm = \"m\"\n"),
@@ -408,7 +411,7 @@ func TestCheckGoChecksTheFilesTheGuestLoads(t *testing.T) {
 		"p/word_linux_amd64.go":  redeclared,
 		"p/word_wasip1_arm64.go": redeclared,
 		"p/generate.go": file(
-			"//go:build ignore\n// +build ignore\n\npackage main\n\nfunc main() {}\n",
+			"//go:build ignore\n// +build ignore\n\npackage main\n\nimport \"os\"\n\nfunc main() { go os.Exit(0) }\n",
 		),
 		"p/native.go":                                  file("// +build !wasip1\n\npackage p\n\nconst Word = 1\n"),
 		"p/vendor/example.com/repo/lib/lib.go":         file("package lib\n\nconst Word = \"l\"\n"),

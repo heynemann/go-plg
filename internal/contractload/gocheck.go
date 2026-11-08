@@ -4,25 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/build"
-	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
 	"io/fs"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/gorestrict"
-)
-
-// The platform the Go guest's interpreter runs on, whose files it loads.
-const (
-	guestOS   = "wasip1"
-	guestArch = "wasm"
 )
 
 var (
@@ -143,8 +133,8 @@ func isDir(files fs.FS, name string) bool {
 	return err == nil && info.IsDir()
 }
 
-// parseGo parses the Go files of dir in files the Go guest interprets (see [guestNameLoads] and
-// [guestConstraintsHold]), naming them by their path in files.
+// parseGo parses the Go files of dir in files the Go guest interprets (see [gorestrict.IsSource] and
+// [gorestrict.GuestLoads]), naming them by their path in files.
 func parseGo(fset *token.FileSet, files fs.FS, dir string) ([]*ast.File, error) {
 	entries, err := fs.ReadDir(files, dir)
 	if err != nil {
@@ -155,7 +145,7 @@ func parseGo(fset *token.FileSet, files fs.FS, dir string) ([]*ast.File, error) 
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if !gorestrict.IsSource(name, entry) || !guestNameLoads(name) {
+		if !gorestrict.IsSource(name, entry) {
 			continue
 		}
 
@@ -164,12 +154,12 @@ func parseGo(fset *token.FileSet, files fs.FS, dir string) ([]*ast.File, error) 
 			return nil, fmt.Errorf("reading the plugin: %w", err)
 		}
 
-		header, err := parser.ParseFile(fset, path.Join(dir, name), src, parser.PackageClauseOnly|parser.ParseComments)
+		loads, err := gorestrict.GuestLoads(fset, path.Join(dir, name), src)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrGoTypes, err)
 		}
 
-		if !guestConstraintsHold(header.Comments) {
+		if !loads {
 			continue
 		}
 
@@ -182,45 +172,6 @@ func parseGo(fset *token.FileSet, files fs.FS, dir string) ([]*ast.File, error) 
 	}
 
 	return sources, nil
-}
-
-// guestNameLoads reports whether the Go guest's interpreter (yaegi v0.16.1, running on wasip1/wasm) loads a .go
-// file named name: as a go build for wasip1/wasm, it skips names starting with "_" or "." and names ending in
-// another GOOS or GOARCH.
-func guestNameLoads(name string) bool {
-	ctx := build.Context{GOOS: guestOS, GOARCH: guestArch, OpenFile: func(string) (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader("package p\n")), nil // the name alone decides
-	}}
-
-	loads, err := ctx.MatchFile(".", name)
-
-	return err == nil && loads
-}
-
-// guestConstraintsHold reports whether the build constraints among the comments before a file's package clause
-// hold for the Go guest's interpreter. yaegi v0.16.1 reads only the `// +build` lines, each of which must hold,
-// for wasip1, wasm and the Go releases: it loads a file whose `//go:build` line alone excludes it, as the guest
-// would then.
-func guestConstraintsHold(comments []*ast.CommentGroup) bool {
-	for _, group := range comments {
-		for line := range strings.SplitSeq(strings.TrimSpace(group.Text()), "\n") {
-			if !strings.HasPrefix(line, "+build ") {
-				continue
-			}
-
-			expr, err := constraint.Parse("// " + line)
-			if err == nil && !expr.Eval(guestTag) {
-				return false
-			}
-		}
-	}
-
-	return true
-}
-
-// guestTag reports whether the Go guest's interpreter satisfies a build tag.
-func guestTag(tag string) bool {
-	return tag == guestOS || tag == guestArch || slices.Contains(build.Default.ReleaseTags, tag)
 }
 
 // importerFunc is a types.Importer.

@@ -282,10 +282,10 @@ func goPackageDir(files fs.FS, entrypoint string) (string, error) {
 	}
 }
 
-// checkNoGoStatements checks the source a Go plugin instance receives, every Go source file below dir (symbolic
-// links are not copied into it), with [gorestrict.Check]: it fails with [ErrGoStatement] naming the position
-// (file:line:column, the file relative to the plugin's fs.FS) of every go statement. A file that does not parse
-// fails the load as the guest would.
+// checkNoGoStatements checks the source a Go plugin instance receives, every Go source file below dir the guest
+// loads (see [gorestrict.GuestLoads]; symbolic links are not copied into it), with [gorestrict.Check]: it fails
+// with [ErrGoStatement] naming the position (file:line:column, the file relative to the plugin's fs.FS) of every
+// go statement. A file that does not parse fails the load as the guest would.
 func checkNoGoStatements(files fs.FS, dir string) error {
 	err := gorestrict.Check(files, dir, nil)
 	if syntax, ok := errors.AsType[*gorestrict.SyntaxError](err); ok {

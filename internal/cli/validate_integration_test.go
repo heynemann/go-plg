@@ -101,6 +101,12 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 			"types      ok      the plugin's package type-checks against rewards.Provider\n",
 			"load       ok      Create ran in the go guest (version ",
 		}},
+		{"goskipped", []string{ // the files the guest skips declare another Host, import os and start goroutines
+			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
+			"sandbox    ok      no go statements, and imports only what the Go guest provides\n" +
+				"types      ok      the plugin's package type-checks against cohort.Provider\n",
+			"load       ok      Create ran in the go guest (version ",
+		}},
 	}
 
 	for _, tc := range tests {

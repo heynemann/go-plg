@@ -44,10 +44,10 @@ func IsSource(name string, entry fs.DirEntry) bool {
 	return entry.Type().IsRegular() && path.Ext(name) == ".go" && !strings.HasSuffix(name, "_test.go")
 }
 
-// Check parses every Go source file below dir in files (see [IsSource]; symbolic links are not copied into a
-// plugin, so they are not read) and fails with [ErrGoStatement] naming the position (file:line:column, the file
-// relative to files) of every go statement and, when allowed is not nil, with [ErrImport] naming every import
-// allowed refuses, joined. A file that does not parse fails with a [*SyntaxError].
+// Check parses every Go source file below dir in files that the Go guest loads (see [IsSource] and [GuestLoads];
+// symbolic links are not copied into a plugin, so they are not read) and fails with [ErrGoStatement] naming the
+// position (file:line:column, the file relative to files) of every go statement and, when allowed is not nil, with
+// [ErrImport] naming every import allowed refuses, joined. A file that does not parse fails with a [*SyntaxError].
 func Check(files fs.FS, dir string, allowed func(importPath string) bool) error {
 	fset := token.NewFileSet()
 
@@ -58,14 +58,9 @@ func Check(files fs.FS, dir string, allowed func(importPath string) bool) error 
 			return err
 		}
 
-		src, err := fs.ReadFile(files, name)
-		if err != nil {
-			return fmt.Errorf("reading the plugin source: %w", err)
-		}
-
-		file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
-		if err != nil {
-			return &SyntaxError{Err: err}
+		file, err := parseLoaded(fset, files, name)
+		if err != nil || file == nil {
+			return err
 		}
 
 		ast.Inspect(file, func(node ast.Node) bool {
@@ -97,6 +92,31 @@ func Check(files fs.FS, dir string, allowed func(importPath string) bool) error 
 	}
 
 	return errors.Join(errs...)
+}
+
+// parseLoaded parses the Go source file name of files when the Go guest loads it (see [GuestLoads]); it returns nil
+// without an error when the guest does not. A file that does not parse fails with a [*SyntaxError].
+func parseLoaded(fset *token.FileSet, files fs.FS, name string) (*ast.File, error) {
+	src, err := fs.ReadFile(files, name)
+	if err != nil {
+		return nil, fmt.Errorf("reading the plugin source: %w", err)
+	}
+
+	loads, err := GuestLoads(fset, name, src)
+	if err != nil {
+		return nil, &SyntaxError{Err: err}
+	}
+
+	if !loads {
+		return nil, nil //nolint:nilnil // a file the guest does not load is no error: Check skips it
+	}
+
+	file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, &SyntaxError{Err: err}
+	}
+
+	return file, nil
 }
 
 // Refused lists the imports of file whose path allowed refuses (a path literal that does not unquote, which only a

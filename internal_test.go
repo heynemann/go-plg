@@ -2115,6 +2115,15 @@ func TestCheckNoGoStatements(t *testing.T) {
 			files: fstest.MapFS{"a_test.go": spawns, "link.go": {Mode: fs.ModeSymlink, Data: []byte("x")}},
 		},
 		{
+			name: "only the files the guest loads", dir: "p", want: ErrGoStatement, msg: "plugins: p/z_riscv64.go:4:2",
+			files: fstest.MapFS{
+				"p/a.go": clean, "p/_old.go": spawns, "p/.x.go": spawns, "p/x_windows.go": spawns,
+				"p/z_riscv64.go": spawns, "p/_broken.go": {Data: []byte("package p\nfunc {")},
+				"p/gen.go": {Data: []byte("// +build ignore\n\npackage main\n\nimport \"os\"\n\n" +
+					"func main() {\n\tgo os.Exit(0)\n}\n")},
+			},
+		},
+		{
 			name: "syntax errors fail as the guest would", dir: ".", want: errGuestLoad,
 			files: fstest.MapFS{"a.go": {Data: []byte("package p\nfunc {")}}, msg: "a.go:2:6",
 		},

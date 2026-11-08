@@ -361,12 +361,19 @@ func Create() (greeter.Greeter, error)                  // without a Host
 func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[greeter.Host]
 ```
 
-- The package's `.go` files are loaded as a build for `wasip1`/`wasm` would select them: `_test.go` files, names
-  starting with `_` or `.`, and names ending in another GOOS or GOARCH (`_windows.go`, `_linux_amd64.go`) are
-  skipped, and so are files whose `// +build` lines do not hold. The guest's interpreter (yaegi) reads no
-  `//go:build` line: a file only `//go:build` excludes (`//go:build ignore`) is loaded, so add `// +build ignore`
-  below it. `plg validate` type-checks the same files. Since a Go plugin is plain Go, unit-test it natively (as
-  `examples/plugins/bulk` does).
+- The guest's interpreter (yaegi v0.16.1) loads the package's `.go` files but these: `_test.go` files; names
+  starting with `_` or `.`; names whose `_`-separated elements after the first `_` are a single operating system or
+  architecture yaegi knows other than `wasip1`/`wasm` (`x_windows.go`, `x_amd64.go`), or end in such an architecture
+  (`x_y_arm64.go`, `x_wasip1_amd64.go`) or in such an operating system followed by any architecture yaegi knows
+  (`x_linux_wasm.go`); and files whose `// +build` lines before the package clause do not all hold (the tags that
+  hold are `wasip1`, `wasm` and `go1.N` up to plg's Go release). yaegi knows fewer names than `go build` (operating
+  systems `aix android darwin dragonfly freebsd illumos ios js linux netbsd openbsd plan9 solaris windows`,
+  architectures `386 amd64 arm arm64 loong64 mips mips64 mips64le mipsle ppc64 ppc64le s390x`) and reads an operating
+  system as the last of several elements as no constraint, so `x_riscv64.go`, `x_hurd.go`, `x_linux_riscv64.go` and
+  `x_y_windows.go` are loaded. It reads no `//go:build` line: a file only `//go:build` excludes
+  (`//go:build ignore`) is loaded, so add `// +build ignore` below it. Register's go-statement check and
+  `plg validate` (its `sandbox` and `types` steps, and the Host it reads from `Create`) read the same files. Since a
+  Go plugin is plain Go, unit-test it natively (as `examples/plugins/bulk` does).
 - The package name does not matter (`package main` works too).
 - **Standard library allowlist:** `bufio bytes cmp context encoding/base64 encoding/hex encoding/json errors fmt io
   maps math math/big math/bits math/cmplx math/rand math/rand/v2 net/http (client side, through the host) net/url

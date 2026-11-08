@@ -1220,8 +1220,8 @@ func methodNames(methods []goabi.Method) string {
 
 // createHost returns the name of the contract's interface a Go plugin's Create takes as its parameter, as the
 // plugin's source writes it (contract.Host through an import of pkgPath, whose package is named pkgName, or Host
-// through a dot import); empty when Create takes none, another one or cannot be found: the guest then tells what
-// Create should be.
+// through a dot import), reading the files the Go guest loads (see [gorestrict.GuestLoads]); empty when Create
+// takes none, another one or cannot be found: the guest then tells what Create should be.
 func createHost(files fs.FS, entrypoint, pkgPath, pkgName string) string {
 	dir := goPackageDir(entrypoint)
 
@@ -1240,6 +1240,11 @@ func createHost(files fs.FS, entrypoint, pkgPath, pkgName string) string {
 
 		src, err := fs.ReadFile(files, path.Join(dir, name))
 		if err != nil {
+			continue
+		}
+
+		loads, err := gorestrict.GuestLoads(fset, name, src)
+		if err != nil || !loads {
 			continue
 		}
 
