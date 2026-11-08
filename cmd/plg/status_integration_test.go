@@ -3,13 +3,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,9 +22,9 @@ import (
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
-// TestStatusAndEventsFromTheCommand runs the plg command (go run) against a service's admin handler, behind a
-// bearer token, that a profile under $XDG_CONFIG_HOME names, its token in an environment variable: status prints
-// the service's plugin as JSON on stdout, and events its events as a table.
+// TestStatusAndEventsFromTheCommand runs the plg command against a service's admin handler, behind a bearer token,
+// that a profile under $XDG_CONFIG_HOME names, its token in an environment variable: status prints the service's
+// plugin as JSON on stdout, and events its events as a table.
 func TestStatusAndEventsFromTheCommand(t *testing.T) {
 	t.Parallel()
 
@@ -60,20 +58,17 @@ func TestStatusAndEventsFromTheCommand(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(config, "plg", "profiles.yaml"), fmt.Appendf(nil,
 		"profiles:\n  - {name: test, url: %q, token: {env: PLG_TEST_TOKEN}}\n", srv.URL), 0o600))
 
+	bin := buildCommand(t)
+
+	environ := append(os.Environ(), "XDG_CONFIG_HOME="+config, "PLG_TEST_TOKEN=s3cret")
 	plgCmd := func(args ...string) string {
 		t.Helper()
 
-		//nolint:gosec // G204: runs this module's plg command
-		cmd := exec.CommandContext(t.Context(), "go", append([]string{"run", "."}, args...)...)
-		cmd.Env = append(os.Environ(), "GOWORK=off", "XDG_CONFIG_HOME="+config, "PLG_TEST_TOKEN=s3cret")
+		stdout, stderr, code := runCommand(t, bin, environ, args...)
+		require.Equal(t, 0, code, stderr)
+		assert.Empty(t, stderr)
 
-		var stdout, stderr bytes.Buffer
-
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		require.NoError(t, cmd.Run(), stderr.String())
-		assert.Empty(t, stderr.String())
-
-		return stdout.String()
+		return stdout
 	}
 
 	var list adminjson.Plugins
