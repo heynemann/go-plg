@@ -119,6 +119,44 @@ func TestCheckTypeScriptRefusesLuaTypings(t *testing.T) {
 	require.ErrorIs(t, err, typings.ErrLanguage)
 }
 
+// TestTypeCheckFollowsNoLinks type-checks a plugin directory on disk whose plugin.ts imports ./leak, a link to a
+// file outside the plugin: the compiler reads none of it, so the import is unresolved and nothing of the file it
+// leads to reaches a diagnostic.
+func TestTypeCheckFollowsNoLinks(t *testing.T) {
+	t.Parallel()
+
+	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t), nil)
+	require.NoError(t, err)
+
+	outside := filepath.Join(t.TempDir(), "secret.ts")
+	require.NoError(t, os.WriteFile(outside, []byte("export const leaked = theSecretValue;\n"), 0o600))
+
+	dir := t.TempDir()
+	goldens := os.DirFS(filepath.Join("testdata", "golden"))
+
+	entries, err := fs.ReadDir(goldens, ".")
+	require.NoError(t, err)
+
+	for _, entry := range entries {
+		data, readErr := fs.ReadFile(goldens, entry.Name())
+		require.NoError(t, readErr)
+
+		if entry.Name() == "plugin.ts" {
+			data = append([]byte("import { leaked } from \"./leak\";\nconsole.log(leaked);\n"), data...)
+		}
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir, entry.Name()), data, 0o600))
+	}
+
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "leak.ts")))
+
+	diags, err := typ.CheckTypeScript(t.Context(), checker(t), os.DirFS(dir), "plugin.ts")
+	require.NoError(t, err)
+	require.Len(t, diags, 1, diags)
+	assert.Equal(t, "plugin.ts:1:24: Cannot find module './leak' or its corresponding type declarations. (TS2307)",
+		diags[0].String())
+}
+
 // TestTypeScriptScaffoldTypeChecks type-checks the TypeScript skeleton of a contract with several results, a
 // variadic method, unnamed parameters, times, pointers, maps, a Host and a validation input against its typings
 // with the real compiler: no diagnostics.
