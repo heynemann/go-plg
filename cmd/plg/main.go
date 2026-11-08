@@ -17,13 +17,21 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/heynemann/go-plg/internal/cli"
 )
 
 func main() {
+	dir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "plg:", err)
+
+		os.Exit(1)
+	}
+
 	os.Exit(cli.Main(os.Args[1:], &cli.Env{
-		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, Environ: os.Environ, Dir: ".",
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, Environ: os.Environ, Dir: dir,
 	}))
 }

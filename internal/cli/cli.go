@@ -276,13 +276,24 @@ func parse(cmd string, flags *flag.FlagSet, args []string) (outcome, bool) {
 	}
 }
 
-// resolve returns path, relative to dir unless absolute.
+// resolve returns path, relative to dir unless absolute, as a clean absolute path: plugin keys are the last
+// element of a plugin's path, and git's pathspecs and the author repository's directory, compared with a plugin's,
+// are absolute. It stays relative only when the working directory is gone.
 func resolve(dir, path string) string {
-	if path == "" || filepath.IsAbs(path) {
+	if path == "" {
+		return ""
+	}
+
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
 		return path
 	}
 
-	return filepath.Join(dir, path)
+	return abs
 }
 
 func runWarm(dir string, args []string, stderr io.Writer) outcome {

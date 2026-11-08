@@ -220,8 +220,8 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 				"example.com/rewards@v1.2.0)\n",
 		}},
 		{"no plugin.yaml", []string{"nosuchdir"}, []string{
-			"manifest  FAIL    open " + filepath.Join("..", "..", "testdata", "validate", "plugins", "nosuchdir",
-				"plugin.yaml") + ": no such file or directory\n",
+			"manifest  FAIL    open " + filepath.Join(abs(t, "."), "nosuchdir", "plugin.yaml") +
+				": no such file or directory\n",
 		}},
 		{"interface breaking the contract", []string{"brokencontract"}, []string{
 			"interface  ok      cohort.Broken: Do\n",

@@ -252,8 +252,8 @@ func TestPackRefusesInvalidPluginsAndReplacedContracts(t *testing.T) {
 	assert.Contains(t, got.stdout, "plg pack refuses while a contract module is replaced by a local directory "+
 		"(remove the replace to pack against the module plugin.yaml pins): "+
 		filepath.Join(abs(t, "goreplace"), "go.mod")+" replaces example.com/rewards by the directory ")
-	assert.Equal(t, "plg pack: "+filepath.Join("..", "..", "testdata", "validate", "plugins", "goreplace")+
-		" is not a valid plugin: nothing packed\n", got.stderr, "nothing loaded, so nothing logged")
+	assert.Equal(t, "plg pack: "+abs(t, "goreplace")+" is not a valid plugin: nothing packed\n", got.stderr,
+		"nothing loaded, so nothing logged")
 	assert.Empty(t, artifactsIn(t, out))
 
 	repo := copyRepo(t, repoYAML(t), map[string]string{})
@@ -282,17 +282,12 @@ func TestPackRefusesInvalidPluginsAndReplacedContracts(t *testing.T) {
 	assert.Contains(t, got.stderr, "choose another with -o: "+plugin+" is inside "+plugin+"\n")
 }
 
-// TestPackRecordsTheGitCommit packs a plugin of an author repository committed to git: the provenance records the
-// commit, clean; changing the repository's shared directory, adding a file to the plugin (even an ignored one) or
-// editing plg.yaml makes it dirty, changing another plugin of the repository does not.
-func TestPackRecordsTheGitCommit(t *testing.T) {
-	t.Parallel()
+// gitIn returns a function running git with its arguments in the repository repo, in the environment environ, as
+// an author committing with no configuration of their own, and returning its trimmed output.
+func gitIn(t *testing.T, environ []string, repo string) func(args ...string) string {
+	t.Helper()
 
-	environ := append(testproxy.Environ(testproxy.New(t, modules()), t.TempDir()),
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-	repo := copyRepo(t, repoYAML(t), map[string]string{".gitignore": "*.log\n"})
-
-	git := func(args ...string) string {
+	return func(args ...string) string {
 		t.Helper()
 
 		//nolint:gosec // G204: git with the test's own arguments
@@ -307,6 +302,18 @@ func TestPackRecordsTheGitCommit(t *testing.T) {
 
 		return strings.TrimSpace(string(out))
 	}
+}
+
+// TestPackRecordsTheGitCommit packs a plugin of an author repository committed to git: the provenance records the
+// commit, clean; changing the repository's shared directory, adding a file to the plugin (even an ignored one) or
+// editing plg.yaml makes it dirty, changing another plugin of the repository does not.
+func TestPackRecordsTheGitCommit(t *testing.T) {
+	t.Parallel()
+
+	environ := append(testproxy.Environ(testproxy.New(t, modules()), t.TempDir()),
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	repo := copyRepo(t, repoYAML(t), map[string]string{".gitignore": "*.log\n"})
+	git := gitIn(t, environ, repo)
 
 	git("init", "-q")
 	git("add", ".")
@@ -364,6 +371,51 @@ func TestPackRecordsTheGitCommit(t *testing.T) {
 
 		require.False(t, packOnce("restored").Dirty, change.name)
 	}
+}
+
+// TestPackResolvesRelativePaths packs a plugin of an author repository committed to git, named relative to a
+// working directory given as ".", as `plg pack` run in a shell is: from the repository, a file added to the
+// plugin's directory makes it dirty (git's pathspecs name the plugin's directory, not one inside it); from inside
+// the plugin, `plg pack .` validates the plugin under its directory's name and writes <name>.plg, clean.
+//
+//nolint:paralleltest // t.Chdir: the working directory is the process's
+func TestPackResolvesRelativePaths(t *testing.T) {
+	environ := append(testproxy.Environ(testproxy.New(t, modules()), t.TempDir()),
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	repo := copyRepo(t, repoYAML(t), map[string]string{})
+	git := gitIn(t, environ, repo)
+
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "plugins")
+
+	head := git("rev-parse", "HEAD")
+	notes := filepath.Join(repo, "rules", "silver", "notes.txt")
+	require.NoError(t, os.WriteFile(notes, []byte("untracked\n"), 0o600))
+
+	t.Chdir(repo)
+
+	out := t.TempDir()
+	got := packIn(environ, ".", "-o", out, filepath.Join("rules", "silver"))
+	require.Equal(t, 0, got.code, got.stdout+got.stderr)
+
+	dirty := openPacked(t, filepath.Join(out, "silver.plg")).Provenance()
+	assert.True(t, dirty.Dirty, "notes.txt is not committed")
+	assert.Equal(t, head, dirty.Commit)
+
+	require.NoError(t, os.Remove(notes))
+	t.Chdir(filepath.Join("rules", "silver"))
+
+	out = t.TempDir()
+	got = packIn(environ, ".", "-o", out, ".")
+	require.Equal(t, 0, got.code, got.stdout+got.stderr)
+	assert.Contains(t, rows(got.stdout),
+		"manifest ok lua plugin silver implementing example.com/rewards/cohort.Provider@v1.2.0")
+	assert.Contains(t, rows(got.stdout), "typings ok plg.d.lua, .luarc.json up to date", "lib is shared")
+
+	clean := openPacked(t, filepath.Join(out, "silver.plg")).Provenance()
+	assert.False(t, clean.Dirty)
+	assert.Equal(t, head, clean.Commit)
 }
 
 // TestPackUsageAndOutputFailures checks pack's operands and flags (validate's, but -near-limit, as the resource

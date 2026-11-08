@@ -213,6 +213,56 @@ func TestInitWritesEditorConfigurationForSharedDirectories(t *testing.T) {
 	assert.Equal(t, string(settings), string(again))
 }
 
+// TestInitResolvesRelativePaths creates plugins from a subdirectory of an author repository with a go.mod and a
+// shared directory, named relative to a working directory given as ".", as `plg init` run in a shell is: plg types
+// writes the editor configuration of the shared directory for a plugin created before plg.yaml shared it, the Go
+// plugin's module is the repository's (found above the working directory), the new Lua plugin gets the editor
+// configuration too, and the repository then validates, its typings up to date.
+//
+//nolint:paralleltest // t.Chdir: the working directory is the process's
+func TestInitResolvesRelativePaths(t *testing.T) {
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	root := t.TempDir()
+
+	created := plgInEnv(environ, root, "init", "-implements", pricingRule, "-lang", "lua", "rules/first")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+
+	for name, content := range map[string]string{
+		"plg.yaml":      "plugins: [rules/first]\nshared: [lib]\nrequireOwnership: false\n",
+		"go.mod":        "module example.com/team\n\ngo 1.27\n",
+		"lib/tiers.lua": "return {}\n",
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o600))
+	}
+
+	t.Chdir(filepath.Join(root, "rules"))
+
+	written := plgInEnv(environ, ".", "types", "first")
+	require.Equal(t, 0, written.code, written.stdout+written.stderr)
+	assert.Contains(t, rows(written.stdout), "typings ok wrote .luarc.json; plg.d.lua already up to date")
+
+	created = plgInEnv(environ, ".", "init", "-implements", pricingRule, "-lang", "go", "vip")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+	assert.Contains(t, rows(created.stdout), "plg.yaml ok lists rules/vip")
+	assert.NoFileExists(t, filepath.Join(root, "rules", "vip", "go.mod"), "the repository's module is the plugin's")
+
+	goMod, err := readFile(filepath.Join(root, "go.mod"))
+	require.NoError(t, err)
+	assert.Contains(t, string(goMod), "require example.com/shop v1.0.0\n")
+
+	created = plgInEnv(environ, ".", "init", "-implements", pricingRule, "-lang", "lua", "tier")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+
+	settings, err := readFile(filepath.Join(root, "rules", "tier", ".luarc.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(settings), `"workspace.library": ["../../lib"]`)
+
+	valid := plgInEnv(environ, "..", "validate", ".")
+	require.Equal(t, 0, valid.code, valid.stdout+valid.stderr)
+	assert.Contains(t, rows(valid.stdout), "rules/tier ok 1 warning")
+}
+
 // TestInitUsage checks plg init's arguments.
 func TestInitUsage(t *testing.T) {
 	t.Parallel()
