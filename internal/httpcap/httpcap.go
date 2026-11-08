@@ -134,14 +134,9 @@ func Disabled(logger *slog.Logger) *Client {
 
 // New returns a client enforcing policy, or an error wrapping [ErrInvalidPolicy].
 func New(policy Policy, logger *slog.Logger) (*Client, error) {
-	policy, err := policy.withDefaults()
+	policy, allowed, err := checked(policy)
 	if err != nil {
 		return nil, err
-	}
-
-	allowed, err := parseHosts(policy.AllowedHosts)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
 	}
 
 	dialer := &net.Dialer{Timeout: policy.Timeout, KeepAlive: keepAlive}
@@ -169,6 +164,35 @@ func New(policy Policy, logger *slog.Logger) (*Client, error) {
 		policy:    policy,
 		enabled:   true,
 	}, nil
+}
+
+// NewAnswered returns a client enforcing policy whose requests transport answers instead of the network, or an
+// error wrapping [ErrInvalidPolicy]: plg validate's test cases answer with their HTTP stubs. Nothing is dialed, so
+// BlockPrivateNetworks and RootCAs do not apply; every other check does.
+func NewAnswered(policy Policy, transport http.RoundTripper, logger *slog.Logger) (*Client, error) {
+	policy, allowed, err := checked(policy)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		logger: logger, transport: transport, closeIdle: func() {}, allowed: allowed, policy: policy, enabled: true,
+	}, nil
+}
+
+// checked returns policy with its defaults and the hosts it allows, or an error wrapping [ErrInvalidPolicy].
+func checked(policy Policy) (Policy, hosts, error) {
+	policy, err := policy.withDefaults()
+	if err != nil {
+		return policy, nil, err
+	}
+
+	allowed, err := parseHosts(policy.AllowedHosts)
+	if err != nil {
+		return policy, nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
+
+	return policy, allowed, nil
 }
 
 // Close closes the client's idle connections. Requests in flight are unaffected.

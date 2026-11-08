@@ -506,3 +506,32 @@ func TestReadsTheInterfacesDirectives(t *testing.T) {
 	require.ErrorIs(t, err, directive.ErrDirective)
 	require.ErrorContains(t, err, "c.go:8:6: I: //plg:limits timeout=0s: ")
 }
+
+// TestDescribesTheValidationInput: the type //plg:validation names is the Contract's Validation, described as the
+// dispatcher writes it and of the interpreter's type, as a plugin's Validate takes it; without the directive there
+// is none.
+//
+//nolint:paralleltest // as TestDescribesContractsAsReflectionDoes
+func TestDescribesTheValidationInput(t *testing.T) {
+	dir := contractDir(t, "type Limits struct{ MaxPercent int `json:\"maxPercent\"` }\n\n"+
+		"//plg:validation Limits\ntype I interface{ M(ctx context.Context) error }\n")
+
+	loaded, err := contractload.Load(dir, "example.com/c", "I", "")
+	require.NoError(t, err)
+	require.NotNil(t, loaded.ValidationType)
+	assert.Equal(t, "Limits", loaded.ValidationType.Name())
+	require.NotNil(t, loaded.Contract.Validation)
+	assert.Equal(t, &goabi.Type{Kind: goabi.KindNamed, Name: "Limits", Path: "example.com/c", Pkg: "c"},
+		loaded.Contract.Validation.Type)
+
+	input := loaded.Contract.Validation.Input
+	require.Equal(t, reflect.Struct, input.Kind())
+	assert.Equal(t, "MaxPercent", input.Field(0).Name)
+	assert.Equal(t, `json:"maxPercent"`, string(input.Field(0).Tag))
+
+	loaded, err = contractload.Load(contractDir(t, "type I interface{ M(ctx context.Context) error }\n"),
+		"example.com/c", "I", "")
+	require.NoError(t, err)
+	assert.Nil(t, loaded.ValidationType)
+	assert.Nil(t, loaded.Contract.Validation)
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"runtime"
 	"slices"
 	"time"
@@ -100,6 +101,9 @@ const (
 )
 
 type registerConfig struct {
+	// httpTransport answers the requests instead of the network (plg validate's test cases); nil: the network.
+	httpTransport http.RoundTripper
+
 	http              *HTTPPolicy     // nil: HTTP refused
 	httpRoots         *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
 	goGuest           *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one

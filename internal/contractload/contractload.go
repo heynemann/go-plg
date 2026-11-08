@@ -40,12 +40,14 @@ var (
 // Loaded is a contract package plg validate loaded.
 type Loaded struct {
 	// Contract is the contract as plg loads plugins against it. It has no Module: the caller resolved it.
-	Contract    *offline.Contract
-	pkg         *types.Package // the package, type-checked
-	fset        *token.FileSet // the positions of the standard library packages std imported
-	std         types.Importer // the standard library packages the package imports, shared with Go plugins' checks
-	interpreter *interpreter   // the package's interpreter, which interprets the Host's methods too
-	implemented string         // the interface's name
+	Contract *offline.Contract
+	// ValidationType is the validation input the interface's //plg:validation names; nil without one.
+	ValidationType *types.TypeName
+	pkg            *types.Package // the package, type-checked
+	fset           *token.FileSet // the positions of the standard library packages std imported
+	std            types.Importer // the standard library packages the package imports, shared with Go plugins' checks
+	interpreter    *interpreter   // the package's interpreter, which interprets the Host's methods too
+	implemented    string         // the interface's name
 	// Directives are the plg directives on the interface's doc comment.
 	Directives directive.Directives
 }
@@ -88,7 +90,7 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 		return nil, err
 	}
 
-	contract := &offline.Contract{Interface: implemented.described, Source: source}
+	contract := &offline.Contract{Interface: implemented.described, Source: source, Params: params(implemented)}
 	interpreter := newInterpreter(source, pkgPath)
 
 	contract.Methods, err = interpreter.methods(implemented)
@@ -96,9 +98,16 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 		return nil, err
 	}
 
+	validationType, validation, err := validationInput(pkg, interpreter, dirs.Validation)
+	if err != nil {
+		return nil, err
+	}
+
+	contract.Validation = validation
+
 	loaded := &Loaded{
 		Contract: contract, Directives: dirs, pkg: pkg, fset: fset, std: std, interpreter: interpreter,
-		implemented: name,
+		implemented: name, ValidationType: validationType,
 	}
 
 	if host != "" {
@@ -150,6 +159,28 @@ func (l *Loaded) Hosts() []*offline.Host {
 	return hosts
 }
 
+// validationInput returns the type of pkg the interface's //plg:validation names (which Directives checked is
+// one) and describes it; both nil when name is empty.
+func validationInput(pkg *types.Package, interpreter *interpreter, name string) (
+	*types.TypeName, *offline.Validation, error,
+) {
+	obj, ok := pkg.Scope().Lookup(name).(*types.TypeName)
+	if name == "" || !ok {
+		return nil, nil, nil
+	}
+
+	if interpreter.err != nil {
+		return nil, nil, interpreter.err
+	}
+
+	input, err := interpreter.typeOf("validation_"+name, obj.Type())
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: //plg:validation %s: %w", ErrInterpret, name, err)
+	}
+
+	return obj, &offline.Validation{Type: describeNamed(obj), Input: input}, nil
+}
+
 // loadHost describes the Host interface name of pkg.
 func loadHost(pkg *types.Package, interpreter *interpreter, name string) (*offline.Host, error) {
 	host, err := lookup(pkg, name)
@@ -162,7 +193,30 @@ func loadHost(pkg *types.Package, interpreter *interpreter, name string) (*offli
 		return nil, err
 	}
 
-	return &offline.Host{Interface: host.described, Methods: methods}, nil
+	return &offline.Host{Interface: host.described, Methods: methods, Params: params(host)}, nil
+}
+
+// params names the parameters after the context of each method of the interface, in method index order (see
+// [offline.ParamName] for those without a name).
+func params(declared *iface) [][]string {
+	names := make([][]string, 0, declared.methods.NumMethods())
+
+	for method := range declared.methods.Methods() {
+		sig := method.Signature()
+		names = append(names, make([]string, 0, max(sig.Params().Len()-1, 0)))
+		last := len(names) - 1
+
+		for i := 1; i < sig.Params().Len(); i++ {
+			name := sig.Params().At(i).Name()
+			if name == "" || name == "_" {
+				name = offline.ParamName(i)
+			}
+
+			names[last] = append(names[last], name)
+		}
+	}
+
+	return names
 }
 
 // rootSource reads the regular files at the root of dir, the package's own files: subdirectories are other
@@ -453,7 +507,7 @@ func (in *interpreter) methods(declared *iface) ([]reflect.Method, error) {
 	methods := make([]reflect.Method, 0, declared.methods.NumMethods())
 
 	for method := range declared.methods.Methods() {
-		fn, err := in.funcType(name+"_"+method.Name(), method.Signature())
+		fn, err := in.typeOf(name+"_"+method.Name(), method.Signature())
 		if err != nil {
 			return nil, fmt.Errorf("%w: method %s.%s: %w", ErrInterpret, name, method.Name(), err)
 		}
@@ -469,16 +523,16 @@ func (in *interpreter) methods(declared *iface) ([]reflect.Method, error) {
 	return methods, nil
 }
 
-// funcType returns the type the interpreter gives sig, declaring a variable of that type named after id. yaegi
+// typeOf returns the type the interpreter gives typ, declaring a variable of that type named after id. yaegi
 // panics on some types it cannot build (a slice of itself): the panic is the error.
-func (in *interpreter) funcType(id string, sig *types.Signature) (_ reflect.Type, err error) {
+func (in *interpreter) typeOf(id string, typ types.Type) (_ reflect.Type, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("%w: %v", errPanicked, v)
 		}
 	}()
 
-	expr := types.TypeString(sig, in.qualifier)
+	expr := types.TypeString(typ, in.qualifier)
 
 	for _, imp := range in.pending() {
 		_, err = in.yaegi.Eval("import " + in.aliasOf(imp) + " " + strconv.Quote(imp))

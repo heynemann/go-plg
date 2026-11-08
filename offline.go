@@ -21,11 +21,12 @@ const offlineStorage = "plg validate"
 // errStubHost fails every call of a Host method under plg validate.
 var errStubHost = errors.New("plg validate runs plugins without the service's Host")
 
-//nolint:gochecknoinits // plg validate reaches plg's unexported loading code through offline.Check, set here
+//nolint:gochecknoinits // plg validate reaches plg's unexported loading code through offline.Check and offline.Open
 func init() {
 	offline.Check = checkOffline
 	offline.CheckHost = checkOfflineHost
 	offline.Defaults = offlineDefaults
+	offline.Open = openOffline
 }
 
 // checkOfflineHost is [offline.CheckHost]: it checks spec as checkOffline checks the Host of a contract of pkgPath.
@@ -140,8 +141,9 @@ func offlineContract(spec *offline.Contract) (*contract, error) {
 	return contr, nil
 }
 
-// stubHost returns the Host of spec, checked as [WithHost] checks a Host, whose methods fail every call with
-// errStubHost; nil when spec is nil. The Host must be declared in the package pkgPath of the interface owner.
+// stubHost returns the Host of spec, checked as [WithHost] checks a Host, whose methods are spec's Funcs, or fail
+// every call with errStubHost without them; nil when spec is nil. The Host must be declared in the package pkgPath
+// of the interface owner.
 func stubHost(pkgPath string, owner fmt.Stringer, spec *offline.Host) (*host, error) {
 	if spec == nil {
 		return nil, nil //nolint:nilnil // the plugin's Create takes no Host, which is not an error
@@ -159,9 +161,12 @@ func stubHost(pkgPath string, owner fmt.Stringer, spec *offline.Host) (*host, er
 			ErrInvalidHost, named, errHostPackage, pkgPath, owner, named.Path)
 	}
 
-	funcs := make([]reflect.Value, len(spec.Methods))
-	for i := range funcs {
-		funcs[i] = failingFunc(named.String()+"."+spec.Methods[i].Name, spec.Methods[i].Type)
+	funcs := spec.Funcs
+	if funcs == nil {
+		funcs = make([]reflect.Value, len(spec.Methods))
+		for i := range funcs {
+			funcs[i] = failingFunc(named.String()+"."+spec.Methods[i].Name, spec.Methods[i].Type)
+		}
 	}
 
 	hst, err := plannedHost(spec.Interface, named.Path, spec.Methods, funcs)

@@ -106,18 +106,22 @@ func IsValidation(ctx context.Context) bool {
 
 // validationSpec is a WithValidation option: the validation input's type and the function returning it.
 type validationSpec struct {
-	input   func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
-	typ     reflect.Type
-	missing bool // the function is nil
+	input func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
+	typ   reflect.Type
+	// described is the input as the Go dispatcher writes it, when plg validate gave it (the Go interpreter's types
+	// are unnamed): the contract's source declares it, as checked; nil describes typ.
+	described *goabi.Type
+	missing   bool // the function is nil
 }
 
 // validation is a Register call's validation, checked once: the input function, the codecs of the input and of
 // the issues Validate returns, the Validate Go plugins must declare and the guest method index it is called at.
 type validation struct {
-	input  func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
-	typ    reflect.Type
-	codec  *wire.Codec // of the input
-	issues *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
+	input     func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
+	typ       reflect.Type
+	described *goabi.Type // the input as the Go dispatcher writes it; nil: goabi.TypeOf(typ)
+	codec     *wire.Codec // of the input
+	issues    *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
 	// scriptIssues is the codec of []scriptIssue, which describes the issues to the script guests: the same
 	// encoding as issues.
 	scriptIssues *wire.Codec
@@ -167,7 +171,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 
 	typ := spec.typ
 
-	err = checkValidationInput(contr, typ)
+	name, err := inputName(contr, &spec)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +179,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 	var planner wire.Planner
 
 	val := &validation{
-		input: spec.input, typ: typ, timeout: cfg.validationTimeout, policy: policy,
+		input: spec.input, typ: typ, described: spec.described, timeout: cfg.validationTimeout, policy: policy,
 		index: uint32(len(contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
 	}
 
@@ -192,9 +196,24 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 		return nil, fmt.Errorf("%w: WithValidation input %s: %w", ErrInvalidOption, typ, err)
 	}
 
-	val.want = "Validate(ctx context.Context, in " + typ.String() + ") ([]plugin.Issue, error)"
+	val.want = "Validate(ctx context.Context, in " + name + ") ([]plugin.Issue, error)"
 
 	return val, nil
+}
+
+// inputName checks the validation input of spec against the contract, unless plg validate described it from the
+// contract's source, which declares it, and returns how Go plugins write its type.
+func inputName(contr *contract, spec *validationSpec) (string, error) {
+	if spec.described != nil {
+		return spec.described.String(), nil
+	}
+
+	err := checkValidationInput(contr, spec.typ)
+	if err != nil {
+		return "", err
+	}
+
+	return spec.typ.String(), nil
 }
 
 // checkValidationOptions checks the Register call's validation timeout and on-demand policy, returning the
@@ -247,8 +266,15 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 	}
 
 	err := c.runValidation(ctx, val, launch, &info, src.limit, extra, report)
+
+	return explainNoValidate(err, src, files, val)
+}
+
+// explainNoValidate returns err, or for errNoValidate the [ErrValidation] saying what Validate the plugin src,
+// with the files loaded, lacks.
+func explainNoValidate(err error, src *source, files *memfs.FS, val *validation) error {
 	if errors.Is(err, errNoValidate) {
-		err = fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
+		return fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
 	}
 
 	return err

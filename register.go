@@ -161,7 +161,7 @@ func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name s
 		return nil, err
 	}
 
-	reg.http, err = httpClient(cfg.http, cfg.httpRoots, c.logger)
+	reg.http, err = httpClient(cfg, c.logger)
 	if err != nil {
 		return nil, err
 	}

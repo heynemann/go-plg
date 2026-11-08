@@ -526,7 +526,8 @@ output, compiles, issues) also goes.
   over the contract's `//plg:limits`, and plg's defaults for what neither sets (the plugin language's memory limit,
   a pool of 1 to GOMAXPROCS instances, no timeout); the row says where they come from (`memory=64MiB timeout=300ms
   pool=1..2 (plg.yaml memory=64MiB over //plg:limits memory=16MiB timeout=300ms pool=1..2)`). The memory limit is
-  the check's `WithMemoryLimit`, and the timeout bounds `Create` (not the guest compile or bundling before it). The
+  the check's `WithMemoryLimit`, and the timeout bounds `Create` (not the guest compile or bundling before it) and
+  each [test case](#test-cases-testsyaml)'s `Create` and call (10s for test cases when no timeout is set). The
   pool is checked as `WithPool` checks it and printed, but changes nothing here: the check runs one instance.
 - **go.mod** (Go plugins): the `go.mod` of the plugin's module (its directory's or the nearest above) must require
   the contract module at the pinned version, after its `replace` directives; a `replace` by a local directory is
@@ -558,6 +559,61 @@ output, compiles, issues) also goes.
 
 `-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest);
 `-guest-cache` the directory of the custom Go guests.
+
+### Test cases: `tests/*.yaml`
+
+Once the plugin loads, `plg validate` runs the language-neutral test cases in its `tests/*.yaml` files, each in a
+fresh instance of the real guest (its `Create` run with the stubbed Host, then the one call), under the limits of
+the `limits` row and in the custom Go guest of the `guest` row. The same files test a Go, a Lua and a TypeScript
+plugin of the contract alike:
+
+```yaml
+httpPolicy:                      # optional: the plugins' HTTP policy (plg.HTTPPolicy); without it every request is refused
+  allowedHosts: [coupons.example.com]
+cases:
+  - name: gold customers get 10% off
+    call: Quote                  # a method of the contract, or Validate
+    input:                       # every parameter, by name (Validate's is `in`, the contract's //plg:validation type)
+      order: {$ref: fixtures/order.yaml}
+    host:                        # Host stubs: the arguments given must match; result (a list for several) or error
+      - {method: Tier, args: {customer: alice}, result: gold, times: 1}
+    expect:
+      result: {total: 900, discount: 100, reasons: [gold]}
+  - name: an unknown coupon
+    call: Coupon
+    input: {code: NOPE}
+    http:                        # HTTP stubs: method (GET by default) and URL; status, headers, body; times
+      - {url: "https://coupons.example.com/codes/NOPE", status: 404}
+    expect:
+      error: unknown coupon NOPE # a substring of the error the plugin returned or threw
+```
+
+- **input** values are YAML, decoded strictly against the contract's types: an unknown field, a value of the wrong
+  kind, an overflowing number, bad base64 (`[]byte`) or a timestamp that is not RFC 3339 fails the case with its
+  `file:line:col`, rather than becoming a silent zero. `{$ref: <path>}` reads a value from a fixture file, relative
+  to the plugin's directory; fixtures may hold `$ref`s too (cycles and paths out of the directory are errors).
+- **host:** a Host call no stub matches fails the case (and returns an error to the plugin); `times` counts the
+  calls a stub must answer (`times: 0`: never). **http:** a request no stub matches fails the case; the policy is
+  enforced first, so a host it refuses never reaches a stub. Stubs never dial, so the private-network protection
+  has nothing to check.
+- **expect:** `result` (a list when the method has several results), `error` (panics, traps and timeouts never
+  match it), or `issues` (Validate's; fields left out match anything).
+
+Each case gets a row; a failed one is followed by what was expected and what came back, a line per differing field
+of structs, lists and maps, and a `tests` row sums up. Any failed case (or file that does not parse) makes the
+command exit 1:
+
+```
+test       ok      tests/pass.yaml: gold customers get 10% off
+test       FAIL    tests/fail.yaml: another total: Quote returned other results than expect.result
+                   result.total: expected 1000, got 900
+                   result.reasons: expected ["gold", "gift"], got ["gold"]
+test       FAIL    tests/fail.yaml: a timeout: Spin failed: it did not return within 3s: …
+tests      FAIL    test cases failed: 2 failed, 1 passed
+```
+
+When every case passes the last row is `tests ok 10 passed`; without test cases it is `tests ok no test cases
+(tests/*.yaml)`.
 
 ### Author repositories: `plg.yaml`
 

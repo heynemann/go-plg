@@ -46,7 +46,7 @@ func TestInterpreterRefusesPackagesTheGuestLacks(t *testing.T) {
 	named := types.NewNamed(types.NewTypeName(token.NoPos, other, "T", nil), types.Typ[types.Int], nil)
 	params := types.NewTuple(types.NewVar(token.NoPos, nil, "t", named))
 
-	_, err := interpreter.funcType("I_M", types.NewSignatureType(nil, nil, nil, params, nil, false))
+	_, err := interpreter.typeOf("I_M", types.NewSignatureType(nil, nil, nil, params, nil, false))
 	require.ErrorContains(t, err, "example.com/none")
 	require.Empty(t, interpreter.aliasOf("example.com/unknown"), "a package never named has no alias")
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
+	"github.com/heynemann/go-plg/internal/testcase"
 )
 
 // plgModule is plg's module, whose version as this command was built decides the custom Go guests' plg.
@@ -134,20 +135,27 @@ func (v *validation) run(ctx context.Context) bool {
 		return false
 	}
 
+	opts := v.options(&desc, loaded.Directives.Limits)
+	if desc.Language == plg.LanguageGo && !v.goSteps(ctx, ref, mod, loaded, &desc, opts) {
+		return false
+	}
+
+	return v.load(ctx, loaded.Contract, manifest, &desc, opts) && v.tests(ctx, loaded.Contract, manifest, opts)
+}
+
+// options are the options the plugin loads and its test cases run with: what it writes and what plg logs go to
+// stderr, under its limits (see limits) and the author repository's ownership rule.
+func (v *validation) options(desc *plg.Descriptor, declared directive.Limits) *offline.Options {
 	opts := &offline.Options{
 		Logger: slog.New(slog.NewTextHandler(v.env.Stderr, nil)), CacheDir: v.cacheDir,
-		Limits: v.limits(&desc, loaded.Directives.Limits),
+		Limits: v.limits(desc, declared),
 	}
 
 	if v.repo != nil {
 		opts.RequireOwnership = v.repo.RequireOwnership
 	}
 
-	if desc.Language == plg.LanguageGo && !v.goSteps(ctx, ref, mod, loaded, &desc, opts) {
-		return false
-	}
-
-	return v.load(ctx, loaded.Contract, manifest, &desc, opts)
+	return opts
 }
 
 // goSteps runs a Go plugin's own steps: its go.mod's pin, its type-check and its custom guest, which it sets in
@@ -449,9 +457,7 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 func (v *validation) load(ctx context.Context, contract *offline.Contract, manifest []byte, desc *plg.Descriptor,
 	opts *offline.Options,
 ) bool {
-	plugin := &offline.Plugin{Files: v.files, Key: v.key(), Manifest: manifest}
-
-	report, err := offline.Check(ctx, contract, plugin, opts)
+	report, err := offline.Check(ctx, contract, v.plugin(manifest), opts)
 	if err != nil {
 		return v.failed("load", err)
 	}
@@ -473,6 +479,92 @@ func (v *validation) load(ctx context.Context, contract *offline.Contract, manif
 
 	return ok
 }
+
+// plugin is the plugin validated, with its manifest's content.
+func (v *validation) plugin(manifest []byte) *offline.Plugin {
+	return &offline.Plugin{Files: v.files, Key: v.key(), Manifest: manifest}
+}
+
+// tests runs the plugin's test cases, each in a fresh instance of the real guest, adding a row per case (and the
+// lines showing why it failed) and one summing them up.
+func (v *validation) tests(ctx context.Context, contract *offline.Contract, manifest []byte,
+	opts *offline.Options,
+) bool {
+	plugin := v.plugin(manifest)
+
+	files := testcase.Load(plugin.Files)
+	if len(files) == 0 {
+		v.table.row("tests", stepOK, "no test cases ("+testcase.Glob+")")
+
+		return true
+	}
+
+	stubbed := *contract
+	if contract.Host != nil {
+		host := *contract.Host
+		host.Funcs = testcase.HostFuncs(&host) //nolint:contextcheck // each gets its call's context as an argument
+		stubbed.Host = &host
+	}
+
+	runner, err := offline.Open(ctx, &stubbed, plugin, opts)
+	if err != nil {
+		return v.failed("tests", err)
+	}
+
+	passed, failed := 0, 0
+
+	for _, file := range files {
+		if file.Err != nil {
+			failed++
+
+			v.table.row("test", stepFailed, file.Err.Error())
+
+			continue
+		}
+
+		for _, result := range testcase.Run(ctx, &stubbed, plugin.Files, runner, file) {
+			if v.result(file, &result) {
+				passed++
+			} else {
+				failed++
+			}
+		}
+	}
+
+	err = runner.Close(context.WithoutCancel(ctx))
+	if err != nil {
+		return v.failed("tests", err)
+	}
+
+	if failed > 0 {
+		return v.failed("tests", fmt.Errorf("%w: %d failed, %d passed", errTestsFailed, failed, passed))
+	}
+
+	v.table.row("tests", stepOK, fmt.Sprintf("%d passed", passed))
+
+	return true
+}
+
+// result adds the rows of a case of file that ran: one, and the lines showing why it failed. It reports whether the
+// case passed.
+func (v *validation) result(file *testcase.File, result *testcase.Result) bool {
+	if result.Passed() {
+		v.table.row("test", stepOK, file.Name+": "+result.Case)
+
+		return true
+	}
+
+	v.table.row("test", stepFailed, file.Name+": "+result.Case+": "+result.Failure)
+
+	for _, detail := range result.Details {
+		v.table.row("", "", detail)
+	}
+
+	return false
+}
+
+// errTestsFailed reports test cases that failed.
+var errTestsFailed = errors.New("test cases failed")
 
 // issues adds a row per issue of report.
 func issues(table *stepTable, report *adminjson.Report) {

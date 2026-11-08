@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"time"
+
+	"github.com/heynemann/go-plg/internal/memfs"
 )
 
 // checkStorage is the storage name a checked candidate's [PluginInfo] and errors carry.
@@ -78,51 +80,74 @@ func (c *Container) checkAgainst(ctx context.Context, reg *registration, storeNa
 func (c *Container) check(ctx context.Context, reg *registration, key string, src *source, opened fs.FS,
 	report *Report,
 ) error {
-	var err error
-
-	src.ref, err = checkDescriptor(src.storeName, &src.desc)
-	if err != nil {
-		return err
-	}
-
-	_, err = reg.skips(src)
-	if err != nil {
-		return err
-	}
-
-	src.loader, src.guest, err = reg.cfg.guestFor(src.desc.Language)
-	if err != nil {
-		return err
-	}
-
-	src.limit = instanceLimit(reg.cfg.limit(src.loader), &src.desc)
-
-	files, err := snapshotPlugin(ctx, src, opened)
-	if err != nil {
-		return err
-	}
-
-	launch, _, err := c.prepareLaunch(ctx, reg, key, src, files, report)
+	cand, err := c.prepareCandidate(ctx, reg, key, src, opened, report)
 	if err != nil {
 		return err
 	}
 
 	if reg.validation != nil {
 		found := len(report.Issues)
-		err = c.validate(ctx, reg, src, files, launch, src.limit, report)
-		c.countValidation(ctx, reg, launch, triggerCheck, err, report.Issues[found:])
+		err = c.validate(ctx, reg, src, cand.files, cand.launch, src.limit, report)
+		c.countValidation(ctx, reg, cand.launch, triggerCheck, err, report.Issues[found:])
 
 		return err
 	}
 
-	inst, release, err := c.startCharged(ctx, launch, src.limit, src.limit)
+	inst, release, err := c.startCharged(ctx, cand.launch, src.limit, src.limit)
 	if err != nil {
 		return err
 	}
 
 	defer release()
 
-	c.closeValidation(ctx, launch, inst, c.closeTimeout)
+	c.closeValidation(ctx, cand.launch, inst, c.closeTimeout)
 
 	return nil
+}
+
+// candidate is a plugin version checked against a registration, ready to start instances: their launcher, the
+// meters they are measured in and the version's files.
+type candidate struct {
+	launch *launcher
+	meters *pluginMeters
+	files  *memfs.FS
+}
+
+// prepareCandidate checks the candidate src against reg, copies the files opened and prepares the launcher of
+// its instances, adding the issues found to report; no instance starts.
+func (c *Container) prepareCandidate(ctx context.Context, reg *registration, key string, src *source,
+	opened fs.FS, report *Report,
+) (*candidate, error) {
+	var err error
+
+	src.ref, err = checkDescriptor(src.storeName, &src.desc)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = reg.skips(src)
+	if err != nil {
+		return nil, err
+	}
+
+	src.loader, src.guest, err = reg.cfg.guestFor(src.desc.Language)
+	if err != nil {
+		return nil, err
+	}
+
+	src.limit = instanceLimit(reg.cfg.limit(src.loader), &src.desc)
+
+	cand := &candidate{}
+
+	cand.files, err = snapshotPlugin(ctx, src, opened)
+	if err != nil {
+		return nil, err
+	}
+
+	cand.launch, cand.meters, err = c.prepareLaunch(ctx, reg, key, src, cand.files, report)
+	if err != nil {
+		return nil, err
+	}
+
+	return cand, nil
 }

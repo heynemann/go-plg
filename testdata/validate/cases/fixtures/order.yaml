@@ -1,0 +1,5 @@
+customer: alice
+lines: {$ref: fixtures/lines.yaml}
+placed: 2026-11-08T10:00:00Z
+gift: null
+tags: {channel: web}

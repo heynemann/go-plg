@@ -106,13 +106,27 @@ func (r *registration) renderDispatcher() ([]byte, error) {
 	if r.validation != nil {
 		var err error
 
-		input, err = goabi.TypeOf(r.validation.typ)
+		input, err = r.validation.goType()
 		if err != nil {
-			return nil, fmt.Errorf("validate: %w", err)
+			return nil, err
 		}
 	}
 
 	return goabi.Render(r.contr.described, host, input) //nolint:wrapcheck // renderGo wraps it
+}
+
+// goType is the validation input as the Go dispatcher writes it.
+func (v *validation) goType() (*goabi.Type, error) {
+	if v.described != nil {
+		return v.described, nil
+	}
+
+	input, err := goabi.TypeOf(v.typ)
+	if err != nil {
+		return nil, fmt.Errorf("validate: %w", err)
+	}
+
+	return input, nil
 }
 
 // goExt is the extension of Go source files.

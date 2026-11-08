@@ -1,0 +1,96 @@
+# Cases every pricing plugin passes, whatever its language.
+httpPolicy:
+  allowedHosts: [coupons.example.com]
+  maxRequestsPerCall: 2
+cases:
+  - name: gold customers get 10% off
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - method: Tier
+        args: {customer: alice}
+        result: gold
+        times: 1
+    expect:
+      result: {total: 900, discount: 100, reasons: [gold]}
+
+  - name: a gift is a reason
+    call: Quote
+    input:
+      order:
+        customer: bob
+        lines: [{sku: fig, qty: 4, cents: 25}]
+        placed: 2026-11-08T10:00:00Z
+        gift: {message: happy birthday}
+        tags: null
+    host:
+      - {method: Tier, args: {customer: alice}, result: gold, times: 0}
+      - {method: Tier, result: silver}
+    expect:
+      result: {total: 100, discount: 0, reasons: [gift]}
+
+  - name: the directory's error is the call's
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - {method: Tier, error: the directory is down}
+    expect:
+      error: the directory is down
+
+  - name: an empty order asks nobody
+    call: Quote
+    input:
+      order: {customer: carol, lines: []}
+    host:
+      - {method: Tier, result: gold, times: 0}
+    expect:
+      error: empty order
+
+  - name: split returns the parts and the rest
+    call: Split
+    input: {cents: 10, parts: 3}
+    expect:
+      result: [[3, 3, 3], 1]
+
+  - name: coupons come from the coupon service
+    call: Coupon
+    input: {code: SAVE10}
+    http:
+      - url: https://coupons.example.com/codes/SAVE10
+        headers: {Content-Type: text/plain}
+        body: "10"
+        times: 1
+    expect:
+      result: 10
+
+  - name: an unknown coupon
+    call: Coupon
+    input: {code: NOPE}
+    http:
+      - {method: get, url: "https://coupons.example.com/codes/NOPE", status: 404}
+    expect:
+      error: unknown coupon NOPE
+
+  - name: the policy refuses other hosts
+    call: Coupon
+    input: {code: "https://coupons.example.org/codes/SAVE10"}
+    http:
+      - {url: "https://coupons.example.org/codes/SAVE10", body: "90", times: 0}
+    expect:
+      error: host not allowed
+
+  - name: within the limits
+    call: Validate
+    input:
+      in: {maxPercent: 20}
+    expect:
+      issues: []
+
+  - name: over the limits
+    call: Validate
+    input:
+      in: {maxPercent: 5}
+    expect:
+      issues: [{severity: error, code: gold.percent, field: maxPercent}]

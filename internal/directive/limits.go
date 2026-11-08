@@ -29,7 +29,8 @@ var memoryUnits = []struct { //nolint:gochecknoglobals // a constant table
 type Limits struct {
 	// Memory is the memory limit of each instance, in bytes (plg.WithMemoryLimit).
 	Memory uint64
-	// Timeout bounds each call, Create included.
+	// Timeout bounds, under plg validate, the load check's Create and each test case's Create and call (Validate
+	// included); test cases fall back to 10s when no source sets it.
 	Timeout time.Duration
 	// PoolMin and PoolMax are the pool's bounds (plg.WithPool); both are set or neither is.
 	PoolMin, PoolMax int

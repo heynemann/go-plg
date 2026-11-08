@@ -2,7 +2,6 @@ package plg
 
 import (
 	"context"
-	"crypto/x509"
 	"log/slog"
 	"time"
 
@@ -56,22 +55,35 @@ func WithHTTP(policy HTTPPolicy) RegisterOption {
 	}
 }
 
-// httpClient returns the client enforcing the Register call's policy, trusting roots for https (nil: the
-// system's): a refusing one without WithHTTP.
-func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (*httpcap.Client, error) {
+// httpClient returns the client enforcing the Register call's policy, trusting its roots for https (nil: the
+// system's) or answered by its transport (plg validate's test cases): a refusing one without WithHTTP.
+func httpClient(cfg *registerConfig, logger *slog.Logger) (*httpcap.Client, error) {
+	policy := cfg.http
 	if policy == nil {
 		return httpcap.Disabled(logger), nil
 	}
 
-	client, err := httpcap.New(httpcap.Policy{
-		RootCAs:              roots,
+	capPolicy := httpcap.Policy{
+		RootCAs:              cfg.httpRoots,
 		AllowedHosts:         policy.AllowedHosts,
 		BlockPrivateNetworks: policy.BlockPrivateNetworks == nil || *policy.BlockPrivateNetworks,
 		Timeout:              policy.Timeout,
 		MaxRequestBytes:      policy.MaxRequestBytes,
 		MaxResponseBytes:     policy.MaxResponseBytes,
 		MaxRequestsPerCall:   policy.MaxRequestsPerCall,
-	}, logger)
+	}
+
+	var (
+		client *httpcap.Client
+		err    error
+	)
+
+	if cfg.httpTransport != nil {
+		client, err = httpcap.NewAnswered(capPolicy, cfg.httpTransport, logger)
+	} else {
+		client, err = httpcap.New(capPolicy, logger)
+	}
+
 	if err != nil {
 		return nil, err //nolint:wrapcheck // it wraps ErrInvalidHTTPPolicy (httpcap.ErrInvalidPolicy) with the reason
 	}

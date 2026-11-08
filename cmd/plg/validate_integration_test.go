@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,8 @@ import (
 // TestValidateFromTheCommand builds the plg command and validates the testdata's plugins with it, the contract
 // module served by a file-based GOPROXY: a good TypeScript plugin passes with exit code 0, and one whose Create
 // fails exits 1, the failed step on stdout and the verdict on stderr; the testdata's author repository, whose
-// plugins of the three languages import its shared directory, passes with a summary.
+// plugins of the three languages import its shared directory, passes with a summary; a Lua plugin whose test
+// cases all pass exits 0.
 func TestValidateFromTheCommand(t *testing.T) {
 	t.Parallel()
 
@@ -42,7 +44,7 @@ func TestValidateFromTheCommand(t *testing.T) {
 		t.Helper()
 
 		//nolint:gosec // G204: runs the plg command the test built
-		cmd := exec.CommandContext(t.Context(), bin, "validate", filepath.Join(testdata, "plugins", plugin))
+		cmd := exec.CommandContext(t.Context(), bin, "validate", plugin)
 		cmd.Env = environ
 
 		var stdout, stderr bytes.Buffer
@@ -59,21 +61,30 @@ func TestValidateFromTheCommand(t *testing.T) {
 		return stdout.String(), stderr.String(), 0
 	}
 
-	stdout, stderr, code := plgValidate("tsgood")
+	stdout, stderr, code := plgValidate(filepath.Join(testdata, "plugins", "tsgood"))
 	require.Equal(t, 0, code, stdout+stderr)
 	assert.Contains(t, stdout, "contract   ok      module example.com/rewards v1.2.0 (")
 	assert.Contains(t, stdout, "load       ok      Create ran in the typescript guest (version ")
 
-	stdout, stderr, code = plgValidate("createfails")
+	stdout, stderr, code = plgValidate(filepath.Join(testdata, "plugins", "createfails"))
 	assert.Equal(t, 1, code, stdout+stderr)
 	assert.Contains(t, stdout, "load       FAIL    plugin Create failed: no cohort configured\n")
 	assert.Contains(t, stderr, "plg validate: "+filepath.Join(testdata, "plugins", "createfails")+
 		" is not a valid plugin\n")
 
-	stdout, stderr, code = plgValidate(filepath.Join("..", "repo"))
+	stdout, stderr, code = plgValidate(filepath.Join(testdata, "repo"))
 	require.Equal(t, 0, code, stdout+stderr)
 	assert.Contains(t, stdout, "\nrules/silver\nSTEP ")
 	assert.Contains(t, stdout, "shared     ok      copied lib at vendor/example.com/rewardsrepo/lib\n")
 	assert.Contains(t, stdout, "\n\nPLUGIN        RESULT  DETAIL\ngold          ok      \nrules/silver  ok      \n"+
 		"coupon        ok      \n")
+
+	pricing := filepath.Join(t.TempDir(), "luapricing")
+	require.NoError(t, os.CopyFS(pricing, os.DirFS(filepath.Join(testdata, "plugins", "luapricing"))))
+	require.NoError(t, os.CopyFS(pricing, os.DirFS(filepath.Join(testdata, "cases"))))
+	require.NoError(t, os.Remove(filepath.Join(pricing, "tests", "fail.yaml")))
+
+	stdout, stderr, code = plgValidate(pricing)
+	require.Equal(t, 0, code, stdout+stderr)
+	assert.True(t, strings.HasSuffix(stdout, "\ntests      ok      10 passed\n"), stdout)
 }

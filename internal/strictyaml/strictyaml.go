@@ -54,16 +54,45 @@ func Decode(data []byte, name string, out any) error {
 
 // checkTree parses data into a node tree and checks it holds exactly one document, a mapping, within the subset.
 func checkTree(data []byte, name string) error {
-	doc, err := oneDocument(data, name)
+	root, err := document(data, name)
 	if err != nil {
 		return err
 	}
 
-	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+	if root.Kind != yaml.MappingNode {
 		return fmt.Errorf("%s %w", name, errMapping)
 	}
 
-	return checkNode(doc.Content[0])
+	return checkNode(root)
+}
+
+// Parse checks that data, the content of the file name (named in the errors), is one document within the subset
+// and returns its root node, of any kind (a mapping, a sequence or a scalar). The caller bounds the input's size.
+func Parse(data []byte, name string) (*yaml.Node, error) {
+	root, err := document(data, name)
+	if err == nil {
+		err = checkNode(root)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return root, nil
+}
+
+// document parses data, which must hold exactly one document, and returns the document's root node.
+func document(data []byte, name string) (*yaml.Node, error) {
+	doc, err := oneDocument(data, name)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(doc.Content) != 1 {
+		return nil, fmt.Errorf("%s %w", name, errNoDocument)
+	}
+
+	return doc.Content[0], nil
 }
 
 // oneDocument parses data, which must hold exactly one document, into a node tree.

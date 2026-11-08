@@ -1,0 +1,6 @@
+implements: example.com/shop/pricing.Rule@v1.0.0
+language: go
+entrypoint: plugin.go
+owner:
+  team: {name: pricing}
+  contact: {channel: "#pricing"}

@@ -107,6 +107,7 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 		}
 
 		assert.NotContains(t, got.stdout, "warning", "%s: its owner is complete", tc.dir)
+		assert.Contains(t, got.stdout, "tests      ok      no test cases (tests/*.yaml)\n", tc.dir)
 	}
 
 	warned := []struct {

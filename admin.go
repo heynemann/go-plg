@@ -196,14 +196,8 @@ func newAdminReport(src *Report) *adminjson.Report {
 		Owner:    newAdminOwner(&src.Owner),
 		Key:      src.Key,
 		Version:  src.Version,
-		Issues:   make([]adminjson.Issue, len(src.Issues)),
+		Issues:   newAdminIssues(src.Issues),
 		Duration: src.Duration.Nanoseconds(),
-	}
-
-	for i, issue := range src.Issues {
-		report.Issues[i] = adminjson.Issue{
-			Severity: string(issue.Severity), Code: issue.Code, Message: issue.Message, Field: issue.Field,
-		}
 	}
 
 	if src.Err != nil {
@@ -212,6 +206,18 @@ func newAdminReport(src *Report) *adminjson.Report {
 	}
 
 	return report
+}
+
+func newAdminIssues(src []Issue) []adminjson.Issue {
+	issues := make([]adminjson.Issue, len(src))
+
+	for i, issue := range src {
+		issues[i] = adminjson.Issue{
+			Severity: string(issue.Severity), Code: issue.Code, Message: issue.Message, Field: issue.Field,
+		}
+	}
+
+	return issues
 }
 
 func newAdminPanic(src *PanicError) *adminjson.Panic {
