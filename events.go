@@ -34,8 +34,9 @@ const (
 	// validation's, its Err set when it failed. A validation that could not run, or that finished after one
 	// started later, emits nothing.
 	EventValidated EventKind = "validated"
-	// EventSkipped is a listed plugin left out because the Register does not enable its language, at Register and
-	// at each reload.
+	// EventSkipped is a listed plugin left out, at Register and at each reload: it implements another interface
+	// than the Register's ([ErrOtherInterface]), or the Register does not enable its language
+	// ([ErrUnsupportedLanguage]). Its Report says which in Err.
 	EventSkipped EventKind = "skipped"
 )
 
@@ -44,8 +45,8 @@ const (
 type Event struct {
 	// At is when it happened.
 	At time.Time
-	// Report is the load's (Loaded, Rejected) or the on-demand validation's (Validated, and Rejected when the
-	// validation unpublished the version); nil for Retired, Panicked and Skipped.
+	// Report is the load's (Loaded, Rejected), the on-demand validation's (Validated, and Rejected when the
+	// validation unpublished the version) or the skip's (Skipped); nil for Retired and Panicked.
 	Report *Report
 	// Panic is the reported failure (Panicked); nil for the other kinds.
 	Panic *PanicError

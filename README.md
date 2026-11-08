@@ -424,14 +424,14 @@ or with a malformed value, is `plg.ErrInvalidManifest`, and a `Descriptor` witho
 `plg.ErrInvalidDescriptor`. `Descriptor.Implements` carries it; changing it is a new descriptor, so a reload
 loads the plugin again.
 
-**Which plugins a Register takes.** A Register loads only the plugins declaring its own interface (the package
-path and name of `T`, an external test package `foo_test` counting as `foo`). The others are skipped, not
-errors, so one storage can hold the plugins of several interfaces and serve several registrations. The interface
-is checked first: a plugin of another interface is skipped with `plg.ErrOtherInterface`, one of this interface in
-a language not enabled with `plg.ErrUnsupportedLanguage`. Either way the skip is logged (each reason its own
-message, at Info at Register and Debug at a reload), counted in `plg.plugin.skipped` with a `reason` attribute
-(`interface` or `language`), emitted as a Skipped event and shown as status `skipped` whose `Rejection` report's
-`Err` is the reason.
+**Which plugins a Register takes.** A Register loads only the plugins declaring its own interface: the package
+path and name of `T`, compared exactly (for a `T` in an external test package, plugins name that package,
+`foo_test`, not `foo`). The others are skipped, not errors, so one storage can hold the plugins of several
+interfaces and serve several registrations. The interface is checked first: a plugin of another interface is
+skipped with `plg.ErrOtherInterface`, one of this interface in a language not enabled with
+`plg.ErrUnsupportedLanguage`. Either way the skip is logged (each reason its own message, at Info at Register and
+Debug at a reload), counted in `plg.plugin.skipped` with a `reason` attribute (`interface` or `language`), emitted
+as a Skipped event and shown as status `skipped` whose `Rejection` report's `Err` is the reason.
 
 **Version rule.** The service's contract version is the version of the module providing `T`'s package in the
 program's build info (`runtime/debug.ReadBuildInfo`; a module replaced by another version counts as that version).
@@ -964,7 +964,7 @@ c := plg.New(plg.WithOnEvent(func(ctx context.Context, e plg.Event) {
 | `EventRetired` | a reload replaced or removed a version, `Unpublish` removed it, or `Close` closed the container | |
 | `EventPanicked` | a `PanicError` was reported (what `WithOnPanic` gets) | `Panic` |
 | `EventValidated` | an on-demand validation ran (`plg.Validate`, `plg.ValidateAll`) | its `Report` |
-| `EventSkipped` | a listed plugin's language is not enabled, at Register and each reload | |
+| `EventSkipped` | a listed plugin implements another interface, or its language is not enabled, at Register and each reload | its `Report`, whose `Err` is `plg.ErrOtherInterface` or `plg.ErrUnsupportedLanguage` |
 
 Every event carries the plugin's `Key`, `Version`, `Language`, `Storage` and `Owner` (empty where not known: a
 plugin rejected before its files were read has only its descriptor's version, if any, and an owner a listing
