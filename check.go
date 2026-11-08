@@ -51,9 +51,16 @@ func (c *Container) checkCandidate(ctx context.Context, name string, desc *Descr
 	default:
 	}
 
+	return c.checkAgainst(ctx, reg, checkStorage, desc, files)
+}
+
+// checkAgainst checks the candidate desc with files against reg, as listed by the storage named storeName.
+func (c *Container) checkAgainst(ctx context.Context, reg *registration, storeName string, desc *Descriptor,
+	files fs.FS,
+) (Report, error) {
 	ctx = context.WithValue(ctx, checkKey{}, true) // its PanicErrors emit no events
-	src := source{storeName: checkStorage, desc: *desc}
-	key := name + "/" + desc.Key
+	src := source{storeName: storeName, desc: *desc}
+	key := reg.name + "/" + desc.Key
 	report := newReport(key, &src, time.Now())
 
 	err := c.loadStep(ctx, key, &src, func() error { return c.check(ctx, reg, key, &src, files, report) })

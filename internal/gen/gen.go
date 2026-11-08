@@ -79,14 +79,14 @@ func Generate(dir string, interfaces []string, opts Options) (File, error) {
 		return File{}, err
 	}
 
-	pkg, err := load(dir)
+	pkg, err := Load(dir, "", nil)
 	if err != nil {
 		return File{}, err
 	}
 
 	ifaces := make([]*types.Interface, len(interfaces))
 	for i, name := range interfaces {
-		ifaces[i], err = lookupInterface(pkg, name)
+		_, ifaces[i], err = Interface(pkg, name)
 		if err != nil {
 			return File{}, err
 		}
@@ -146,9 +146,12 @@ func checkNames(names []string) error {
 	return nil
 }
 
-// load parses the package's files the guest receives (see [contractsrc.Include]), checks their imports
-// against the guest allowlist and type-checks those that build on this platform.
-func load(dir string) (*types.Package, error) {
+// Load parses the files of the Go package in dir that the guest receives (see [contractsrc.Include]), checks
+// their imports against the guest allowlist and type-checks those that build on this platform: the contract
+// package as plg gen and plg validate see it. The package's path is importPath; empty means its name. The
+// standard library comes from imp (nil means a gc importer of its own), so packages type-checked with the same
+// importer share its packages.
+func Load(dir, importPath string, imp types.Importer) (*types.Package, error) {
 	pkgDir := os.DirFS(dir)
 
 	entries, err := fs.ReadDir(pkgDir, ".")
@@ -189,11 +192,24 @@ func load(dir string) (*types.Package, error) {
 		return nil, fmt.Errorf("%w: no Go source files in %s", ErrPackage, dir)
 	}
 
-	// The allowlist was checked above, so only standard library packages are imported: their export data,
-	// which the go command keeps in its build cache, is much faster to load than their source.
-	config := types.Config{Importer: importer.ForCompiler(fset, "gc", nil)}
+	return check(fset, files, importPath, imp)
+}
 
-	pkg, err := config.Check(files[0].Name.Name, fset, files, nil)
+// check type-checks the files of a package as Load describes.
+func check(fset *token.FileSet, files []*ast.File, importPath string, imp types.Importer) (*types.Package, error) {
+	// The allowlist was checked, so only standard library packages are imported: their export data, which the go
+	// command keeps in its build cache, is much faster to load than their source.
+	if imp == nil {
+		imp = importer.ForCompiler(fset, "gc", nil)
+	}
+
+	if importPath == "" {
+		importPath = files[0].Name.Name
+	}
+
+	config := types.Config{Importer: imp}
+
+	pkg, err := config.Check(importPath, fset, files, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrPackage, err)
 	}
@@ -248,35 +264,42 @@ func disallowedImports(fset *token.FileSet, file *ast.File) []string {
 	return disallowed
 }
 
-// lookupInterface returns the interface the package declares as name.
-func lookupInterface(pkg *types.Package, name string) (*types.Interface, error) {
+// Interface returns the interface the package declares as name, and its underlying interface: a named,
+// non-generic interface that is not a type constraint, none of whose methods M has a sibling WM (the adapter's
+// field for M).
+func Interface(pkg *types.Package, name string) (*types.Named, *types.Interface, error) {
 	obj, ok := pkg.Scope().Lookup(name).(*types.TypeName)
 	if !ok {
-		return nil, fmt.Errorf("%w: package %s declares no type %s", ErrInterface, pkg.Name(), name)
+		return nil, nil, fmt.Errorf("%w: package %s declares no type %s", ErrInterface, pkg.Name(), name)
 	}
 
 	if generic, isGeneric := obj.Type().(interface{ TypeParams() *types.TypeParamList }); isGeneric &&
 		generic.TypeParams().Len() > 0 {
-		return nil, fmt.Errorf("%w: %s is generic", ErrInterface, name)
+		return nil, nil, fmt.Errorf("%w: %s is generic", ErrInterface, name)
 	}
 
 	iface, ok := obj.Type().Underlying().(*types.Interface)
 	if !ok {
-		return nil, fmt.Errorf("%w: %s is a %s", ErrInterface, name, obj.Type().Underlying())
+		return nil, nil, fmt.Errorf("%w: %s is a %s", ErrInterface, name, obj.Type().Underlying())
 	}
 
 	if !iface.IsMethodSet() {
-		return nil, fmt.Errorf("%w: %s is a type constraint", ErrInterface, name)
+		return nil, nil, fmt.Errorf("%w: %s is a type constraint", ErrInterface, name)
 	}
 
 	for m := range iface.Methods() {
 		if hasMethod(iface, "W"+m.Name()) {
-			return nil, fmt.Errorf("%w: %s has methods %s and W%[3]s; the adapter's field W%[3]s for %[3]s "+
+			return nil, nil, fmt.Errorf("%w: %s has methods %s and W%[3]s; the adapter's field W%[3]s for %[3]s "+
 				"would clash with method W%[3]s", ErrInterface, name, m.Name())
 		}
 	}
 
-	return iface, nil
+	named, ok := types.Unalias(obj.Type()).(*types.Named)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s is an alias of an unnamed interface", ErrInterface, name)
+	}
+
+	return named, iface, nil
 }
 
 func hasMethod(iface *types.Interface, name string) bool {

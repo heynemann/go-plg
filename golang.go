@@ -9,7 +9,6 @@ import (
 	"go/token"
 	"io/fs"
 	"path"
-	"reflect"
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/engine"
@@ -55,6 +54,15 @@ var (
 // types clash with) fails with [ErrInvalidHost], or [ErrInvalidOption] without a Host: the validation input is a
 // named type, which renders as its name.
 func (r *registration) renderGo() error {
+	dispatcher, err := r.renderDispatcher()
+	if err != nil && r.host != nil {
+		return fmt.Errorf("%w %s: rendering the Go dispatcher: %w", ErrInvalidHost, r.host.name, err)
+	}
+
+	if err != nil {
+		return fmt.Errorf("%w: rendering the Go dispatcher: %w", ErrInvalidOption, err)
+	}
+
 	payload := goabi.InitPayload{
 		GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath, Validate: r.validation != nil,
 	}
@@ -62,26 +70,11 @@ func (r *registration) renderGo() error {
 		payload.Methods = append(payload.Methods, meth.name)
 	}
 
-	var hostIface, input reflect.Type
-
 	if r.host != nil {
-		hostIface, payload.Host, payload.HostPath = r.host.iface, r.host.iface.String(), r.host.iface.PkgPath()
+		payload.Host, payload.HostPath = r.host.name, r.host.pkgPath
 		for _, meth := range r.host.methods {
 			payload.HostMethods = append(payload.HostMethods, meth.name)
 		}
-	}
-
-	if r.validation != nil {
-		input = r.validation.typ
-	}
-
-	dispatcher, err := goabi.RenderDispatcher(r.contr.iface, hostIface, input)
-	if err != nil && r.host != nil {
-		return fmt.Errorf("%w %s: rendering the Go dispatcher: %w", ErrInvalidHost, r.host.iface, err)
-	}
-
-	if err != nil {
-		return fmt.Errorf("%w: rendering the Go dispatcher: %w", ErrInvalidOption, err)
 	}
 
 	encoded, err := payload.Append(nil)
@@ -92,6 +85,29 @@ func (r *registration) renderGo() error {
 	r.dispatcher, r.goPayload = dispatcher, encoded
 
 	return nil
+}
+
+// renderDispatcher renders the Go dispatcher for the contract with the registration's Host and validation input.
+func (r *registration) renderDispatcher() ([]byte, error) {
+	var (
+		host  *goabi.Interface
+		input *goabi.Type
+	)
+
+	if r.host != nil {
+		host = r.host.described
+	}
+
+	if r.validation != nil {
+		var err error
+
+		input, err = goabi.TypeOf(r.validation.typ)
+		if err != nil {
+			return nil, fmt.Errorf("validate: %w", err)
+		}
+	}
+
+	return goabi.Render(r.contr.described, host, input) //nolint:wrapcheck // renderGo wraps it
 }
 
 // goExt is the extension of Go source files.
@@ -174,7 +190,7 @@ func goSourceTree(contr *contract, dispatcher []byte, files fs.FS, entrypoint st
 
 	var tree memfs.Builder
 
-	err = tree.AddTree(path.Join("src", contr.iface.PkgPath()), contr.source, ".")
+	err = tree.AddTree(path.Join("src", contr.pkgPath), contr.source, ".")
 	if err == nil {
 		err = tree.AddTree(path.Join("src", goabi.PluginImportPath), files, dir)
 	}

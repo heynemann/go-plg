@@ -322,7 +322,7 @@ func TestCheckContractJudgesThePinAgainstTheBuild(t *testing.T) {
 func TestDecodeResultsRejectsMalformedBodies(t *testing.T) {
 	t.Parallel()
 
-	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
+	meth, err := newMethod(new(wire.Planner), new(reflect.TypeFor[pair]().Method(0)), 0, 0)
 	require.NoError(t, err)
 
 	valid, err := wire.AppendString(nil, "x")
@@ -516,7 +516,13 @@ func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
 	}
 
 	if cfg.meters == nil {
-		cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
+		cfg.meters = newPluginMeters(
+			discardInstruments(),
+			cfg.key,
+			cfg.lang,
+			noOwner,
+			methodsOf(reflect.TypeFor[testIface]()),
+		)
 	}
 
 	return newPool(cfg)
@@ -808,7 +814,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 				"test/other",
 				LanguageGo,
 				noOwner,
-				reflect.TypeFor[testIface](),
+				methodsOf(reflect.TypeFor[testIface]()),
 			),
 			limit:   testLimit,
 			minSize: 1,
@@ -1570,7 +1576,13 @@ func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reporter := reporting(slog.DiscardHandler)
 		budget := &memoryBudget{}
-		meters := newPluginMeters(panickingInstruments(t), "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(
+			panickingInstruments(t),
+			"test/k",
+			LanguageGo,
+			noOwner,
+			methodsOf(reflect.TypeFor[testIface]()),
+		)
 		instances := startPool(t, &fakeSpawner{}, &poolConfig{
 			panics: reporter, budget: budget, meters: meters, minSize: 1, maxSize: 1,
 		})
@@ -1601,7 +1613,7 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		instances := startPool(t, spawner, &poolConfig{
 			panics: reporter, budget: budget, minSize: 1, maxSize: 1,
-			meters: newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]()),
+			meters: newPluginMeters(inst, "test/k", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]())),
 		})
 		<-spawner.attempts // warm's
 
@@ -1653,7 +1665,7 @@ func TestAPanickingMeterProviderNeverFailsAnHTTPRequest(t *testing.T) {
 
 	inst := panickingInstruments(t)
 	reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 4, inst)
-	meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]()))
 	done := (&Container{panics: reporter}).httpDone("test/k", LanguageGo, meters)
 
 	assert.NotPanics(t, func() { done(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200}) })
@@ -1707,7 +1719,7 @@ var errTrap = errors.New("wasm error: unreachable")
 func TestCallFailuresArePanicErrors(t *testing.T) {
 	t.Parallel()
 
-	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
+	meth, err := newMethod(new(wire.Planner), new(reflect.TypeFor[pair]().Method(0)), 0, 0)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -2435,7 +2447,13 @@ func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
 		Team: Team{Name: "payments", Department: "finance"}, Org: "commerce", Company: "acme",
 		Maintainers: []Maintainer{{Name: "Ana", Email: "ana@example.com"}}, Labels: map[string]string{"tier": "1"},
 	}
-	meters := newPluginMeters(inst, "n/k", LanguageLua, newOwnerTags(owner, "", ""), reflect.TypeFor[twoMethods]())
+	meters := newPluginMeters(
+		inst,
+		"n/k",
+		LanguageLua,
+		newOwnerTags(owner, "", ""),
+		methodsOf(reflect.TypeFor[twoMethods]()),
+	)
 	ctx := t.Context()
 
 	for _, call := range []struct {
@@ -2482,7 +2500,7 @@ func TestHTTPMeasurements(t *testing.T) {
 	t.Parallel()
 
 	inst, reader, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "web/p", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "web/p", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]()))
 	ctx := t.Context()
 
 	for _, report := range []httpcap.Report{
@@ -2537,7 +2555,7 @@ func TestPoolMeasurements(t *testing.T) {
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		spawner.memory.Store(3 * engine.PageSize)
 
-		meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]()))
 		instances := startPool(t, spawner, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 		observing(t, provider, inst, instances)
 
@@ -2618,7 +2636,7 @@ func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
 	cfg := &poolConfig{
 		spawn: func(context.Context) (instance, error) { return guest, nil }, panics: reporting(slog.DiscardHandler),
 		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1, lanes: 3,
-		meters: newPluginMeters(inst, "test/k", LanguageLua, noOwner, reflect.TypeFor[testIface]()),
+		meters: newPluginMeters(inst, "test/k", LanguageLua, noOwner, methodsOf(reflect.TypeFor[testIface]())),
 	}
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))
@@ -2723,7 +2741,7 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	assert.Contains(t, attr(&records[0], "error").String(), errMeter.Error())
 
 	// Every measurement goes to a no-op instrument instead.
-	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]()))
 	meters.called(t.Context(), 0, time.Millisecond, errFake)
 	meters.requested(t.Context(), &httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
@@ -2885,7 +2903,7 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 	}
 
 	inst, _, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(inst, "n/k", LanguageGo, noOwner, methodsOf(reflect.TypeFor[testIface]()))
 	instances := warmPool(t, &fakeSpawner{}, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 	ctx := t.Context()
 	pluginErr := &PluginError{Key: "n/k", Method: "Do", Message: "no"}
@@ -3079,7 +3097,13 @@ func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFun
 		cfg.panics = reporting(slog.DiscardHandler)
 	}
 
-	cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
+	cfg.meters = newPluginMeters(
+		discardInstruments(),
+		cfg.key,
+		cfg.lang,
+		noOwner,
+		methodsOf(reflect.TypeFor[testIface]()),
+	)
 
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))
@@ -4557,4 +4581,15 @@ func assertEachWritersNewest(t *testing.T, ctr *Container, key string, rounds in
 
 		assert.Equal(t, want, got, "%s: writer %d's newest events, its last ones", key, writer)
 	}
+}
+
+// methodsOf returns the methods of the interface iface as the meters and spans of its plugins name them (they
+// need no codecs).
+func methodsOf(iface reflect.Type) []*method {
+	methods := make([]*method, iface.NumMethod())
+	for i := range methods {
+		methods[i] = &method{name: iface.Method(i).Name, index: uint32(i)}
+	}
+
+	return methods
 }

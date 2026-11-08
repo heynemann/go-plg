@@ -212,18 +212,18 @@ func checkValidationOptions(cfg *registerConfig) (ValidationPolicy, error) {
 func checkValidationInput(contr *contract, typ reflect.Type) error {
 	if typ.Name() == "" || typ.PkgPath() == "" || strings.ContainsRune(typ.Name(), '[') {
 		return fmt.Errorf("%w: WithValidation input %s %w %s", ErrInvalidOption, typ, errValidationType,
-			contr.iface.PkgPath())
+			contr.pkgPath)
 	}
 
 	err := checkData(typ, map[reflect.Type]bool{})
 	if err != nil {
 		return fmt.Errorf("%w: WithValidation input %s %w %s: %w", ErrInvalidOption, typ, errValidationType,
-			contr.iface.PkgPath(), err)
+			contr.pkgPath, err)
 	}
 
-	if typ.PkgPath() != contr.iface.PkgPath() {
+	if typ.PkgPath() != contr.pkgPath {
 		return fmt.Errorf("%w: WithValidation input %s %w %s of %s, whose source Go plugins interpret; it is in %s",
-			ErrInvalidOption, typ, errValidationType, contr.iface.PkgPath(), contr.iface, typ.PkgPath())
+			ErrInvalidOption, typ, errValidationType, contr.pkgPath, contr.described.Type, typ.PkgPath())
 	}
 
 	return nil

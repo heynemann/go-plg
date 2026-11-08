@@ -6,9 +6,9 @@ The contract-to-runtime machinery is factored so the CLI uses the same validatio
 
 **Blocked by:** 01 (Plugins declare the interface they implement)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Integration tests (a contract module in testdata served through a local GOPROXY/GOFLAGS=-mod=mod or a file-based proxy): a good Go, Lua and TS plugin pass; a bad manifest, an unknown or unfetchable contract, a missing interface, a failing Create and a wrong signature each fail with a precise message and non-zero exit
-- [ ] Works offline once the module is in the Go module cache
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Integration tests (a contract module in testdata served through a local GOPROXY/GOFLAGS=-mod=mod or a file-based proxy): a good Go, Lua and TS plugin pass; a bad manifest, an unknown or unfetchable contract, a missing interface, a failing Create and a wrong signature each fail with a precise message and non-zero exit
+- [x] Works offline once the module is in the Go module cache
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)

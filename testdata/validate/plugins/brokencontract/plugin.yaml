@@ -1,0 +1,6 @@
+implements: example.com/rewards/cohort.Broken@v1.2.0
+language: lua
+entrypoint: plugin.lua
+owner:
+  team: {name: growth}
+  contact: {channel: "#growth"}

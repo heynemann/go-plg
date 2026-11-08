@@ -156,15 +156,46 @@ const hostStubType = "plgHost"
 // ErrRender reports an interface the dispatcher cannot be rendered for.
 var ErrRender = errors.New("goabi: cannot render dispatcher")
 
-// RenderDispatcher returns the Go source of the dispatcher package for the named interface iface: its
-// [InitFunc] calls the plugin package's Create and binds each method of the instance to a variable
-// [CallPrefix]+<Method> of the method's type. With a non-nil host interface, Create takes a value of the
-// dispatcher's type implementing host, whose methods call the variables [HostCallPrefix]+<Method>. With a non-nil
-// validate type V (a named type), it also binds the instance's Validate(context.Context, V) ([]plugin.Issue,
-// error), if it has one, to [ValidateVar]. Every package a signature refers to is imported under a generated
-// alias, so the output does not depend on package names. The output is deterministic.
+// RenderDispatcher returns the Go source of the dispatcher package for the named interface iface, described from
+// reflection (see [Render]); host and validate may be nil.
 func RenderDispatcher(iface, host, validate reflect.Type) ([]byte, error) {
-	rnd := renderer{aliases: map[string]string{}, embedded: map[string]reflect.Type{}}
+	described, err := InterfaceOf(iface)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		hostDesc *Interface
+		input    *Type
+	)
+
+	if host != nil {
+		hostDesc, err = InterfaceOf(host)
+		if err != nil {
+			return nil, fmt.Errorf("host: %w", err)
+		}
+	}
+
+	if validate != nil {
+		input, err = TypeOf(validate)
+		if err != nil {
+			return nil, fmt.Errorf("validate: %w", err)
+		}
+	}
+
+	return Render(described, hostDesc, input)
+}
+
+// Render returns the Go source of the dispatcher package for the named interface iface: its [InitFunc] calls the
+// plugin package's Create and binds each method of the instance to a variable [CallPrefix]+<Method> of the
+// method's type. With a non-nil host interface, Create takes a value of the dispatcher's type implementing host,
+// whose methods call the variables [HostCallPrefix]+<Method>. With a non-nil validate type V (a named type), it
+// also binds the instance's Validate(context.Context, V) ([]plugin.Issue, error), if it has one, to
+// [ValidateVar]. Every package a signature refers to is imported under a generated alias, so the output does not
+// depend on package names. The output is deterministic, and the same whether the types were described from
+// reflection or from go/types.
+func Render(iface, host *Interface, validate *Type) ([]byte, error) {
+	rnd := renderer{aliases: map[string]string{}, embedded: map[string]*Type{}}
 
 	err := rnd.collectInterface(iface)
 	if err == nil && host != nil {
@@ -174,8 +205,12 @@ func RenderDispatcher(iface, host, validate reflect.Type) ([]byte, error) {
 		}
 	}
 
+	var validateFn *Func
+
 	if err == nil && validate != nil {
-		err = rnd.collectFunc(ValidateType(validate))
+		validateFn = validateFunc(validate)
+
+		err = rnd.collectFunc(validateFn)
 		if err != nil {
 			err = fmt.Errorf("validate: %w", err)
 		}
@@ -187,54 +222,49 @@ func RenderDispatcher(iface, host, validate reflect.Type) ([]byte, error) {
 
 	rnd.assignAliases()
 
-	return rnd.render(iface, host, validate), nil
+	return rnd.render(iface, host, validateFn), nil
 }
 
-// ValidateType returns the type of the Validate method of plugins validated with an input of type validate:
+// validateFunc returns the signature of the Validate method of plugins validated with an input of type validate:
 // func(context.Context, validate) ([]plugin.Issue, error).
-func ValidateType(validate reflect.Type) reflect.Type {
-	return reflect.FuncOf(
-		[]reflect.Type{reflect.TypeFor[context.Context](), validate},
-		[]reflect.Type{reflect.TypeFor[[]plugin.Issue](), reflect.TypeFor[error]()}, false)
+func validateFunc(validate *Type) *Func {
+	issues := namedOf(reflect.TypeFor[plugin.Issue]())
+
+	return &Func{
+		Params:  []*Type{namedOf(reflect.TypeFor[context.Context]()), validate},
+		Results: []*Type{{Kind: KindSlice, Elem: issues}, namedOf(reflect.TypeFor[error]())},
+	}
 }
 
 type renderer struct {
-	aliases  map[string]string       // import path -> alias; filled with "" by collect, assigned by assignAliases
-	embedded map[string]reflect.Type // the dispatcher's own aliases, see collectEmbedded: name -> denoted type
+	aliases  map[string]string // import path -> alias; filled with "" by collect, assigned by assignAliases
+	embedded map[string]*Type  // the dispatcher's own aliases, see collectEmbedded: name -> denoted type
 	b        strings.Builder
 }
 
 // collectInterface records the import paths of a named interface and of its method signatures.
-func (r *renderer) collectInterface(iface reflect.Type) error {
-	if iface.Kind() != reflect.Interface || iface.Name() == "" || iface.PkgPath() == "" {
-		return fmt.Errorf("%w: %s is not a named interface type", ErrRender, iface)
-	}
+func (r *renderer) collectInterface(iface *Interface) error {
+	r.aliases[iface.Type.Path] = ""
 
-	r.aliases[iface.PkgPath()] = ""
-
-	for m := range iface.Methods() {
-		if !m.IsExported() {
-			return fmt.Errorf("%w: method %s is unexported", ErrRender, m.Name)
-		}
-
-		err := r.collectFunc(m.Type)
+	for i := range iface.Methods {
+		err := r.collectFunc(&iface.Methods[i].Func)
 		if err != nil {
-			return fmt.Errorf("method %s: %w", m.Name, err)
+			return fmt.Errorf("method %s: %w", iface.Methods[i].Name, err)
 		}
 	}
 
 	return nil
 }
 
-func (r *renderer) collectFunc(fn reflect.Type) error {
-	for typ := range fn.Ins() {
+func (r *renderer) collectFunc(fn *Func) error {
+	for _, typ := range fn.Params {
 		err := r.collect(typ)
 		if err != nil {
 			return err
 		}
 	}
 
-	for typ := range fn.Outs() {
+	for _, typ := range fn.Results {
 		err := r.collect(typ)
 		if err != nil {
 			return err
@@ -244,56 +274,38 @@ func (r *renderer) collectFunc(fn reflect.Type) error {
 	return nil
 }
 
-// collect records the import paths typ refers to and rejects what cannot be written as a type expression.
-func (r *renderer) collect(typ reflect.Type) error {
-	if typ.Kind() == reflect.UnsafePointer {
-		return fmt.Errorf("%w: unsafe.Pointer", ErrRender)
-	}
+// collect records the import paths typ refers to and the dispatcher's own aliases of embedded fields.
+func (r *renderer) collect(typ *Type) error {
+	switch typ.Kind {
+	case KindNamed: // named types are referred to by name, their definition stays in their package
+		if typ.Path != "" {
+			r.aliases[typ.Path] = ""
+		}
 
-	if typ.Name() != "" {
-		return r.collectNamed(typ)
-	}
-
-	switch typ.Kind() { //nolint:exhaustive // every other kind is named (handled above) or rejected by default
-	case reflect.Pointer, reflect.Slice, reflect.Array:
-		return r.collect(typ.Elem())
-	case reflect.Map:
-		err := r.collect(typ.Key())
+		return nil
+	case KindMap:
+		err := r.collect(typ.Key)
 		if err != nil {
 			return err
 		}
 
-		return r.collect(typ.Elem())
-	case reflect.Struct:
+		return r.collect(typ.Elem)
+	case KindStruct:
 		return r.collectFields(typ)
+	case KindPointer, KindSlice, KindArray:
+		return r.collect(typ.Elem)
 	default:
-		return fmt.Errorf("%w: unnamed %s type %s", ErrRender, typ.Kind(), typ)
+		return fmt.Errorf("%w: invalid type", ErrRender)
 	}
 }
 
-// collectNamed records a named type's package: named types are referred to by name, their definition stays
-// in their package.
-func (r *renderer) collectNamed(typ reflect.Type) error {
-	if strings.ContainsRune(typ.Name(), '[') {
-		return fmt.Errorf("%w: generic type %s", ErrRender, typ)
-	}
-
-	if typ.PkgPath() != "" {
-		r.aliases[typ.PkgPath()] = ""
-	}
-
-	return nil
-}
-
-func (r *renderer) collectFields(typ reflect.Type) error {
-	for field := range typ.Fields() {
-		if !field.IsExported() {
-			return fmt.Errorf("%w: unexported field %s in %s", ErrRender, field.Name, typ)
-		}
+func (r *renderer) collectFields(typ *Type) error {
+	for i := range typ.Fields {
+		field := &typ.Fields[i]
 
 		err := r.collect(field.Type)
 		if err == nil {
-			err = r.collectEmbedded(&field)
+			err = r.collectEmbedded(field)
 		}
 
 		if err != nil {
@@ -309,7 +321,7 @@ func (r *renderer) collectFields(typ reflect.Type) error {
 // contract's struct{ Embedded }. The dispatcher declares type Embedded = p.Counter and embeds that instead:
 // the field's name and type are then the contract's. The name is exported, so its package does not matter,
 // but the dispatcher has one Embedded only and must not declare that name already.
-func (r *renderer) collectEmbedded(field *reflect.StructField) error {
+func (r *renderer) collectEmbedded(field *Field) error {
 	if !embedsAlias(field) {
 		return nil
 	}
@@ -320,7 +332,7 @@ func (r *renderer) collectEmbedded(field *reflect.StructField) error {
 			field.Name, target)
 	}
 
-	if prev := r.embedded[field.Name]; prev != nil && prev != target {
+	if prev := r.embedded[field.Name]; prev != nil && !sameType(prev, target) {
 		return fmt.Errorf("%w: embedded fields named %s have the types %s and %s: the dispatcher can declare "+
 			"only one alias %s", ErrRender, field.Name, prev, target, field.Name)
 	}
@@ -330,16 +342,35 @@ func (r *renderer) collectEmbedded(field *reflect.StructField) error {
 	return nil
 }
 
+// sameType reports whether a and b describe the same type.
+func sameType(a, b *Type) bool {
+	switch {
+	case a == nil || b == nil:
+		return a == b
+	case a.Kind != b.Kind || a.Path != b.Path || a.Name != b.Name || a.Len != b.Len:
+		return false
+	default:
+		return sameType(a.Elem, b.Elem) && sameType(a.Key, b.Key) && sameFields(a.Fields, b.Fields)
+	}
+}
+
+// sameFields reports whether a and b describe the same struct fields.
+func sameFields(a, b []Field) bool {
+	return slices.EqualFunc(a, b, func(fa, fb Field) bool {
+		return fa.Name == fb.Name && fa.Tag == fb.Tag && fa.Embedded == fb.Embedded && sameType(fa.Type, fb.Type)
+	})
+}
+
 // embedsAlias reports whether field is embedded under another name than its type's: it embeds an alias.
-func embedsAlias(field *reflect.StructField) bool {
-	return field.Anonymous && embeddedType(field.Type).Name() != field.Name
+func embedsAlias(field *Field) bool {
+	return field.Embedded && embeddedType(field.Type).Name != field.Name
 }
 
 // embeddedType returns the type an embedded field of type typ names: T for both T and *T (T cannot be a
 // pointer type).
-func embeddedType(typ reflect.Type) reflect.Type {
-	if typ.Kind() == reflect.Pointer && typ.Name() == "" {
-		return typ.Elem()
+func embeddedType(typ *Type) *Type {
+	if typ.Kind == KindPointer {
+		return typ.Elem
 	}
 
 	return typ
@@ -379,8 +410,8 @@ func (r *renderer) renderEmbedded() {
 	}
 }
 
-func (r *renderer) render(iface, host, validate reflect.Type) []byte {
-	r.printf("// Code generated by plg for %s. DO NOT EDIT.\n\npackage dispatch\n\nimport (\n", iface)
+func (r *renderer) render(iface, host *Interface, validate *Func) []byte {
+	r.printf("// Code generated by plg for %s. DO NOT EDIT.\n\npackage dispatch\n\nimport (\n", iface.Type)
 
 	for _, p := range r.sortedPaths() {
 		r.printf("\t%s %s\n", r.aliases[p], strconv.Quote(p))
@@ -390,21 +421,21 @@ func (r *renderer) render(iface, host, validate reflect.Type) []byte {
 
 	r.renderEmbedded()
 
-	ifaceExpr := r.typeExpr(iface)
-	sigs := make([]signature, iface.NumMethod())
+	ifaceExpr := r.typeExpr(iface.Type)
+	sigs := make([]signature, len(iface.Methods))
 
 	var vars, binds strings.Builder
 
 	for i := range sigs {
-		name := iface.Method(i).Name
-		sigs[i] = r.signature(iface.Method(i).Type)
+		name := iface.Methods[i].Name
+		sigs[i] = r.signature(&iface.Methods[i].Func)
 		fmt.Fprintf(&vars, "var %s%s %s\n", CallPrefix, name, sigs[i].funcExpr())
 		fmt.Fprintf(&binds, "\t%s%s = %s%s(v)\n", CallPrefix, name, bindPrefix, name)
 	}
 
 	hostParam, hostArg := "", ""
 	if host != nil {
-		hostParam, hostArg = r.typeExpr(host), hostStubType+"{}"
+		hostParam, hostArg = r.typeExpr(host.Type), hostStubType+"{}"
 	}
 
 	bindValidate := ""
@@ -413,12 +444,12 @@ func (r *renderer) render(iface, host, validate reflect.Type) []byte {
 	}
 
 	r.printf(initTemplate, ifaceExpr, CreateFunc, InitFunc,
-		strconv.Quote(CreateFunc+" returned a nil "+iface.String()), vars.String(), binds.String(), hostParam, hostArg,
-		CloseVar, bindValidate)
+		strconv.Quote(CreateFunc+" returned a nil "+iface.Type.String()), vars.String(), binds.String(), hostParam,
+		hostArg, CloseVar, bindValidate)
 	r.printf(closeTemplate, ifaceExpr, CloseVar)
 
 	if validate != nil {
-		sig := r.signature(ValidateType(validate))
+		sig := r.signature(validate)
 		r.printf(validateTemplate, ifaceExpr, ValidateVar, sig.funcExpr(), ValidateMethod,
 			strings.TrimPrefix(sig.funcExpr(), "func"))
 	}
@@ -429,7 +460,7 @@ func (r *renderer) render(iface, host, validate reflect.Type) []byte {
 			ret = "return "
 		}
 
-		r.printf(bindTemplate, bindPrefix, iface.Method(i).Name, ifaceExpr, sig.funcExpr(),
+		r.printf(bindTemplate, bindPrefix, iface.Methods[i].Name, ifaceExpr, sig.funcExpr(),
 			strings.Join(sig.params, ", "), sig.results, ret, strings.Join(sig.args, ", "))
 	}
 
@@ -442,14 +473,14 @@ func (r *renderer) render(iface, host, validate reflect.Type) []byte {
 
 // renderHostStubs renders the type implementing host and the variables its methods call. Every method of a
 // valid Host returns at least an error, but the stubs do not depend on it.
-func (r *renderer) renderHostStubs(host reflect.Type) {
-	r.printf("\n// %s implements %s by calling the host.\ntype %s struct{}\n\n", hostStubType, r.typeExpr(host),
+func (r *renderer) renderHostStubs(host *Interface) {
+	r.printf("\n// %s implements %s by calling the host.\ntype %s struct{}\n\n", hostStubType, r.typeExpr(host.Type),
 		hostStubType)
 
-	sigs := make([]signature, host.NumMethod())
+	sigs := make([]signature, len(host.Methods))
 	for i := range sigs {
-		sigs[i] = r.signature(host.Method(i).Type)
-		r.printf("var %s%s %s\n", HostCallPrefix, host.Method(i).Name, sigs[i].funcExpr())
+		sigs[i] = r.signature(&host.Methods[i].Func)
+		r.printf("var %s%s %s\n", HostCallPrefix, host.Methods[i].Name, sigs[i].funcExpr())
 	}
 
 	for i, sig := range sigs {
@@ -458,7 +489,7 @@ func (r *renderer) renderHostStubs(host reflect.Type) {
 			ret = "return "
 		}
 
-		r.printf(hostStubTemplate, hostStubType, host.Method(i).Name, strings.Join(sig.params, ", "), sig.results,
+		r.printf(hostStubTemplate, hostStubType, host.Methods[i].Name, strings.Join(sig.params, ", "), sig.results,
 			ret+HostCallPrefix, strings.Join(sig.args, ", "))
 	}
 }
@@ -471,15 +502,15 @@ type signature struct {
 	args    []string // arguments forwarding the parameters: a0, a1, ..., the variadic one as aN...
 }
 
-func (r *renderer) signature(fn reflect.Type) signature {
+func (r *renderer) signature(fn *Func) signature {
 	var sig signature
 
-	for typ := range fn.Ins() {
-		name := "a" + strconv.Itoa(len(sig.args))
+	for k, typ := range fn.Params {
+		name := "a" + strconv.Itoa(k)
 		expr, arg := r.typeExpr(typ), name
 
-		if fn.IsVariadic() && len(sig.args) == fn.NumIn()-1 {
-			expr, arg = "..."+r.typeExpr(typ.Elem()), name+"..."
+		if fn.Variadic && k == len(fn.Params)-1 {
+			expr, arg = "..."+r.typeExpr(typ.Elem), name+"..."
 		}
 
 		sig.types = append(sig.types, expr)
@@ -487,8 +518,8 @@ func (r *renderer) signature(fn reflect.Type) signature {
 		sig.args = append(sig.args, arg)
 	}
 
-	results := make([]string, 0, fn.NumOut())
-	for typ := range fn.Outs() {
+	results := make([]string, 0, len(fn.Results))
+	for _, typ := range fn.Results {
 		results = append(results, r.typeExpr(typ))
 	}
 
@@ -507,37 +538,39 @@ func (s *signature) funcExpr() string {
 	return "func(" + strings.Join(s.types, ", ") + ")" + s.results
 }
 
-// typeExpr writes typ as a type expression; collect has validated it.
-func (r *renderer) typeExpr(typ reflect.Type) string {
-	if typ.Name() != "" {
-		if typ.PkgPath() == "" {
-			return typ.Name() // predeclared
+// typeExpr writes typ as a type expression.
+func (r *renderer) typeExpr(typ *Type) string {
+	switch typ.Kind {
+	case KindNamed:
+		if typ.Path == "" {
+			return typ.Name // predeclared
 		}
 
-		return r.aliases[typ.PkgPath()] + "." + typ.Name()
-	}
-
-	switch typ.Kind() { //nolint:exhaustive // collect admits only these unnamed kinds
-	case reflect.Pointer:
-		return "*" + r.typeExpr(typ.Elem())
-	case reflect.Slice:
-		return "[]" + r.typeExpr(typ.Elem())
-	case reflect.Array:
-		return "[" + strconv.Itoa(typ.Len()) + "]" + r.typeExpr(typ.Elem())
-	case reflect.Map:
-		return "map[" + r.typeExpr(typ.Key()) + "]" + r.typeExpr(typ.Elem())
-	default: // reflect.Struct
+		return r.aliases[typ.Path] + "." + typ.Name
+	case KindPointer:
+		return "*" + r.typeExpr(typ.Elem)
+	case KindSlice:
+		return "[]" + r.typeExpr(typ.Elem)
+	case KindArray:
+		return "[" + strconv.Itoa(typ.Len) + "]" + r.typeExpr(typ.Elem)
+	case KindMap:
+		return "map[" + r.typeExpr(typ.Key) + "]" + r.typeExpr(typ.Elem)
+	case KindStruct:
 		return r.structExpr(typ)
+	default:
+		return "invalid"
 	}
 }
 
-func (r *renderer) structExpr(typ reflect.Type) string {
-	fields := make([]string, 0, typ.NumField())
+func (r *renderer) structExpr(typ *Type) string {
+	fields := make([]string, 0, len(typ.Fields))
 
-	for field := range typ.Fields() {
-		expr := r.fieldExpr(&field)
+	for i := range typ.Fields {
+		field := &typ.Fields[i]
+
+		expr := r.fieldExpr(field)
 		if field.Tag != "" {
-			expr += " " + strconv.Quote(string(field.Tag))
+			expr += " " + strconv.Quote(field.Tag)
 		}
 
 		fields = append(fields, expr)
@@ -548,13 +581,13 @@ func (r *renderer) structExpr(typ reflect.Type) string {
 
 // fieldExpr writes a struct field without its tag. A field embedding an alias embeds the dispatcher's alias of
 // its name, see collectEmbedded.
-func (r *renderer) fieldExpr(field *reflect.StructField) string {
+func (r *renderer) fieldExpr(field *Field) string {
 	switch {
-	case !field.Anonymous:
+	case !field.Embedded:
 		return field.Name + " " + r.typeExpr(field.Type)
 	case !embedsAlias(field):
 		return r.typeExpr(field.Type)
-	case field.Type != embeddedType(field.Type):
+	case field.Type.Kind == KindPointer:
 		return "*" + field.Name
 	default:
 		return field.Name

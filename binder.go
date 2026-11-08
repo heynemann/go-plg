@@ -24,10 +24,9 @@ type method struct {
 	index   uint32          // the method index of plg_call
 }
 
-// newMethod plans the method with the given index; planner is shared by the contract's methods, so each type
+// newMethod plans sig, the method with the given index; planner is shared by the contract's methods, so each type
 // of the contract is planned once.
-func newMethod(planner *wire.Planner, iface reflect.Type, index, field int) (*method, error) {
-	sig := iface.Method(index)
+func newMethod(planner *wire.Planner, sig *reflect.Method, index, field int) (*method, error) {
 	fn := sig.Type
 	plan := &method{
 		typ:     fn,

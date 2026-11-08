@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -46,6 +47,14 @@ commands:
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
                       requires); pass it to plg.WithGoGuest
+  validate [-host Interface] [-cache-dir dir] <plugin dir>
+                      check a plugin before registering it, exiting non-zero on any error: read its plugin.yaml,
+                      resolve the contract module it pins with the go command (go mod download: GOPROXY,
+                      GOPRIVATE and credentials apply, and a module in the Go module cache needs no network),
+                      type-check the contract, check that a Go plugin's go.mod requires the pinned version, then
+                      load the plugin and run its Create in the real guest, with a Host whose every call fails;
+                      -host names the contract's Host interface a Lua or TypeScript plugin uses (a Go plugin's
+                      Create names it), -cache-dir is the compilation cache directory, as for warm
   status [-profile name] [-format table|json] [-team name] [key]
                       show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
                       detail; -team keeps the plugins whose owner team is name
@@ -73,8 +82,20 @@ type Env struct {
 	Stderr io.Writer
 	// Getenv reads the environment variables (os.Getenv).
 	Getenv func(key string) string
+	// Environ returns the environment (os.Environ), which validate runs the go command in; nil means the
+	// process's.
+	Environ func() []string
 	// Dir is the working directory, against which relative paths resolve.
 	Dir string
+}
+
+// environ returns the environment commands run in.
+func (e *Env) environ() []string {
+	if e.Environ == nil {
+		return os.Environ()
+	}
+
+	return e.Environ()
 }
 
 // Main runs plg with args (the command line without the program name) in env, and returns the process exit
@@ -117,6 +138,8 @@ func run(args []string, env *Env) outcome {
 		return runStatus(env, args)
 	case "events":
 		return runEvents(env, args)
+	case "validate":
+		return runValidate(env, args)
 	default:
 		return outcome{code: exitUsage, msg: fmt.Sprintf("plg: unknown command %q\n\n%s", cmd, usage)}
 	}

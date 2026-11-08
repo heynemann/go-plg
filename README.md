@@ -25,6 +25,8 @@ HTTP allowlist).
 - [Code generation](#code-generation)
 - [Writing plugins](#writing-plugins) ([Go](#go-plugins), [Lua](#lua-plugins), [TypeScript](#typescript-plugins))
 - [Guests and blank imports](#guests-and-blank-imports)
+- [Declaring the interface: `implements`](#declaring-the-interface-implements) and
+  [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate)
 - [Storages](#storages)
 - [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
@@ -443,6 +445,57 @@ is built from a local checkout (a `replace` pointing at a directory, tests and `
 module unless it is built at a tag with no uncommitted changes: the go command stamps an untagged commit with a
 pseudo-version and changes with `+dirty`) or is missing from the build info, the plugin loads with a
 `plg.contract.devel` warning issue (`plg.CodeContractDevel`).
+
+## Checking a plugin before registering it: `plg validate`
+
+`plg validate <plugin dir>` checks a plugin on the author's machine, before any service sees it, with plg's own
+loading code and the real guests (the command links all three):
+
+```sh
+go run github.com/heynemann/go-plg/cmd/plg validate plugins/gold
+```
+
+```
+STEP       RESULT  DETAIL
+manifest   ok      go plugin gold implementing example.com/rewards/cohort.Provider@v1.2.0
+contract   ok      module example.com/rewards v1.2.0 (/home/ana/go/pkg/mod/example.com/rewards@v1.2.0)
+interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)
+go.mod     ok      /home/ana/plugins/gold/go.mod requires example.com/rewards v1.2.0
+types      ok      the plugin's package type-checks against cohort.Provider
+load       ok      Create ran in the go guest (version sha256:a753…)
+```
+
+The steps run in order and stop at the first that fails; the command then exits 1 (2 for a usage error), the
+table on stdout and `plg validate: <dir> is not a valid plugin` on stderr, where plg's log (the plugin's own
+output, compiles, issues) also goes.
+
+- **manifest:** `plugin.yaml` is read with `plg.ParseManifest`; the plugin's key is its directory's name.
+- **contract:** the contract module is resolved at the version `implements` pins, through the local `go` command
+  (`go mod download -json`), so `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `.netrc` credentials and the Go module cache
+  work as for any Go build: once the module is in the cache, validating needs no network (`GOPROXY=off` works). The
+  module providing the package is the one of longest path among the package path and its prefixes, as the go
+  command picks it. Without a `go` command on the `PATH`, the step says so.
+- **interface:** the contract package is type-checked with go/types as `plg gen` type-checks it (only the guest's
+  allowlisted imports), and the interface and its Host are described for the Go dispatcher and the script guests'
+  schema, exactly as a service describes them by reflection: the dispatcher is the same, byte for byte. The method
+  types are those the Go interpreter (yaegi, with the Go guest's symbol tables) gives the contract's source, so a
+  contract whose types the interpreter cannot build fails here, as a Go plugin of it would fail to load.
+- **go.mod** (Go plugins): the `go.mod` of the plugin's module (its directory's or the nearest above) must require
+  the contract module at the pinned version, after its `replace` directives; a `replace` by a local directory is
+  a warning, since its version cannot be told.
+- **types** (Go plugins): the plugin's package is type-checked against the contract, as the Go compiler would, so
+  a method of the wrong signature fails with its file:line:column (the Go interpreter would accept the plugin and
+  fail only once the method is called). A plugin importing a package beyond the contract and the standard library
+  is not type-checked (a warning).
+- **load:** the plugin is checked as [`plg.Check`](#checking-a-candidate-plgcheck) checks a candidate, against a
+  registration of the resolved contract (its module's version is the one the pin is checked against, by the same
+  rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
+  guest's own checks, then `Create` in one throwaway instance of the real guest. The plugins get a stub Host whose
+  every method fails with `plg validate runs plugins without the service's Host: <Host>.<Method> was called`.
+  A Go plugin's `Create` names its Host; Lua and TypeScript plugins name none, so pass `-host <Interface>` (an
+  interface of the contract package) when they use one. Issues follow the `load` row, one row each.
+
+`-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest).
 
 ## Storages
 

@@ -158,7 +158,7 @@ type pluginSpans struct {
 
 // newPluginSpans returns the spans of the version of plugin key in lang, owned by owner, serving iface with
 // the Host hst (nil without one).
-func newPluginSpans(tracing *tracing, key string, lang Language, owner *ownerTags, iface reflect.Type, hst *host,
+func newPluginSpans(tracing *tracing, key string, lang Language, owner *ownerTags, methods []*method, hst *host,
 ) *pluginSpans {
 	plugin := []attribute.KeyValue{
 		attribute.String("key", key), attribute.String("version", owner.version),
@@ -174,20 +174,19 @@ func newPluginSpans(tracing *tracing, key string, lang Language, owner *ownerTag
 		tracing: tracing,
 		key:     key,
 		lang:    lang,
-		calls:   make([]spanStart, iface.NumMethod()),
+		calls:   make([]spanStart, len(methods)),
 		http:    []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(plugin...)},
 	}
 
-	for i := range spans.calls {
-		method := iface.Method(i).Name
-		spans.calls[i] = with("plg.call "+key+"."+method, method)
+	for i, meth := range methods {
+		spans.calls[i] = with("plg.call "+key+"."+meth.name, meth.name)
 	}
 
 	if hst != nil {
 		spans.hosts = make([]spanStart, len(hst.methods))
 
 		for i, meth := range hst.methods {
-			method := hst.iface.String() + "." + meth.name
+			method := hst.name + "." + meth.name
 			spans.hosts[i] = with("plg.host "+method, method)
 		}
 	}

@@ -132,23 +132,26 @@ func (c *Container) prepare(iface reflect.Type, name string, opts []RegisterOpti
 		return nil, err
 	}
 
-	return c.newRegistration(contr, cfg, name)
+	hst, err := newHost(contr, cfg.hosts)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.newRegistration(contr, cfg, name, hst)
 }
 
-// newRegistration prepares the registration of a Register call whose contract and options were checked: its Host,
-// its validation, the Go dispatcher rendered for them, its HTTP client and the script guests' schema.
-func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name string) (*registration, error) {
+// newRegistration prepares the registration of a Register call whose contract, options and Host (nil without one)
+// were checked: its validation, the Go dispatcher rendered for them, its HTTP client and the script guests' schema.
+func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name string, hst *host) (
+	*registration, error,
+) {
 	reg := &registration{
 		contr: contr, cfg: cfg, name: name, keys: xsync.NewMap[string, *listedPlugin](),
-		module: contr.module, dispatcher: contr.dispatcher, goPayload: contr.payload,
+		module: contr.module, dispatcher: contr.dispatcher, goPayload: contr.payload, host: hst,
 	}
 
-	var err error
-
-	reg.host, err = newHost(contr, cfg.hosts)
-	if err == nil {
-		reg.validation, err = newValidation(contr, cfg)
-	}
+	validation, err := newValidation(contr, cfg)
+	reg.validation = validation
 
 	if err == nil && (reg.host != nil || reg.validation != nil) {
 		err = reg.renderGo()
@@ -334,10 +337,10 @@ const (
 // skips a plugin implementing another interface than r's ([ErrOtherInterface]) and, among the others, one in a
 // language the Register does not enable ([ErrUnsupportedLanguage]).
 func (r *registration) skips(src *source) (skipKind, error) {
-	iface := r.contr.iface
-	if src.ref.Package != iface.PkgPath() || src.ref.Interface != iface.Name() {
+	contr := r.contr
+	if src.ref.Package != contr.pkgPath || src.ref.Interface != contr.name {
 		return skipInterface, fmt.Errorf("%w: %s implements %s, not %s.%s", ErrOtherInterface, src.desc.Key,
-			src.ref.Name(), iface.PkgPath(), iface.Name())
+			src.ref.Name(), contr.pkgPath, contr.name)
 	}
 
 	if !r.cfg.enabled(src.desc.Language) {
@@ -726,8 +729,8 @@ func (c *Container) prepareLaunch(ctx context.Context, reg *registration, key st
 		return nil, nil, err
 	}
 
-	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.iface)
-	spans := newPluginSpans(c.tracing, key, src.desc.Language, owner, reg.contr.iface, reg.host)
+	meters := newPluginMeters(c.meters, key, src.desc.Language, owner, reg.contr.methods)
+	spans := newPluginSpans(c.tracing, key, src.desc.Language, owner, reg.contr.methods, reg.host)
 
 	return c.newLauncher(reg, key, src, owner, spec, mod, meters, spans), meters, nil
 }

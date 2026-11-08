@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -39,11 +40,14 @@ type hostSpec struct {
 }
 
 // host is a Register call's Host, prepared once: the call plans of its methods (shared with the plugin
-// methods' code: arguments after the context, results before the error) and impl's bound methods.
+// methods' code: arguments after the context, results before the error) and impl's bound methods. plg validate's
+// Host is a stub (see offline.go) whose methods fail every call.
 type host struct {
-	iface   reflect.Type
-	methods []*method
-	funcs   []reflect.Value // impl's method values, in iface's method order
+	described *goabi.Interface // the Host as the Go dispatcher writes it
+	name      string           // the Host interface as reflect.Type.String writes it: "pkg.Name"
+	pkgPath   string           // the Host interface's package
+	methods   []*method
+	funcs     []reflect.Value // impl's method values, in the Host's method order
 }
 
 var (
@@ -78,9 +82,9 @@ func newHost(contr *contract, specs []hostSpec) (*host, error) {
 		return nil, fmt.Errorf("%w %s: %w", ErrInvalidHost, spec.iface, err)
 	}
 
-	if spec.iface.PkgPath() != contr.iface.PkgPath() {
+	if spec.iface.PkgPath() != contr.pkgPath {
 		return nil, fmt.Errorf("%w %s %w %s of %s, whose source Go plugins interpret; it is in %s",
-			ErrInvalidHost, spec.iface, errHostPackage, contr.iface.PkgPath(), contr.iface, spec.iface.PkgPath())
+			ErrInvalidHost, spec.iface, errHostPackage, contr.pkgPath, contr.described.Type, spec.iface.PkgPath())
 	}
 
 	return prepared, nil
@@ -88,21 +92,40 @@ func newHost(contr *contract, specs []hostSpec) (*host, error) {
 
 // planHost builds the call plans of the Host's methods and binds impl's methods.
 func planHost(spec hostSpec) (*host, error) {
+	described, err := goabi.InterfaceOf(spec.iface)
+	if err != nil {
+		return nil, fmt.Errorf("rendering the Go dispatcher: %w", err)
+	}
+
+	sigs := make([]reflect.Method, spec.iface.NumMethod())
+	funcs := make([]reflect.Value, len(sigs))
+
+	for i := range sigs {
+		sigs[i], funcs[i] = spec.iface.Method(i), spec.impl.Method(i)
+	}
+
+	return plannedHost(described, spec.iface.PkgPath(), sigs, funcs)
+}
+
+// plannedHost builds the call plans of the methods sigs of the Host described, whose package is pkgPath, served
+// by funcs (one per method, of the method's type).
+func plannedHost(described *goabi.Interface, pkgPath string, sigs []reflect.Method, funcs []reflect.Value) (
+	*host, error,
+) {
 	prepared := &host{
-		iface:   spec.iface,
-		methods: make([]*method, spec.iface.NumMethod()),
-		funcs:   make([]reflect.Value, spec.iface.NumMethod()),
+		described: described, name: described.Type.String(), pkgPath: pkgPath,
+		methods: make([]*method, len(sigs)), funcs: funcs,
 	}
 
 	var planner wire.Planner // shared by the methods, so each type is planned once
 
 	for i := range prepared.methods {
-		meth, err := newMethod(&planner, spec.iface, i, -1)
+		meth, err := newMethod(&planner, &sigs[i], i, -1)
 		if err != nil {
 			return nil, err
 		}
 
-		prepared.methods[i], prepared.funcs[i] = meth, spec.impl.Method(i)
+		prepared.methods[i] = meth
 	}
 
 	return prepared, nil
@@ -144,7 +167,7 @@ type hostCaller struct {
 func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw []byte) ([]byte, error) {
 	hst := hc.host
 	if int(index) >= len(hst.methods) {
-		return dst, fmt.Errorf("%w %d of %s", errHostMethod, index, hst.iface)
+		return dst, fmt.Errorf("%w %d of %s", errHostMethod, index, hst.name)
 	}
 
 	meth := hst.methods[index]
@@ -160,7 +183,7 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 		defer func() {
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
 				failure := &PanicError{
-					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.iface.String() + "." + meth.name,
+					Key: hc.key, Language: hc.lang, Phase: PhaseHost, Method: hst.name + "." + meth.name,
 					Owner: hc.owner.owner, tags: hc.owner,
 				}
 				hc.panics.recovered(ctx, failure, v)
@@ -181,7 +204,7 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 func (h *host) answer(ctx context.Context, dst []byte, meth *method, raw []byte) ([]byte, error) {
 	args, err := meth.decodeArgs(ctx, raw)
 	if err != nil {
-		return dst, fmt.Errorf("%w: %s.%s: %w", errHostArgs, h.iface, meth.name, err)
+		return dst, fmt.Errorf("%w: %s.%s: %w", errHostArgs, h.name, meth.name, err)
 	}
 
 	return h.invoke(dst, meth, args), nil
@@ -205,7 +228,7 @@ func (h *host) invoke(dst []byte, meth *method, args []reflect.Value) []byte {
 
 	answer, err := meth.encodeResults(append(dst, byte(wire.StatusOK)), out)
 	if err != nil {
-		msg := fmt.Sprintf("%v: host method %s.%s: %v", ErrConversion, h.iface, meth.name, err)
+		msg := fmt.Sprintf("%v: host method %s.%s: %v", ErrConversion, h.name, meth.name, err)
 
 		return wire.AppendMessage(append(dst, byte(wire.StatusConvert)), msg)
 	}

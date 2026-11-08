@@ -38,7 +38,7 @@ func tracedPlugin(t *testing.T, reporter *panicReporter, tracing *tracing, call 
 	t.Helper()
 
 	iface := reflect.TypeFor[testIface]()
-	meth, err := newMethod(new(wire.Planner), iface, 0, 0)
+	meth, err := newMethod(new(wire.Planner), new(iface.Method(0)), 0, 0)
 	require.NoError(t, err)
 
 	instances := warmPool(t, &fakeSpawner{call: call}, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
@@ -48,7 +48,7 @@ func tracedPlugin(t *testing.T, reporter *panicReporter, tracing *tracing, call 
 
 	if tracing != nil {
 		owner := newOwnerTags(&Owner{Team: Team{Name: "t"}, Org: "o", Company: "c"}, "v1", "s")
-		plug.spans = newPluginSpans(tracing, "test/k", LanguageGo, owner, iface, nil)
+		plug.spans = newPluginSpans(tracing, "test/k", LanguageGo, owner, []*method{meth}, nil)
 	}
 
 	return plug, meth

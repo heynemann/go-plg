@@ -14,7 +14,7 @@ import (
 // sourceFS is where the interpreter reads Go sources from: the real file system (the host's read-only mount
 // inside the guest), with absolute names as yaegi builds them from GoPath.
 //
-// Go files are rewritten by nameParams on the way in, to work around yaegi v0.16.1 mis-binding the frame slots
+// Go files are rewritten by NameParams on the way in, to work around yaegi v0.16.1 mis-binding the frame slots
 // of methods with unnamed parameters (`func (f *T) M(context.Context) (int, error)` reads its receiver from
 // the wrong slot and panics). Naming such parameters `_` is equivalent Go and avoids the bug.
 type sourceFS struct{}
@@ -40,13 +40,13 @@ func (sourceFS) ReadFile(name string) ([]byte, error) {
 		return src, nil
 	}
 
-	return nameParams(src), nil
+	return NameParams(src), nil
 }
 
-// nameParams names every unnamed parameter of every function declaration and function literal `_`. Only
+// NameParams names every unnamed parameter of every function declaration and function literal `_`. Only
 // "_ " is inserted, so line numbers are unchanged. Source that does not parse is returned as is, for the
 // interpreter to report.
-func nameParams(src []byte) []byte {
+func NameParams(src []byte) []byte {
 	fset := token.NewFileSet()
 
 	file, err := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)

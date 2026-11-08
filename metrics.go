@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"reflect"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -424,7 +423,7 @@ type pluginMeters struct {
 }
 
 // newPluginMeters returns the measurements of the version of plugin key in lang serving iface.
-func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerTags, iface reflect.Type,
+func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerTags, methods []*method,
 ) *pluginMeters {
 	keyAttr, langAttr := attribute.String("key", key), attribute.String("language", string(lang))
 	plugin := []attribute.KeyValue{keyAttr, owner.metrics[0], owner.metrics[1], owner.metrics[2]}
@@ -437,12 +436,12 @@ func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerT
 		observe:      []metric.ObserveOption{metric.WithAttributeSet(attribute.NewSet(plugin...))},
 		refillOK:     with(attribute.String("outcome", "ok")).add,
 		refillFailed: with(attribute.String("outcome", "failed")).add,
-		calls:        make([][callOutcomes]measure, iface.NumMethod()),
+		calls:        make([][callOutcomes]measure, len(methods)),
 		statuses:     xsync.NewMap[int, []metric.AddOption](),
 	}
 
 	for i := range meters.calls {
-		methodAttr := attribute.String("method", iface.Method(i).Name)
+		methodAttr := attribute.String("method", methods[i].name)
 		for o := range callOutcomes {
 			meters.calls[i][o] = with(langAttr, methodAttr, attribute.String("outcome", o.String()))
 		}

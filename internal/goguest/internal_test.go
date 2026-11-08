@@ -43,7 +43,7 @@ func TestNameParams(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		assert.Equal(t, tc.want, string(nameParams([]byte(tc.in))), tc.name)
+		assert.Equal(t, tc.want, string(NameParams([]byte(tc.in))), tc.name)
 	}
 }
 

@@ -1,0 +1,6 @@
+implements: example.com/rewards/cohort.Provider@v1.2.0
+language: go
+entrypoint: plugin.go
+owner:
+  team: {name: growth}
+  contact: {channel: "#growth"}
