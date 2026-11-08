@@ -93,6 +93,13 @@ func watch(t *testing.T, log io.Reader) serviceLog {
 func start(t *testing.T, args ...string) string {
 	t.Helper()
 
+	return startWatched(t, args...).url
+}
+
+// startWatched is start, returning the service's log after the line saying it serves too.
+func startWatched(t *testing.T, args ...string) serviceLog {
+	t.Helper()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	logR, logW := io.Pipe()
 	exited := make(chan int, 1)
@@ -114,7 +121,7 @@ func start(t *testing.T, args ...string) string {
 		assert.Equal(t, exitOK, <-exited, "a clean shutdown")
 	})
 
-	return log.url
+	return log
 }
 
 // answer is the service's answer to a request.

@@ -18,10 +18,11 @@ BUDGET_OUT := $(BIN)/budgets.txt
 # not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package: 486-600+ s on CI when three of
 # its tests compiled the custom Go guest cold under the race detector, past go's 10-minute default; 383 s -> 215 s
 # on 4 CPUs here with a cold compilation cache once each guest compiled once (`make warm`, TestMain), so about
-# 350 s on CI, which ran it 1.6 times slower. The other runs take at most 124 s on CI (`make repeat`'s root
-# package). Benchmarks run outside -timeout.
+# 350 s on CI, which ran it 1.6 times slower. SHORT_TEST_TIMEOUT is the other runs': `make repeat`'s root package
+# took 124 s on CI, then 283 s (run 42480219888) and past 300 s (run 42481291163, timed out at 5m) as the unit
+# tests grew, so 10m. Benchmarks run outside -timeout.
 TEST_TIMEOUT := 12m
-SHORT_TEST_TIMEOUT := 5m
+SHORT_TEST_TIMEOUT := 10m
 
 # golangci-lint is pinned and built with the repo's toolchain, into bin/, with a cache of its own. A binary built
 # with an older Go (a distro or Homebrew build) loads this go1.27.3 module without full type information and

@@ -26,10 +26,12 @@ HTTP allowlist).
 - [Writing plugins](#writing-plugins) ([Go](#go-plugins), [Lua](#lua-plugins), [TypeScript](#typescript-plugins))
 - [Guests and blank imports](#guests-and-blank-imports)
 - [Declaring the interface: `implements`](#declaring-the-interface-implements) and
-  [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate),
+  [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate)
+  with [test cases](#test-cases-testsyaml),
   also of [author repositories (`plg.yaml`)](#author-repositories-plgyaml),
-  with [typings for Lua and TypeScript: `plg types`](#typings-plg-types), and
-  [starting and iterating: `plg init` and `plg dev`](#starting-and-iterating-plg-init-and-plg-dev)
+  with [typings for Lua and TypeScript: `plg types`](#typings-plg-types),
+  [starting and iterating: `plg init` and `plg dev`](#starting-and-iterating-plg-init-and-plg-dev), and
+  [packing a plugin: `plg pack`](#packing-a-plugin-plg-pack)
 - [Storages](#storages)
 - [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
@@ -38,7 +40,9 @@ HTTP allowlist).
 - [Secrets](#secrets)
 - [Reloading and polling](#reloading-and-polling)
 - [Stability guarantees and `PanicError`](#stability-guarantees-and-panicerror)
-- [Logs, metrics and traces](#logs-metrics-and-traces)
+- [Logs, metrics and traces](#logs-metrics-and-traces), including
+  [`plg status` and `plg events`](#from-a-terminal-plg-status-and-plg-events) from a terminal
+- [Putting it together: fit to serve, and who to talk to](#putting-it-together-fit-to-serve-and-who-to-talk-to)
 - [Author guide: from a contract to a served plugin](#author-guide-from-a-contract-to-a-served-plugin) and
   [platform guidance](#platform-guidance): publishing artifacts, contracts for large data, side effects
 - [Deployment: `plg warm` and `plg build-guest`](#deployment-plg-warm-and-plg-build-guest)
@@ -363,7 +367,8 @@ func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[gre
 - **Standard library allowlist:** `bufio bytes cmp context encoding/base64 encoding/hex encoding/json errors fmt io
   maps math math/big math/bits math/cmplx math/rand math/rand/v2 net/http (client side, through the host) net/url
   regexp slices sort strconv strings sync sync/atomic time unicode unicode/utf16 unicode/utf8`, plus the contract
-  package and `github.com/heynemann/go-plg/plugin` (the `Issue` a [`Validate`](#validation) returns). Anything
+  package and `github.com/heynemann/go-plg/plugin` (the `Issue` a [`Validate`](#validation) returns and
+  `plugin.Secret`, which reads a [secret](#secrets)). Anything
   else fails Register with `plg.ErrLoad`. To allow more packages (`encoding/xml`, a pure-Go library), build a
   custom guest with [`plg build-guest`](#deployment-plg-warm-and-plg-build-guest).
 - **No goroutines:** a `go` statement fails Register with `plg.ErrGoStatement` (file:line:col). A WebAssembly
@@ -399,7 +404,8 @@ end
   returning `nil, "message"`, is the call's error.
 - Libraries: `base` (without file loading), `string`, `table`, `math`, `utf8`, `coroutine`, a bundled `json`
   module (`json.encode`, `json.decode`, `json.null`, `json.array()`), `host.<Method>(...)` (raises the Host's
-  error) and `http.request{...}`. `require` loads `.lua` files of the plugin's own directory (mounted read-only
+  error), `http.request{...}` and `secrets.get(name)` (see [Secrets](#secrets)). `require` loads `.lua` files of
+  the plugin's own directory (mounted read-only
   at `/plugin`), nothing else; there is no `io`, `os`, `package` or `debug`.
 - Integers are Lua integers, floats are numbers, `[]byte` is a string, `time.Time` is `{seconds, nanos}`.
 
@@ -432,8 +438,8 @@ export function Create() {
   longer than its time limit"). It costs about 40 ms for a small plugin; esbuild in wasm is 50 to 90 times
   slower than natively, about 1 s for 600 KB of source.
 - Several results come back as an array; a `throw` or a rejected promise is the call's error.
-- Globals: the ECMAScript built-ins, `console` (to the service's log), `host` (Host methods return Promises) and
-  `fetch`. No `require`, `process`, `std` or `os`.
+- Globals: the ECMAScript built-ins, `console` (to the service's log), `host` (Host methods return Promises),
+  `fetch` and `secrets` (`secrets.get(name)`, see [Secrets](#secrets)). No `require`, `process`, `std` or `os`.
 - `[]byte` is a `Uint8Array`, `time.Time` is `{seconds, nanos}` (a `Date` is accepted back), nil is `null`.
 
 ## Guests and blank imports
@@ -507,12 +513,15 @@ contract   ok      module example.com/rewards v1.2.0 (/home/ana/go/pkg/mod/examp
 interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)
 limits     ok      memory=64MiB timeout=2s pool=1..8 (//plg:limits)
 go.mod     ok      /home/ana/plugins/gold/go.mod requires example.com/rewards v1.2.0
+sandbox    ok      no go statements, and imports only what the Go guest provides
 types      ok      the plugin's package type-checks against cohort.Provider
 guest      ok      a custom Go guest with encoding/xml, found in the guest cache (/home/ana/.cache/plg/guests/3f9c….wasm)
 load       ok      Create ran in the go guest (version sha256:a753…)
 test       ok      tests/members.yaml: gold members are in the cohort
 test       ok      tests/members.yaml: the directory's error is the call's
 tests      ok      2 passed
+resources  ok      tests/members.yaml: gold members are in the cohort: memory 9.4 MiB of 64.0 MiB (14%), time 2ms of 2s (0%)
+resources  ok      tests/members.yaml: the directory's error is the call's: memory 9.4 MiB of 64.0 MiB (14%), time 1ms of 2s (0%)
 ```
 
 The steps run in order (plg.yaml, manifest, shared, contract, interface, limits, then the language checks: go.mod,
@@ -582,8 +591,8 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
   one other interface that passes plg's Host checks, it is their Host; with several, a failed `load` row is
   followed by the hint `pass -host <A|B>`, and `-host <Interface>` (an interface of the contract package) picks one.
   Issues follow the `load` row, one row each.
-- **sandbox** (Go plugins, before `types`): the plugin may not start goroutines (a `go` statement, the check
-  Register and `plg gen` make too) nor import what the Go guest cannot provide: only the guest's allowlisted
+- **sandbox** (Go plugins, before `types`): the plugin may not start goroutines (a `go` statement, which Register
+  rejects too) nor import what the Go guest cannot provide: only the guest's allowlisted
   standard library, the contract package, its `vendor/` packages and the contract's `//plg:guest-packages`. Each
   offending statement or import is named at its file:line:column, with a hint.
 - **syntax** (Lua plugins): every `.lua` file of the plugin is compiled, without running it, by the real Lua
@@ -677,8 +686,8 @@ cases:
   match it), or `issues` (Validate's; fields left out match anything).
 
 Each case gets a row; a failed one is followed by what was expected and what came back, a line per differing field
-of structs, lists and maps, and a `tests` row sums up. Any failed case (or file that does not parse) makes the
-command exit 1:
+of structs, lists and maps, and a `tests` row sums up, followed by the [`resources`](#checking-a-plugin-before-registering-it-plg-validate)
+rows. Any failed case (or file that does not parse) makes the command exit 1:
 
 ```
 test       ok      tests/pass.yaml: gold customers get 10% off
@@ -706,7 +715,7 @@ shared:                  # directories copied into every plugin's files
   - lib
 limits:                  # override the contract's //plg:limits for every plugin
   memory: 64MiB          # bytes, or KiB, MiB, GiB; from 64KiB to 4GiB
-  timeout: 2s            # bounds Create (not the guest compile or bundling before it)
+  timeout: 2s            # bounds Create and each test case's Create and call
   pool: 1..8             # N or MIN..MAX, from 1 to 4096; plg validate runs one instance, so only printed
 requireOwnership: true   # a plugin without a complete owner fails instead of warning
 replace:                 # contract modules taken from local checkouts, like go.mod's replace
@@ -758,7 +767,8 @@ otherwise. `-host` applies to every plugin.
   directory must be in a Go module.
 - **limits** override, key by key, the limits the contract recommends (its `//plg:limits`), raising or lowering
   them; the `limits` row shows those in force and where each comes from.
-  The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create`; the pool has no effect
+  The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create` and each test case's
+  `Create` and call; the pool has no effect
   on `plg validate`, which runs one instance.
 - **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
@@ -775,7 +785,8 @@ Lua and TypeScript authors get editor support from the contract. `plg types <plu
   name), every type its methods take and return (struct fields under their `json` names; nil-able values, that is
   slices, maps, pointers and `[]byte`, may be `null`; `time.Time` as `plg.Time`, `{seconds, nanos}`, and a `Date`
   wherever the plugin hands a time back), the Host as the `host` global (its methods return Promises), the
-  validation input, `plg.Issue`, and the guest's other globals (`console`, `fetch`, `Headers`, `Response`, text
+  validation input, `plg.Issue`, and the guest's other globals (`console`, `fetch`, `Headers`, `Response`,
+  `secrets`, text
   imports). Types live in a namespace per Go package (`cohort.Provider`, `cohort.Page`; a package named like a
   global gets a `_`), so plugins use them without importing anything:
 
@@ -791,8 +802,8 @@ Lua and TypeScript authors get editor support from the contract. `plg types <plu
   And `tsconfig.json`, the compiler options `plg validate` type-checks with (ECMAScript 2023 and plg's globals,
   no DOM or Node.js, strict), which editors then share.
 - **Lua:** `plg.d.lua`, [Lua Language Server](https://luals.github.io) annotations of the same (a `---@meta` file,
-  never run): classes for the interface, the Host (`host`), the types and plg's `Issue`, `Time`, `http` and
-  `json`. Annotate the plugin's table with `---@class Gold: cohort.Provider` to have its methods checked.
+  never run): classes for the interface, the Host (`host`), the types and plg's `Issue`, `Time`, `http`, `json`
+  and `secrets`. Annotate the plugin's table with `---@class Gold: cohort.Provider` to have its methods checked.
 
 `plg types` never overwrites a file it did not write (its first lines carry
 `Code generated by plg types. DO NOT EDIT.`) and leaves an up-to-date file untouched. `-host <Interface>` names
@@ -822,8 +833,9 @@ another version of the contract module stops `plg init` before it writes anythin
 repository is added to its `plg.yaml`, after the plugins it lists, its comments kept. The new plugin passes
 `plg validate` as written, with a warning until its owner block is filled in (an error under
 `requireOwnership: true`); a Go plugin on a contract with `//plg:validation` also gets a `types` warning, since
-validate does not resolve its `Validate`'s import of plg's `plugin` package, until `go mod tidy` adds plg to its
-module. In an author repository with `shared:` directories, the typings of a Lua or TypeScript plugin (from
+validate type-checks only imports of the contract, vendored packages and the standard library, and its
+`Validate` imports plg's `plugin` package: the warning stays whatever its `go.mod` requires. In an author
+repository with `shared:` directories, the typings of a Lua or TypeScript plugin (from
 `plg init` and `plg types`, checked by validate) include the editor configuration resolving them at their
 repository paths: `tsconfig.json`'s `rootDirs` merges the plugin with the repository's root, and a `.luarc.json`
 lists them in the Lua Language Server's `workspace.library`.
@@ -846,8 +858,8 @@ Split failed: call Split: input gives no "cents" (parameters: cents, parts)
 
 `call <Method> [input file]` calls one method (or `Validate`) in a fresh instance under the plugin's limits, with
 the parameters the YAML input file gives by name, as a test case's `input` (`$ref` relative to the file); the
-Host and HTTP requests fail, as in `plg validate`'s `load`. `run` validates again, and `quit` or the end of the
-input stops it.
+Host, HTTP requests and secret reads fail, as in `plg validate`'s `load`. `run` validates again, and `quit` or
+the end of the input stops it.
 
 ### Packing a plugin: `plg pack`
 
@@ -899,7 +911,7 @@ Services read artifacts with `plg.OpenArtifact` (see [Storages](#storages)); `pl
 ```go
 type Storage interface {
 	Name() string                                           // for logs and errors
-	List(ctx context.Context) ([]plg.Descriptor, error)     // the plugins, each with a Key, Implements, Language, Entrypoint, Version, MemoryLimit, Owner
+	List(ctx context.Context) ([]plg.Descriptor, error)     // the plugins, each with a Key, Implements, Language, Entrypoint, Version, MemoryLimit, Owner, Secrets
 	Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error) // a plugin's files; d is one List returned, not to be modified
 }
 ```
@@ -1044,7 +1056,9 @@ or handle, and at most `plg.MaxOwnerLabels` (32) labels with non-empty keys. The
   `maintainer`, `maintainer_email` and `maintainer_handle`, `oncall`, `channel`, `email`, `repository`, `docs`,
   `runbook`, `issues` and a `labels` group;
 - on every plugin metric, as the `team`, `org` and `company` attributes (empty when not set). Names, addresses and
-  labels never become metric attributes, so they cannot blow up cardinality or leak into dashboards.
+  labels never become metric attributes, so they cannot blow up cardinality or leak into dashboards;
+- on every span of the plugin's calls, as the same `team`, `org` and `company` attributes (see
+  [Logs, metrics and traces](#logs-metrics-and-traces)).
 
 An owner change is a descriptor change: the next reload loads the plugin again even when its version is the same.
 
@@ -1205,8 +1219,8 @@ default: // it would load; report.Issues holds its warnings and info
 }
 ```
 
-`Check` loads the candidate as a reload of that registration would (its contract, Host, HTTP policy, enabled
-languages, memory limits, ownership rules and validation); its files go through the same snapshot limits as a
+`Check` loads the candidate as a reload of that registration would (its contract, Host, HTTP policy, secret
+resolver, enabled languages, memory limits, ownership rules and validation); its files go through the same snapshot limits as a
 storage's, and a descriptor without a `Version` gets their content hash. It runs `Create` and, with
 `WithValidation`, `Validate` in one throwaway instance whose Host calls and HTTP requests see
 `plg.IsValidation(ctx)`, then closes it. Nothing is published: no catalogue entry, no report kept for the
@@ -1281,7 +1295,10 @@ that hop and every later one go without the headers carrying credentials (`Autho
 `https` request's token never follows a redirect to `http`, another port, another host or a subdomain, wildcard
 entries of `AllowedHosts` included. This is stricter than Go's `http.Client`, which keeps them for the same host
 on any port or scheme and for its subdomains; Go plugins get the stricter rule too. The plugin's own headers (the
-Go request's `Header`, `fetch`'s `headers`, `http.request`'s `headers` table) are left as they were.
+Go request's `Header`, `fetch`'s `headers`, `http.request`'s `headers` table) are left as they were, except
+`traceparent` and `tracestate`: when the call is traced, plg sets them to the request's span (see
+[Logs, metrics and traces](#logs-metrics-and-traces)), replacing the plugin's. Each request is a client span
+`plg.http <method>`, a child of the call's span.
 
 A Go plugin's request whose own context (`http.NewRequestWithContext`) has already ended is not sent: it fails with
 the context's error (`context.Canceled`, `context.DeadlineExceeded`) and its body is closed. Once sent, a request
@@ -1352,7 +1369,7 @@ Plugins calling third-party APIs get their credentials from the service instead 
 the names it reads in its `plugin.yaml`:
 
 ```yaml
-secrets: [coupon_token, stripe_key]   # 1 to 64 letters, digits, _ - . each; at most 64
+secrets: [coupon_token, stripe_key]   # 1 to 64 letters, digits, _ - . each, starting with a letter; at most 64
 ```
 
 and the registration resolves them, from a vault, the environment or anything else:
@@ -1430,6 +1447,7 @@ type PanicError struct {
 	Method   string
 	Guest    string    // what the guest wrote to stderr: the Go plugin's panic trace, the runtime's fatal error, ...
 	Stack    []byte    // the host stack, for failures recovered on the host
+	Owner    plg.Owner // the failing plugin's owner; zero when no plugin is involved or it has none
 }
 ```
 
@@ -1440,8 +1458,9 @@ type PanicError struct {
 - **On the host:** every boundary where plg runs code it does not control is behind `recover`: storages, the
   codec, Host methods, the HTTP transport, pollers and refillers, your callbacks, your logger's handler (on every
   record plg logs: loads, skipped plugins, compiles, reloads, closes, HTTP requests and the plugins' own output)
-  and your meter provider (a panic there is a `PanicError` in phase `callback`, the record or measurement is
-  dropped, and `New`, `Register`, the reload, the call, the pool and its instances carry on, their state intact).
+  and your meter and tracer providers (a panic there is a `PanicError` in phase `callback`, the record,
+  measurement or span is dropped, and `New`, `Register`, the reload, the call, the pool and its instances carry
+  on, their state intact).
   esbuild does not run on the host: it bundles TypeScript plugins in a WebAssembly sandbox with its own time and
   memory limits.
 - **Reporting:** each `PanicError` is logged at Error level, counted (`plg.plugin.panics`), passed to
@@ -1654,7 +1673,7 @@ A `<plugin>` (here, one serving its last good version beside an update its valid
   "provenance": {
     "contract": {"path": "example.com/shop", "version": "v1.0.0"},
     "digest": "sha256:5f0c…", "commit": "8e2a91c…", "dirty": false, "plgVersion": "v0.9.0",
-    "report": {"version": 1, "repository": "/src/rules/plg.yaml", "valid": true, "plugins": [{"plugin": "discounts", "…": "…"}]}
+    "report": {"version": 1, "repository": "plg.yaml", "valid": true, "plugins": [{"plugin": "discounts", "…": "…"}]}
   }
   ```
 - **Errors are their messages** (`err.Error()`), never Go values: a report's `error`, a panic's `message` (the
@@ -1806,6 +1825,24 @@ step links to the section that tells it in full. The commands run from a checkou
 ([`examples/authorguide`](examples/authorguide)) runs them as written, with the contract module served by a local
 proxy instead of fetched.
 
+**What the guide needs, and what works before it exists.** As written, the guide needs a release of plg that has
+these commands (`plg init`, `dev`, `pack`, `status`, `events`), for `go install …/cmd/plg@latest`, and the tag
+`examples/v1.0.0` of this repository, the contract version every plugin here pins. Neither is published yet:
+`@latest` installs a plg without these commands, and resolving the contract fails with `unknown revision
+examples/v1.0.0`. Until they are, work from a clone of plg:
+
+- `go install ./cmd/plg` from the checkout installs this plg.
+- Resolve the contract from the checkout with a `replace` in the author repository's `plg.yaml` (see
+  [Author repositories](#author-repositories-plgyaml)): append `replace: {github.com/heynemann/go-plg/examples:
+  ..}` to `examples/rules/plg.yaml`. Inside `examples/rules`, `plg init` (which adds the new plugin to that
+  `plg.yaml`), `plg types`, `plg validate` and `plg dev` then work, each warning that the pin is not checked
+  against the checkout. A plugin outside an author repository has no `plg.yaml`, so step 1 as written needs the
+  tag.
+- `plg pack`, and so `ci.sh`, refuses to pack while that `replace` is set: an artifact must be validated against
+  the module its `plugin.yaml` pins. Steps 5 to 7 therefore need the tag; until then
+  `cd examples && go test -tags integration ./authorguide` runs the whole guide, pack included, with the
+  contract served by a local GOPROXY.
+
 **1. Start a plugin.** Install the command, then let [`plg init`](#starting-and-iterating-plg-init-and-plg-dev)
 write a plugin of the contract (manifest, typings, a skeleton of every method, a test case) and check it:
 
@@ -1820,8 +1857,28 @@ The contract module is fetched by the go command, so a private one needs only wh
 (`GOPRIVATE`, `.netrc`). The new plugin validates, with a warning until its `owner` block names the team (see
 [Ownership](#ownership)); the service of the example requires one, as does the repository's `requireOwnership`.
 
-**2. Iterate.** `plg dev promo` validates the plugin on every save and calls a method on demand (`call Discount
-order.yaml`): see [`plg dev`](#starting-and-iterating-plg-init-and-plg-dev).
+**2. Iterate.** `plg dev promo` validates the plugin on every save and reads commands from stdin (see
+[`plg dev`](#starting-and-iterating-plg-init-and-plg-dev)): `call Discount order.yaml` calls `Discount` in a fresh
+instance with the parameters the file gives, keyed by parameter name (`order`, as in a test case's `input`), not
+a bare order:
+
+<!-- authorguide:order -->
+```yaml
+order: {customer: ada, coupon: SUMMER, items: [{sku: tea, quantity: 2, unitCents: 450}]}
+```
+
+<!-- authorguide:dev -->
+```sh
+plg dev promo
+```
+
+```text
+plg dev> call Discount order.yaml
+Discount: result {reason: "", cents: 0}
+plg dev> quit
+```
+
+The skeleton grants nothing until you write `Discount`; each save validates it again.
 
 **3. Test.** Each `tests/*.yaml` file holds language-neutral cases: inputs, stubbed Host calls, HTTP requests and
 secrets, and the expected result, error or `Validate` issues (see [Test cases](#test-cases-testsyaml)).
@@ -1847,10 +1904,15 @@ plg validate seasonal
 ./ci.sh
 ```
 
+`plg validate` also warns, for `bundle`, that its `types` step did not type-check the plugin: a Go `Validate`
+imports plg's `plugin` package, and only the contract, vendored packages and the standard library are
+type-checked (see [`plg init`](#starting-and-iterating-plg-init-and-plg-dev)). The warning does not fail the job.
+
 **6. Serve the artifacts.** The platform publishes the artifacts to its storage and the service loads them with
 `plg.OpenArtifact` (see [Storages](#storages) and [Publishing artifacts](#publishing-artifacts-to-a-storage)
 below). The example service serves a directory of them with `-artifacts`
-([`artifacts.go`](examples/service/artifacts.go)):
+([`artifacts.go`](examples/service/artifacts.go)); it runs in the foreground until Ctrl-C, so leave it there and
+run step 7 in a second terminal:
 
 <!-- authorguide:service -->
 ```sh
@@ -1985,7 +2047,7 @@ the history).
 | Call making one Host call | 210–225 µs | 6.4 µs | 4.3–4.7 µs |
 | Call making one HTTP request (loopback) | 0.82–0.89 ms | 0.21 ms | 0.39–0.40 ms |
 | Throughput per call, 32 goroutines, `WithPool(32, 32)` | 4.5–4.7 µs | 1.5 µs | 1.2–1.3 µs |
-| Allocations per call (host side) | 6 | 7 | 6 |
+| Allocations per call (host side) | 9 | 10 | 9 |
 | Memory of an instance (host heap) | ≈ 29 MiB | ≈ 3 MiB | ≈ 3 MiB |
 | 256 callers awaiting a 100 ms HTTP response | — (one call per instance) | 2,360 calls/s in 11 MiB (1 instance, `WithConcurrentCalls(256)`) vs 2,360/s in 760 MiB (256 blocking) | 2,330/s in 12 MiB vs 2,430/s in 800 MiB |
 | Starting an instance | 40–60 ms | < 1 ms | ≈ 2 ms |
@@ -2032,7 +2094,7 @@ allocations (2.5 KB) per call, before any export.
   than per call; in TypeScript a request belongs to the call whose step made it, so a promise shared between calls
   through global state is attributed to the call that started it.
 - **Rebuilds:** the guest artifacts must be rebuilt and re-verified (`make verify-guests`) whenever wazero,
-  wasi-sdk, Lua, QuickJS-ng, esbuild, yaegi or Go are upgraded.
+  wasi-sdk, Lua, QuickJS-ng, esbuild, yaegi, typescript-go or Go are upgraded.
 
 ## Examples
 
@@ -2058,17 +2120,19 @@ allocations (2.5 KB) per call, before any export.
   [`examples/authorguide`](examples/authorguide) its author guide, with the service on the artifacts it packs.
 
 Their tests start MinIO and PostgreSQL with [testcontainers](https://golang.testcontainers.org/), so they need
-Docker: `make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`
+Docker, and the author repository's tests run its CI script in a git repository, so they need `git` and `sh` too:
+`make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`
 (RULES.md §7), so a run leaves no container behind whether it passes or fails.
 
 ## Development
 
 - `make check` runs every gate CI runs: formatting, golangci-lint (host and wasip1), the unit and integration
-  tests with `-race` (after `make warm` compiles the guests into the compilation cache without it; each test run
+  tests with `-race` (after `make warm` compiles the guests and the TypeScript compiler into the compilation
+  cache without it; each test run
   has a `-timeout` to catch hangs), the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh`
   tests it and checks that every test container is terminated through its test's cleanup), allocation and
   benchmark budgets, a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples
-  module, Docker required).
+  module, Docker, `git` and `sh` required).
 - `make guests` rebuilds the guest artifacts with pinned toolchains, and the TypeScript compiler `plg validate`
   runs (`internal/tscheck/tsgo.wasm.gz`: typescript-go's `tsgo`, pinned by the module in `guestsrc/tscheck`, built
   for wasip1); `make verify-guests` checks that the committed ones are reproducible.

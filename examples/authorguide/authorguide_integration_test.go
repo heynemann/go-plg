@@ -68,14 +68,15 @@ func parseGuide(readme string) (map[string]string, error) {
 	return blocks, nil
 }
 
-// sh runs script with sh -eu in dir and returns what it printed (stdout and stderr), failing the test unless it
-// exits 0.
-func sh(t *testing.T, dir string, environ []string, script string) string {
+// sh runs script with sh -eu in dir, reading stdin, and returns what it printed (stdout and stderr), failing the
+// test unless it exits 0.
+func sh(t *testing.T, dir string, environ []string, script, stdin string) string {
 	t.Helper()
 
 	cmd := exec.CommandContext(t.Context(), "sh", "-euc", script) //nolint:gosec // G204: the README's commands
 	cmd.Dir = dir
 	cmd.Env = environ
+	cmd.Stdin = strings.NewReader(stdin)
 
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s\n%s", script, out)
@@ -83,8 +84,9 @@ func sh(t *testing.T, dir string, environ []string, script string) string {
 	return string(out)
 }
 
-// The README's author guide, run as written: a plugin started with plg init validates; in a copy of the example
-// author repository the typings are up to date, a plugin validates and the CI script validates (JSON and JUnit
+// The README's author guide, run as written: a plugin started with plg init validates, and plg dev calls its
+// Discount with the guide's order.yaml; in a copy of the example author repository the typings are up to date, a
+// plugin validates and the CI script validates (JSON and JUnit
 // reports) and packs every plugin; the pricing service serves the artifacts; plg status and plg events, through
 // the profile the guide writes, show the plugins it serves. What needs the network differs: plg is built from this
 // checkout instead of installed, the contract module comes from a local GOPROXY, and the service listens on a
@@ -105,6 +107,8 @@ func TestReadmeAuthorGuide(t *testing.T) {
 	require.Equal(t, "cd examples/rules\n", guide["repo"][:len("cd examples/rules\n")], "from plg's checkout")
 	require.Equal(t, "cd .. && PRICING_ADMIN_TOKEN=s3cret go run ./service -artifacts rules/dist\n",
 		guide["service"], "the command this test knows how to run")
+	require.Equal(t, "plg dev promo\n", guide["dev"], "the command this test feeds commands to")
+	require.Contains(t, guide, "order")
 	require.Contains(t, guide, "profiles")
 	require.Contains(t, guide, "serving")
 
@@ -112,14 +116,21 @@ func TestReadmeAuthorGuide(t *testing.T) {
 	config := t.TempDir()
 	environ = append(environ, "XDG_CONFIG_HOME="+config)
 
-	out := sh(t, t.TempDir(), environ, strings.TrimPrefix(guide["start"], install))
+	start := t.TempDir()
+
+	out := sh(t, start, environ, strings.TrimPrefix(guide["start"], install), "")
 	assert.Contains(t, out, "files      ok       wrote plugin.yaml, plg.d.lua, plugin.lua", "plg init")
 	assert.Regexp(t, `\nload +ok +Create ran in the lua guest`, out, "plg validate")
+
+	require.NoError(t, os.WriteFile(filepath.Join(start, "order.yaml"), []byte(guide["order"]), 0o600))
+
+	out = sh(t, start, environ, guide["dev"], "call Discount order.yaml\nquit\n")
+	assert.Contains(t, out, "Discount: result {reason: \"\", cents: 0}\n", "the skeleton's zero discount")
 
 	checkout := t.TempDir() // stands for plg's checkout, holding examples/rules
 	authorrepo.Copy(t, filepath.Join(checkout, "examples", "rules"))
 
-	out = sh(t, checkout, environ, guide["repo"])
+	out = sh(t, checkout, environ, guide["repo"], "")
 	assert.Contains(t, out, "typings    ok      plg.d.ts, tsconfig.json already up to date")
 	assert.Contains(t, out, "\ntests      ok      3 passed\n")
 
@@ -141,7 +152,7 @@ func TestReadmeAuthorGuide(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(profiles), 0o750))
 	require.NoError(t, os.WriteFile(profiles, []byte(local(guide["profiles"])), 0o600))
 
-	out = sh(t, t.TempDir(), environ, local(guide["serving"]))
+	out = sh(t, t.TempDir(), environ, local(guide["serving"]), "")
 	assert.Contains(t, out, `"applied":"pricing/seasonal"`, "the quote")
 	assert.Regexp(t, `\npricing/vip +serving +sha256:`, out, "plg status")
 	assert.Regexp(t, `\nprovenance +commit [0-9a-f]{12}`, out, "packed from the repository's commit")

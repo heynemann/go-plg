@@ -5,6 +5,8 @@ package main
 import (
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,4 +79,53 @@ func TestServiceServesPackedArtifacts(t *testing.T) {
 	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, state.Provenance.Digest)
 	assert.Regexp(t, `^[0-9a-f]{40}$`, state.Provenance.Commit, "packed from the repository's commit")
 	assert.False(t, state.Provenance.Dirty, "the CI script's reports and artifacts are not the plugin's files")
+}
+
+// With -poll, the service reloads an artifact replaced in its -artifacts directory: once vip.plg holds the
+// seasonal rule's artifact, pricing/vip loads it as a new version and prices orders as the seasonal rule does.
+func TestServicePollsReplacedArtifacts(t *testing.T) {
+	t.Parallel()
+
+	dist := authorrepo.Pack(t)
+	log := startWatched(t, "-artifacts", dist, "-poll", "10ms", "-admin-token", adminToken)
+
+	answer := adminDo(t, http.MethodGet, log.url+"/admin/plg/plugins/pricing/vip", adminToken, http.NoBody)
+	require.Equal(t, http.StatusOK, answer.status, string(answer.body))
+
+	var before struct {
+		Version string `json:"version"`
+	}
+
+	answer.decode(t, &before)
+	require.NotEmpty(t, before.Version)
+
+	seasonal, err := os.ReadFile(filepath.Join(dist, "seasonal.plg")) //nolint:gosec // G304: the test's artifact
+	require.NoError(t, err)
+
+	// Written aside, then renamed over vip.plg, so a poll never reads half an artifact (List skips other names).
+	staged := filepath.Join(dist, "vip.plg.new")
+	//nolint:gosec // G703: a path of the test's own temporary directory
+	require.NoError(t, os.WriteFile(staged, seasonal, 0o600))
+	require.NoError(t, os.Rename(staged, filepath.Join(dist, "vip.plg")))
+
+	reloaded := false
+
+	for line := range log.rest {
+		if strings.Contains(line, `msg="plugin event" kind=loaded key=pricing/vip `) &&
+			!strings.Contains(line, "version="+before.Version) {
+			reloaded = true
+
+			break
+		}
+	}
+
+	require.True(t, reloaded, "a poll loads the replaced artifact")
+
+	got := quoteFor(
+		t,
+		log.url,
+		`{"customer":"ada","coupon":"SUMMER","items":[{"sku":"tea","quantity":10,"unitCents":200}]}`,
+	)
+	assert.Contains(t, got.Discounts, ruleResult{Rule: "pricing/vip", Cents: 160, Reason: "coupon SUMMER: 8% off"},
+		"pricing/vip serves the seasonal rule")
 }
