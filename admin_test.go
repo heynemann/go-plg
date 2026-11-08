@@ -80,8 +80,82 @@ func TestAdminHandlerDescribesPluginsNoVersionServes(t *testing.T) {
 	assert.Nil(t, body["loadedAt"])
 }
 
-// TestAdminHandlerAnswersOnlyGETOnItsPaths: every other method on its two paths answers 405 with Allow: GET, and
-// any other path, an unknown key or an empty one answers 404, whatever the method; errors are JSON objects
+// TestAdminHandlerServesAPluginsEvents serves, as their documented JSON form, the events Events keeps of plugins
+// no version of which serves, in a container without a WithOnEvent function: a skipped plugin's (at Register and
+// at a reload) and the rejection of a key listed twice, with its report. The key's slash may come escaped. Only a
+// literal "/events" ends the path, so a key whose last part is "events" (a memory storage's keys may hold
+// slashes) reads its state with that slash escaped and its events below it.
+func TestAdminHandlerServesAPluginsEvents(t *testing.T) {
+	t.Parallel()
+
+	first, second := plg.NewMemoryStorage("first"), plg.NewMemoryStorage("second")
+	full := wantFullOwner()
+	put := func(store *plg.MemoryStorage, key, version string) {
+		t.Helper()
+
+		require.NoError(t, store.Put(&plg.Descriptor{
+			Key: key, Language: plg.LanguageLua, Entrypoint: "plugin", Version: version, Owner: &full,
+		}, fstest.MapFS{"plugin": {}}))
+	}
+
+	put(first, "lua", "3")
+	put(first, "x/events", "1")
+
+	ctr := newUnitContainer(t)
+	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "ping", plg.WithStorage(first),
+		plg.WithStorage(second), plg.WithGolangPlugins()))
+
+	put(first, "dup", "1")
+	put(second, "dup", "2")
+	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "ping"), plg.ErrDuplicateKey)
+
+	lua, dup, slashed := keptEvents(t, ctr, "ping/lua"), keptEvents(t, ctr, "ping/dup"),
+		keptEvents(t, ctr, "ping/x/events")
+	require.Len(t, lua, 2, "skipped at Register and at the reload")
+	require.Len(t, dup, 1)
+	require.Equal(t, plg.EventRejected, dup[0].Kind)
+	require.Len(t, slashed, 2)
+
+	handler := plg.AdminHandler(ctr)
+
+	for path, want := range map[string][]plg.Event{
+		"/plugins/ping/lua/events": lua, "/plugins/ping%2Flua/events": lua, "/plugins/ping/dup/events": dup,
+		"/plugins/ping/x/events/events": slashed, "/plugins/ping%2Fx%2Fevents/events": slashed,
+	} {
+		assert.Equal(t, eventsJSON(want), getAdmin(t, handler, path, http.StatusOK), path)
+	}
+
+	state := info(t, ctr, "ping/x/events")
+	assert.Equal(t, stateJSON(&state), getAdmin(t, handler, "/plugins/ping/x%2Fevents", http.StatusOK),
+		"an escaped slash is the key's")
+
+	_, notFound := plg.Events(ctr, "ping/x")
+	require.ErrorIs(t, notFound, plg.ErrNotFound)
+	assert.Equal(t, map[string]any{"error": notFound.Error()},
+		getAdmin(t, handler, "/plugins/ping/x/events", http.StatusNotFound), "a literal /events ends the path")
+
+	// The shape, spelled out where eventsJSON derives it: the rejection of the key listed twice.
+	body := getAdmin(t, handler, "/plugins/ping/dup/events", http.StatusOK)
+	events, ok := body["events"].([]any)
+	require.True(t, ok, "events: %v", body["events"])
+	require.Len(t, events, 1)
+
+	event, ok := events[0].(map[string]any)
+	require.True(t, ok, "event: %v", events[0])
+	assert.Equal(t, "rejected", event["kind"])
+	assert.Equal(t, "ping/dup", event["key"])
+	assert.Equal(t, "2", event["version"], "what the second storage lists")
+	assert.Equal(t, "second", event["storage"])
+	assert.Equal(t, dup[0].At.UTC().Format(time.RFC3339Nano), event["at"])
+	assert.Nil(t, event["panic"])
+
+	report, ok := event["report"].(map[string]any)
+	require.True(t, ok, "report: %v", event["report"])
+	assert.Equal(t, dup[0].Report.Err.Error(), report["error"])
+}
+
+// TestAdminHandlerAnswersOnlyGETOnItsPaths: every other method on its three paths answers 405 with Allow: GET,
+// and any other path, an unknown key or an empty one answers 404, whatever the method; errors are JSON objects
 // holding the message, and no answer may be cached.
 func TestAdminHandlerAnswersOnlyGETOnItsPaths(t *testing.T) {
 	t.Parallel()
@@ -148,6 +222,28 @@ func TestAdminHandlerAnswersOnlyGETOnItsPaths(t *testing.T) {
 			status: http.StatusMethodNotAllowed,
 		},
 		"a method HTTP does not know": {method: "PURGE", path: "/plugins", status: http.StatusMethodNotAllowed},
+		"events of an unknown key": {
+			method:  http.MethodGet,
+			path:    "/plugins/ping/none/events",
+			status:  http.StatusNotFound,
+			message: notFound.Error(),
+		},
+		"events of an empty key": {method: http.MethodGet, path: "/plugins//events", status: http.StatusNotFound},
+		"events of a registration": {
+			method: http.MethodGet,
+			path:   "/plugins/ping/events",
+			status: http.StatusNotFound,
+		},
+		"POST /plugins/{key}/events": {
+			method: http.MethodPost,
+			path:   "/plugins/ping/lua/events",
+			status: http.StatusMethodNotAllowed,
+		},
+		"HEAD /plugins/{key}/events": {
+			method: http.MethodHead,
+			path:   "/plugins/ping/lua/events",
+			status: http.StatusMethodNotAllowed,
+		},
 	}
 
 	for name, tc := range tests {
@@ -179,7 +275,7 @@ func TestAdminHandlerAnswersOnlyGETOnItsPaths(t *testing.T) {
 	assert.Equal(t, []plg.PluginState{info(t, ctr, "ping/lua")}, plg.Plugins(ctr), "nothing changed")
 }
 
-// TestAdminHandlerOfAClosedContainer answers 503 with ErrClosed's message on both paths once the container is
+// TestAdminHandlerOfAClosedContainer answers 503 with ErrClosed's message on every path once the container is
 // closed, rather than an empty list.
 func TestAdminHandlerOfAClosedContainer(t *testing.T) {
 	t.Parallel()
@@ -194,9 +290,10 @@ func TestAdminHandlerOfAClosedContainer(t *testing.T) {
 
 	handler := plg.AdminHandler(ctr)
 	getAdmin(t, handler, "/plugins/ping/lua", http.StatusOK)
+	getAdmin(t, handler, "/plugins/ping/lua/events", http.StatusOK)
 	require.NoError(t, ctr.Close(t.Context()))
 
-	for _, path := range []string{"/plugins", "/plugins/ping/lua"} {
+	for _, path := range []string{"/plugins", "/plugins/ping/lua", "/plugins/ping/lua/events"} {
 		assert.Equal(t, map[string]any{"error": plg.ErrClosed.Error()},
 			getAdmin(t, handler, path, http.StatusServiceUnavailable), path)
 	}
@@ -305,16 +402,37 @@ func stateJSON(state *plg.PluginState) map[string]any {
 		}
 	}
 
-	failure := state.LastPanic
-	if failure != nil {
-		want["lastPanic"] = map[string]any{
-			"time": timeJSON(failure.Time), "phase": string(failure.Phase), "method": failure.Method,
-			"message": failure.Error(), "value": fmt.Sprint(failure.Value), "guest": failure.Guest,
-			"stack": string(failure.Stack),
+	want["lastPanic"] = panicJSON(state.LastPanic)
+
+	return want
+}
+
+// panicJSON is the documented JSON form of failure: null when it is nil.
+func panicJSON(failure *plg.PanicError) any {
+	if failure == nil {
+		return nil
+	}
+
+	return map[string]any{
+		"time": timeJSON(failure.Time), "phase": string(failure.Phase), "method": failure.Method,
+		"message": failure.Error(), "value": fmt.Sprint(failure.Value), "guest": failure.Guest,
+		"stack": string(failure.Stack),
+	}
+}
+
+// eventsJSON is the documented JSON form of a plugin's events.
+func eventsJSON(events []plg.Event) map[string]any {
+	list := make([]any, len(events))
+	for i := range events {
+		e := &events[i]
+		list[i] = map[string]any{
+			"at": timeJSON(e.At), "kind": string(e.Kind), "key": e.Key, "version": e.Version,
+			"language": string(e.Language), "storage": e.Storage, "owner": ownerJSON(&e.Owner),
+			"report": reportJSON(e.Report), "panic": panicJSON(e.Panic),
 		}
 	}
 
-	return want
+	return map[string]any{"events": list}
 }
 
 // reportJSON is the documented JSON form of report: null when it is nil.

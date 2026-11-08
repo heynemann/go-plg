@@ -255,6 +255,14 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	listed := make(map[string]bool, len(srcs)+len(problems)+len(found.skipped))
 	errs := make([]error, 0, len(problems)+1)
 
+	for i := range found.skipped {
+		key := reg.name + "/" + found.skipped[i].desc.Key
+		listed[key] = false
+		rej := skipRejection(&found.skipped[i])
+		reg.entry(key).rejection.Store(rej)
+		c.events.source(ctx, EventSkipped, key, &found.skipped[i], rej.report)
+	}
+
 	for i := range problems {
 		key := reg.name + "/" + problems[i].desc.Key
 		listed[key] = true
@@ -263,12 +271,6 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		c.events.problem(ctx, rej)
 
 		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], problems[i].err))
-	}
-
-	for i := range found.skipped {
-		key := reg.name + "/" + found.skipped[i].desc.Key
-		listed[key] = false
-		reg.entry(key).rejection.Store(skipRejection(&found.skipped[i]))
 	}
 
 	for i := range srcs {

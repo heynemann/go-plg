@@ -258,7 +258,6 @@ func (c *Container) admit(ctx context.Context, name string, cfg *registerConfig,
 			slog.String("key", key), slog.String("storage", src.storeName),
 			slog.String("language", string(src.desc.Language)), src.desc.owner().logAttr())
 		c.countSkipped(ctx, key, src.desc.Language, src.desc.owner())
-		c.events.source(ctx, EventSkipped, key, src, nil)
 
 		return false, nil
 	}
@@ -404,7 +403,8 @@ func sameDescriptor(a, b *Descriptor) bool {
 
 // loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
 // it closes the ones already loaded and gives the reservation back. It records in reg the keys listed (before
-// each load, which may report panics under its key) and the plugins skipped.
+// each load, which may report panics under its key) and the plugins skipped, whose [EventSkipped] events follow
+// their records (each event is kept in its key's record).
 func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, error) {
 	found, err := c.listPlugins(ctx, reg.name, reg.cfg)
 	if err != nil {
@@ -412,7 +412,10 @@ func (c *Container) loadAll(ctx context.Context, reg *registration) ([]*plugin, 
 	}
 
 	for i := range found.skipped {
-		reg.entry(reg.name + "/" + found.skipped[i].desc.Key).rejection.Store(skipRejection(&found.skipped[i]))
+		key := reg.name + "/" + found.skipped[i].desc.Key
+		rej := skipRejection(&found.skipped[i])
+		reg.entry(key).rejection.Store(rej)
+		c.events.source(ctx, EventSkipped, key, &found.skipped[i], rej.report)
 	}
 
 	srcs := found.srcs

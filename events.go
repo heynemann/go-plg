@@ -71,6 +71,41 @@ type Event struct {
 // eventQueueSize is how many events wait for the WithOnEvent function at most; more are dropped.
 const eventQueueSize = 1024
 
+// keptEvents is how many events of each plugin [Events] keeps: the newest.
+const keptEvents = 100
+
+// Events returns the newest events of the plugin with the given key, "<name>/<descriptor key>", oldest first: at
+// most 100. They are the events [WithOnEvent] describes, kept whether the container has a WithOnEvent function or
+// not (and whether its queue dropped them or not), from the listing that first names the plugin to the first that
+// no longer does. It fails as [Info] does: with [ErrNotFound] for a key Info does not know and with [ErrClosed]
+// once the container is closed. Events recorded while it runs may be left out. It reads what the container keeps
+// without waiting for loads or calls in progress, and runs no plugin code. It is safe for concurrent use; the
+// events' Report and Panic are the container's own: treat them as read-only.
+func Events(ctr *Container, key string) ([]Event, error) {
+	found, err := ctr.lookup(key)
+	if err == nil && found.gen == nil && found.entry.rejectionBeside(nil) == nil { // Info does not know it
+		err = fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	var kept []*Event
+
+	if found.entry != nil { // nil once a reload removing the plugin dropped its record, until it unpublishes it
+		kept = found.entry.events.recent()
+	}
+
+	events := make([]Event, len(kept))
+
+	for i, e := range kept {
+		events[i] = *e
+	}
+
+	return events, nil
+}
+
 // WithOnEvent calls fn with every [Event] of the container's plugins: versions loaded, rejected, retired,
 // validated on demand and skipped, and every [PanicError] reported. Events never delay what emits them (calls,
 // Register, reloads, validations): one goroutine of the container delivers them, in the order they were queued,
@@ -78,17 +113,20 @@ const eventQueueSize = 1024
 // logged at Warn. A panic in fn is recovered, logged and kept in [Container.RecentPanics] with [PhaseCallback]
 // (it emits no event), and delivery goes on. [Container.Close] delivers the events queued, those of the versions
 // it retires included, for as long as its ctx allows, then stops delivering: fn's ctx ends when Close's does,
-// and events that happen afterwards are not delivered. [Check] emits no events. A nil fn delivers nothing.
+// and events that happen afterwards are not delivered. [Check] emits no events. A nil fn delivers nothing; with or
+// without fn, the container keeps each plugin's newest events for [Events].
 func WithOnEvent(fn func(ctx context.Context, e Event)) Option {
 	return func(c *containerConfig) {
 		c.onEvent = fn
 	}
 }
 
-// eventQueue delivers a container's events to its WithOnEvent function from one goroutine; its methods do
-// nothing on a nil queue (no WithOnEvent). Emitting never blocks: an event that finds the queue full is dropped,
-// counted and logged.
+// eventQueue keeps every event of the container's plugins in its plugin's record ([Events]) and delivers it to
+// the WithOnEvent function, if any, from one goroutine. Emitting never blocks: an event that finds the queue full
+// is not delivered but counted and logged (it is kept all the same).
 type eventQueue struct {
+	keep func(*Event) // records an event in its plugin's record
+	// fn is the WithOnEvent function; nil without one, and then nothing below is set: no queue, no goroutine.
 	fn     func(context.Context, Event)
 	panics *panicReporter // guards fn, and counts drops in its meters
 	logger *slog.Logger   // the container's guarded logger, for drops
@@ -100,21 +138,22 @@ type eventQueue struct {
 	closing atomic.Bool
 }
 
-// newEventQueue starts the queue delivering to fn, or returns nil for a nil fn.
-func newEventQueue(fn func(context.Context, Event), panics *panicReporter, logger *slog.Logger) *eventQueue {
+// newEventQueue returns the queue keeping events with keep and, for a non-nil fn, delivering them to fn.
+func newEventQueue(keep func(*Event), fn func(context.Context, Event), panics *panicReporter,
+	logger *slog.Logger,
+) *eventQueue {
+	events := &eventQueue{keep: keep}
 	if fn == nil {
-		return nil
+		return events
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := &eventQueue{
-		fn: fn, panics: panics, logger: logger, queue: make(chan *Event, eventQueueSize),
-		stop: make(chan struct{}), done: make(chan struct{}), cancel: cancel,
-	}
+	events.fn, events.panics, events.logger, events.cancel = fn, panics, logger, cancel
+	events.queue, events.stop, events.done = make(chan *Event, eventQueueSize), make(chan struct{}), make(chan struct{})
 
-	go q.run(ctx)
+	go events.run(ctx)
 
-	return q
+	return events
 }
 
 // run delivers the queued events until close stops it: it then delivers what is queued while ctx lasts.
@@ -152,7 +191,7 @@ func (q *eventQueue) deliver(ctx context.Context, e *Event) {
 // close stops queueing events and waits on ctx for the goroutine to deliver what is queued. When ctx ends first,
 // the goroutine's context ends too: it delivers nothing more, and returns once fn, if running, does.
 func (q *eventQueue) close(ctx context.Context) error {
-	if q == nil {
+	if q.fn == nil {
 		return nil
 	}
 
@@ -171,16 +210,18 @@ func (q *eventQueue) close(ctx context.Context) error {
 	}
 }
 
-// emit queues e, or drops it when the queue is full.
-func (q *eventQueue) emit(ctx context.Context, e *Event) {
-	if q.closing.Load() {
+// emit keeps event and queues it for the WithOnEvent function, or drops it when the queue is full.
+func (q *eventQueue) emit(ctx context.Context, event *Event) {
+	q.keep(event)
+
+	if q.fn == nil || q.closing.Load() {
 		return
 	}
 
 	select {
-	case q.queue <- e:
+	case q.queue <- event:
 	default:
-		q.dropped(ctx, e)
+		q.dropped(ctx, event)
 	}
 }
 
@@ -200,10 +241,6 @@ func (q *eventQueue) dropped(ctx context.Context, event *Event) {
 
 // generation emits an event of kind about gen, a published plugin version, with report.
 func (q *eventQueue) generation(ctx context.Context, kind EventKind, gen *plugin, report *Report) {
-	if q == nil {
-		return
-	}
-
 	q.emit(ctx, &Event{
 		At: time.Now(), Report: report, Kind: kind, Key: gen.key, Version: gen.desc.Version,
 		Language: gen.desc.Language, Storage: gen.storage, Owner: *gen.desc.owner(),
@@ -212,10 +249,6 @@ func (q *eventQueue) generation(ctx context.Context, kind EventKind, gen *plugin
 
 // source emits an event of kind about src, a listed plugin keyed key, with report.
 func (q *eventQueue) source(ctx context.Context, kind EventKind, key string, src *source, report *Report) {
-	if q == nil {
-		return
-	}
-
 	q.emit(ctx, &Event{
 		At: time.Now(), Report: report, Kind: kind, Key: key, Version: src.desc.Version,
 		Language: src.desc.Language, Storage: src.storeName, Owner: *src.desc.owner(),
@@ -224,17 +257,14 @@ func (q *eventQueue) source(ctx context.Context, kind EventKind, key string, src
 
 // problem emits the [EventRejected] event of rej, the rejection of a listed plugin that cannot be loaded.
 func (q *eventQueue) problem(ctx context.Context, rej *rejection) {
-	if q == nil {
-		return
-	}
-
 	q.emit(ctx, &Event{
 		At: rej.report.At, Report: rej.report, Kind: EventRejected, Key: rej.report.Key, Version: rej.report.Version,
 		Language: rej.language, Storage: rej.storage, Owner: *rej.owner,
 	})
 }
 
-// panicked emits the [EventPanicked] event of a reported failure, unless [Check] reported it.
+// panicked emits the [EventPanicked] event of a reported failure, unless [Check] reported it. A nil queue (a
+// reporter without a container) emits nothing.
 func (q *eventQueue) panicked(ctx context.Context, failure *PanicError) {
 	if q == nil || ctx.Value(checkKey{}) != nil {
 		return

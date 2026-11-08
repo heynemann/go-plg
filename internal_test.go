@@ -4389,3 +4389,126 @@ func TestEventsAfterCloseAreNotQueued(t *testing.T) {
 	assert.Empty(t, ctr.events.queue)
 	assert.Len(t, ctr.RecentPanics(), 1, "the panic itself was still reported")
 }
+
+// TestEventsKeepTheNewestOfEachKeyUnderConcurrency emits events about two listed keys from 8 goroutines, in a
+// container without a WithOnEvent function, while 4 goroutines read them with Events: every read holds at most
+// 100 events, each writer's in the order it emitted them. Once the writers are done, each key holds exactly its
+// newest 100: what each writer has left there is the end of what it emitted. An event about a key no registration
+// lists is kept nowhere.
+func TestEventsKeepTheNewestOfEachKeyUnderConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		writers = 8
+		rounds  = 1000
+	)
+
+	ctr := New()
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	keys := []string{"reg/a", "reg/b"}
+	reg := &registration{name: "reg", keys: xsync.NewMap[string, *listedPlugin]()}
+	ctr.names.Store("reg", reg)
+	ctr.regs.Store("reg", reg)
+	t.Cleanup(func() { ctr.regs.Delete("reg") }) // it has no reloader for Close to stop
+
+	for _, key := range keys { // known to Info, as a skipped plugin is
+		reg.entry(key).rejection.Store(&rejection{owner: &noOwner.owner, status: StatusSkipped})
+	}
+
+	var (
+		writing, reading sync.WaitGroup
+		done             atomic.Bool
+		readErr          atomic.Pointer[error]
+	)
+
+	for w := range writers {
+		writing.Go(func() { emitMarks(t.Context(), ctr, append(keys, "reg/unlisted"), w, rounds) })
+	}
+
+	for i := range 4 {
+		reading.Go(func() {
+			for !done.Load() {
+				err := eventsInOrder(ctr, keys[i%len(keys)])
+				if err != nil {
+					readErr.CompareAndSwap(nil, &err)
+				}
+			}
+		})
+	}
+
+	writing.Wait()
+	done.Store(true)
+	reading.Wait()
+
+	if failed := readErr.Load(); failed != nil {
+		require.NoError(t, *failed, "a read while writing")
+	}
+
+	for _, key := range keys {
+		require.NoError(t, eventsInOrder(ctr, key))
+		assertEachWritersNewest(t, ctr, key, rounds)
+	}
+
+	_, err := Events(ctr, "reg/unlisted")
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.Equal(t, len(keys), reg.keys.Size(), "an event about a key no listing names makes no record")
+}
+
+// emitMarks emits, for each of rounds rounds, a Panicked event about each key, its PanicError's value marking
+// the writer and the round.
+func emitMarks(ctx context.Context, ctr *Container, keys []string, writer, rounds int) {
+	for r := range rounds {
+		for _, key := range keys {
+			ctr.events.emit(ctx, &Event{
+				Kind: EventPanicked, Key: key, Panic: &PanicError{Key: key, Value: historyMark{writer, r}},
+			})
+		}
+	}
+}
+
+// eventsInOrder reads the events of key: at most keptEvents, each writer's in the order it emitted them.
+func eventsInOrder(ctr *Container, key string) error {
+	events, err := Events(ctr, key)
+	if err != nil {
+		return err
+	}
+
+	panics := make([]*PanicError, len(events))
+	for i := range events {
+		panics[i] = events[i].Panic
+	}
+
+	return historyInOrder(panics, keptEvents)
+}
+
+// assertEachWritersNewest checks that key holds exactly keptEvents events, all about it, and that what each
+// writer of emitMarks has left there is the end of what it emitted: the newest events, its last ones.
+func assertEachWritersNewest(t *testing.T, ctr *Container, key string, rounds int) {
+	t.Helper()
+
+	events, err := Events(ctr, key)
+	require.NoError(t, err)
+	require.Len(t, events, keptEvents, "%s: quiescent, the ring is full", key)
+
+	kept := map[int][]int{} // writer -> rounds kept, in order
+
+	for i := range events {
+		assert.Equal(t, key, events[i].Key)
+
+		mark, ok := events[i].Panic.Value.(historyMark)
+		require.True(t, ok)
+
+		kept[mark.writer] = append(kept[mark.writer], mark.round)
+	}
+
+	for writer, got := range kept {
+		want := make([]int, len(got))
+		for i := range want {
+			want[i] = rounds - len(got) + i
+		}
+
+		assert.Equal(t, want, got, "%s: writer %d's newest events, its last ones", key, writer)
+	}
+}

@@ -97,10 +97,28 @@ func TestAdminHandlerServesLivePluginsAndRunsNoPluginCode(t *testing.T) {
 
 	answersAsInfo("read again")
 
+	// The key's events, as Events keeps them: the load, the panicking validation (its PanicError and its
+	// report), the passing one and the rejected update, with their reports.
+	events := keptEvents(t, ctr, key)
+	kinds := make([]plg.EventKind, len(events))
+
+	for i := range events {
+		kinds[i] = events[i].Kind
+	}
+
+	require.Equal(t, []plg.EventKind{
+		plg.EventLoaded, plg.EventPanicked, plg.EventValidated, plg.EventValidated, plg.EventRejected,
+	}, kinds)
+	assert.Same(t, degraded.LastPanic, events[1].Panic)
+	assert.Same(t, lastGood.Rejection, events[4].Report)
+	assert.Equal(t, eventsJSON(events), get("/plugins/"+key+"/events"))
+
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		answer := requestAdmin(t, srv, method, "/plugins/"+key)
-		require.NoError(t, answer.Body.Close())
-		assert.Equal(t, http.StatusMethodNotAllowed, answer.StatusCode, method)
+		for _, path := range []string{"/plugins/" + key, "/plugins/" + key + "/events"} {
+			answer := requestAdmin(t, srv, method, path)
+			require.NoError(t, answer.Body.Close())
+			assert.Equal(t, http.StatusMethodNotAllowed, answer.StatusCode, "%s %s", method, path)
+		}
 	}
 
 	assert.Equal(t, before, inspect(t, ctr, key))

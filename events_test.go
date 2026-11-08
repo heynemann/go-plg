@@ -2,6 +2,7 @@ package plg_test
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -213,4 +214,85 @@ func TestCloseStopsDeliveringEventsAtItsDeadline(t *testing.T) {
 
 	awaitClosed(t, plg.EventsStopped(ctr))
 	assert.Equal(t, 1, delivered, "the queued events were not delivered")
+}
+
+// TestEventsKeepEachPluginsNewestHundred follows two skipped plugins through Register and 150 reloads, one of them
+// changing version each time: Events gives each key its own events, the newest 100 oldest first, exactly as the
+// WithOnEvent function got them. A key its storages stop listing is forgotten (Events fails as Info does) and
+// starts afresh once listed again; unknown keys fail with ErrNotFound, and a closed container with ErrClosed.
+func TestEventsKeepEachPluginsNewestHundred(t *testing.T) {
+	t.Parallel()
+
+	const reloads = 150
+
+	delivered := make(chan plg.Event, 2*(reloads+1))
+	ctr := plg.New(sendEvents(delivered))
+	owner := plg.Owner{Team: plg.Team{Name: "search"}}
+	store := plg.NewMemoryStorage("store")
+	putSkipped(t, store, "moving", "0", &owner)
+	putSkipped(t, store, "still", "1", nil)
+
+	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "keep", plg.WithStorage(store), plg.WithLuaPlugins()))
+
+	moving := keptEvents(t, ctr, "keep/moving")
+	require.Len(t, moving, 1)
+	assertEvent(t, &moving[0], plg.EventSkipped, "keep/moving", "0", plg.LanguageTypeScript, "store", &owner)
+
+	for i := 1; i <= reloads; i++ {
+		putSkipped(t, store, "moving", strconv.Itoa(i), &owner)
+		require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+	}
+
+	got := map[string][]plg.Event{}
+
+	for range 2 * (reloads + 1) {
+		e := nextEvent(t, delivered)
+		got[e.Key] = append(got[e.Key], e)
+	}
+
+	moving, still := keptEvents(t, ctr, "keep/moving"), keptEvents(t, ctr, "keep/still")
+	require.Len(t, moving, 100)
+	require.Len(t, still, 100)
+	assert.Equal(t, got["keep/moving"][reloads+1-100:], moving, "the newest the function got, oldest first")
+	assert.Equal(t, got["keep/still"][reloads+1-100:], still)
+
+	for i := range moving {
+		assertEvent(t, &moving[i], plg.EventSkipped, "keep/moving", strconv.Itoa(reloads-99+i),
+			plg.LanguageTypeScript, "store", &owner)
+		assertEvent(t, &still[i], plg.EventSkipped, "keep/still", "1", plg.LanguageTypeScript, "store",
+			&plg.Owner{})
+	}
+
+	store.Delete("still")
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+
+	_, err := plg.Events(ctr, "keep/still")
+	require.ErrorIs(t, err, plg.ErrNotFound, "forgotten with its listing")
+
+	putSkipped(t, store, "still", "2", nil)
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+
+	still = keptEvents(t, ctr, "keep/still")
+	require.Len(t, still, 1, "listed again, it starts afresh")
+	assert.Equal(t, "2", still[0].Version)
+
+	for _, key := range []string{"keep/none", "keep", "other/moving", ""} {
+		_, err = plg.Events(ctr, key)
+		require.ErrorIs(t, err, plg.ErrNotFound, key)
+	}
+
+	require.NoError(t, ctr.Close(t.Context()))
+
+	_, err = plg.Events(ctr, "keep/moving")
+	require.ErrorIs(t, err, plg.ErrClosed)
+}
+
+// keptEvents returns what plg.Events says of the plugin with the given key.
+func keptEvents(t *testing.T, ctr *plg.Container, key string) []plg.Event {
+	t.Helper()
+
+	events, err := plg.Events(ctr, key)
+	require.NoError(t, err)
+
+	return events
 }

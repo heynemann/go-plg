@@ -106,31 +106,50 @@ type PoolStats struct {
 // container is closed. It reads what the container keeps without waiting for loads or calls in progress, and
 // runs no plugin code. It is safe for concurrent use.
 func Info(ctr *Container, key string) (PluginState, error) {
-	snap := ctr.catalogue.Load()
+	found, err := ctr.lookup(key)
+	if err != nil {
+		return PluginState{}, err
+	}
+
+	state, ok := stateOf(found.reg, key, found.gen, found.entry)
+	if !ok {
+		return PluginState{}, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+
+	return state, nil
+}
+
+// keyed is what the container keeps of a plugin key: its registration, the version served (nil when none is) and
+// its listing's record (nil when none).
+type keyed struct {
+	reg   *registration
+	gen   *plugin
+	entry *listedPlugin
+}
+
+// lookup finds what the container keeps of the plugin key. It fails with [ErrClosed] once the container is
+// closed, and with [ErrNotFound] when no registration serves or lists the key.
+func (c *Container) lookup(key string) (keyed, error) {
+	snap := c.catalogue.Load()
 	if snap.closed {
-		return PluginState{}, ErrClosed
+		return keyed{}, ErrClosed
 	}
 
-	gen := snap.plugins[key]
+	found := keyed{gen: snap.plugins[key]}
 
-	var reg *registration
-
-	if gen != nil {
-		reg = gen.reg
-	} else if name, _, found := strings.Cut(key, "/"); found {
-		reg, _ = ctr.regs.Load(name)
+	if found.gen != nil {
+		found.reg = found.gen.reg
+	} else if name, _, ok := strings.Cut(key, "/"); ok {
+		found.reg, _ = c.regs.Load(name)
 	}
 
-	if reg != nil {
-		entry, _ := reg.keys.Load(key)
-
-		state, ok := stateOf(reg, key, gen, entry)
-		if ok {
-			return state, nil
-		}
+	if found.reg == nil {
+		return keyed{}, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 
-	return PluginState{}, fmt.Errorf("%w: %s", ErrNotFound, key)
+	found.entry, _ = found.reg.keys.Load(key)
+
+	return found, nil
 }
 
 // Plugins describes every plugin the storages of the container's registrations list, as [Info] does, in key
@@ -245,17 +264,18 @@ func (p *pool) stats() PoolStats {
 }
 
 // listedPlugin is a key its registration's storages list, from the listing that first names it to the first that
-// no longer does: what [Info] knows of the plugin beyond the version served.
+// no longer does: what [Info] knows of the plugin beyond the version served, and its events ([Events]).
 type listedPlugin struct {
 	// rejection is why the listing is not served as listed; nil when it is, and while its first load runs.
 	rejection atomic.Pointer[rejection]
 	lastPanic atomic.Pointer[PanicError] // the newest PanicError reported under the key
+	events    ring[*Event]               // the newest keptEvents events of the key
 	panics    atomic.Uint64              // the PanicErrors reported under the key; grows once lastPanic is stored
 }
 
 // newListedPlugin is the record of a key no listing named before.
 func newListedPlugin() (*listedPlugin, bool) {
-	return &listedPlugin{}, false
+	return &listedPlugin{events: newRing[*Event](keptEvents)}, false
 }
 
 // rejection is why a listed plugin is not served as listed: a load (or listing) that failed, an on-demand
@@ -363,20 +383,36 @@ func (e *listedPlugin) panicked(failure *PanicError) {
 	e.panics.Add(1)
 }
 
-// countPanic counts failure toward the plugin whose key it names, while that key's registration (registered or
-// registering) lists it.
-func (c *Container) countPanic(failure *PanicError) {
-	name, _, found := strings.Cut(failure.Key, "/")
+// listed returns the record of the plugin key while its registration (registered or registering) lists it; nil
+// otherwise.
+func (c *Container) listed(key string) *listedPlugin {
+	name, _, found := strings.Cut(key, "/")
 	if !found {
-		return
+		return nil
 	}
 
 	reg, ok := c.names.Load(name)
 	if !ok {
-		return
+		return nil
 	}
 
-	if entry, listed := reg.keys.Load(failure.Key); listed {
+	entry, _ := reg.keys.Load(key)
+
+	return entry
+}
+
+// countPanic counts failure toward the plugin whose key it names, while that key's registration (registered or
+// registering) lists it.
+func (c *Container) countPanic(failure *PanicError) {
+	if entry := c.listed(failure.Key); entry != nil {
 		entry.panicked(failure)
+	}
+}
+
+// keepEvent records e in the events of the plugin whose key it names, while that key's registration (registered
+// or registering) lists it.
+func (c *Container) keepEvent(e *Event) {
+	if entry := c.listed(e.Key); entry != nil {
+		entry.events.record(e)
 	}
 }

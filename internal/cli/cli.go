@@ -46,18 +46,46 @@ commands:
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
                       requires); pass it to plg.WithGoGuest
+  status [-profile name] [-format table|json] [-team name] [key]
+                      show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
+                      detail; -team keeps the plugins whose owner team is name
+  events [-profile name] [-format table|json] <key>
+                      show a plugin's newest events (at most 100), oldest first
+
+status and events read the environment named by -profile (default: the profiles file's default, or its only
+profile) from $XDG_CONFIG_HOME/plg/profiles.yaml (default ~/.config/plg/profiles.yaml):
+
+  default: staging
+  profiles:
+    - name: staging
+      url: https://staging.example.com/admin/plg   # where the service mounts plg.AdminHandler
+      token: {env: PLG_STAGING_TOKEN}              # sent as "Authorization: Bearer <token>"
+    - name: prod
+      url: https://prod.example.com/admin/plg
+      token: {command: [vault, read, -field=token, secret/plg/prod]}   # its output, trimmed
 `
 
-// Main runs plg with args (the command line without the program name) in dir, and returns the process exit
-// code. Errors, usage and warm's compile log go to stderr; if stderr fails, the exit code still reports a
-// failure.
-func Main(args []string, dir string, stderr io.Writer) int {
-	res := run(args, dir, stderr)
+// Env is what a command runs in.
+type Env struct {
+	// Stdout gets what status and events show.
+	Stdout io.Writer
+	// Stderr gets errors, usage and warm's compile log.
+	Stderr io.Writer
+	// Getenv reads the environment variables (os.Getenv).
+	Getenv func(key string) string
+	// Dir is the working directory, against which relative paths resolve.
+	Dir string
+}
+
+// Main runs plg with args (the command line without the program name) in env, and returns the process exit
+// code. If stderr fails, the exit code still reports a failure.
+func Main(args []string, env *Env) int {
+	res := run(args, env)
 	if res.msg == "" {
 		return res.code
 	}
 
-	_, err := io.WriteString(stderr, res.msg)
+	_, err := io.WriteString(env.Stderr, res.msg)
 	if err != nil {
 		return exitFailure
 	}
@@ -71,7 +99,7 @@ type outcome struct {
 	code int
 }
 
-func run(args []string, dir string, stderr io.Writer) outcome {
+func run(args []string, env *Env) outcome {
 	if len(args) == 0 {
 		return outcome{code: exitUsage, msg: usage}
 	}
@@ -80,11 +108,15 @@ func run(args []string, dir string, stderr io.Writer) outcome {
 
 	switch cmd {
 	case "gen":
-		return runGen(dir, args)
+		return runGen(env.Dir, args)
 	case "warm":
-		return runWarm(dir, args, stderr)
+		return runWarm(env.Dir, args, env.Stderr)
 	case "build-guest":
-		return runBuildGuest(dir, args)
+		return runBuildGuest(env.Dir, args)
+	case "status":
+		return runStatus(env, args)
+	case "events":
+		return runEvents(env, args)
 	default:
 		return outcome{code: exitUsage, msg: fmt.Sprintf("plg: unknown command %q\n\n%s", cmd, usage)}
 	}

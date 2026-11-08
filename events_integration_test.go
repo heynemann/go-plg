@@ -190,8 +190,9 @@ func TestOnEventFollowsAPluginsLife(t *testing.T) {
 
 // TestSlowOnEventNeverDelaysThePlugins blocks the WithOnEvent function on the first event: meanwhile Register
 // loads a Lua plugin, the plugin serves a call and reloads run, each queueing its events without waiting; once
-// 1024 events wait, every further one is dropped, counted in plg.events.dropped by key and kind and logged. When
-// the function is released it gets every queued event in order, and Close delivers its own (the plugin retired).
+// 1024 events wait, every further one is dropped, counted in plg.events.dropped by key and kind and logged, and
+// still kept for Events. When the function is released it gets every queued event in order, and Close delivers
+// its own (the plugin retired).
 func TestSlowOnEventNeverDelaysThePlugins(t *testing.T) {
 	t.Parallel()
 
@@ -268,6 +269,10 @@ func TestSlowOnEventNeverDelaysThePlugins(t *testing.T) {
 		attribute.String("kind", "skipped")))
 	assert.Equal(t, int64(1), points.int64Value(t, "plg.events.dropped", attribute.String("key", "flood/s1022"),
 		attribute.String("kind", "skipped")))
+
+	kept := keptEvents(t, ctr, "flood/s1099")
+	require.Len(t, kept, 1, "an event the queue dropped is kept for Events all the same")
+	assert.Equal(t, plg.EventSkipped, kept[0].Kind)
 
 	releaseOnce()
 	awaitClosed(t, caughtUp)

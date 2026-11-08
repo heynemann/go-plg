@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -112,7 +113,9 @@ func buildCustomGoGuest(service *os.Root) ([]byte, error) {
 		"build-guest", "-pkg", "encoding/xml", "-pkg", "example.com/greet",
 		"-pkg", "example.com/greet/helper_test", "-pkg", "example.com/greet/helper_linux", "-o", "guest.wasm",
 	}
-	if code := cli.Main(args, service.Name(), &stderr); code != 0 {
+
+	code := cli.Main(args, &cli.Env{Stdout: io.Discard, Stderr: &stderr, Getenv: os.Getenv, Dir: service.Name()})
+	if code != 0 {
 		return nil, fmt.Errorf("%w (exit code %d): %s", errBuildGuest, code, stderr.String())
 	}
 

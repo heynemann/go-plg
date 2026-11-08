@@ -4,8 +4,10 @@
 //
 // generates the adapter plg calls plugins through, and registers it with the package's source. See
 // [github.com/heynemann/go-plg.Contract]. `plg warm` fills the compilation cache with the guests plg ships (see
-// [github.com/heynemann/go-plg.Warm]), and `plg build-guest` builds a custom Go guest with extra packages (see
-// [github.com/heynemann/go-plg.WithGoGuest]); `plg` without arguments prints the usage.
+// [github.com/heynemann/go-plg.Warm]), `plg build-guest` builds a custom Go guest with extra packages (see
+// [github.com/heynemann/go-plg.WithGoGuest]), and `plg status` and `plg events` show an environment's plugins
+// and their events through its admin handler (see [github.com/heynemann/go-plg.AdminHandler]), named by a
+// profile of ~/.config/plg/profiles.yaml; `plg` without arguments prints the usage.
 package main
 
 import (
@@ -15,5 +17,5 @@ import (
 )
 
 func main() {
-	os.Exit(cli.Main(os.Args[1:], ".", os.Stderr))
+	os.Exit(cli.Main(os.Args[1:], &cli.Env{Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, Dir: "."}))
 }

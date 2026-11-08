@@ -914,6 +914,16 @@ function, in order, from a queue of 1024 events; an event that finds the queue f
 (the versions it retires included) for as long as its ctx allows, ends the function's ctx with its own, and
 stops. `plg.Check` emits nothing.
 
+Whether it has a `WithOnEvent` function or not (and whether its queue dropped an event or not), the container
+keeps each plugin's newest 100 events, from the listing that first names the plugin until its storages stop
+listing it:
+
+```go
+events, err := plg.Events(c, "pricing/discounts") // oldest first; ErrNotFound and ErrClosed as plg.Info
+```
+
+The admin handler serves them too (`GET /plugins/{key}/events`), and so does `plg events` from a terminal.
+
 ### Inspecting plugins: `plg.Info` and `plg.Plugins`
 
 Admin tools and health pages can see every plugin the registrations' storages list, whether it loaded or not:
@@ -964,9 +974,13 @@ mux.Handle("/admin/plg/", requireAdmin(http.StripPrefix("/admin/plg", plg.AdminH
 |---|---|
 | `GET /plugins` | `200` `{"plugins": [<plugin>, …]}`: what `plg.Plugins` says, in key order |
 | `GET /plugins/{key}` | `200` `<plugin>`: what `plg.Info` says of the key, `<name>/<descriptor key>` (its slash may stay as is; escape anything else a URL path cannot hold); `404` for a key it does not know |
+| `GET /plugins/{key}/events` | `200` `{"events": [<event>, …]}`: what `plg.Events` says of the key, oldest first; `404` for a key it does not know |
 | any other method on those paths (`HEAD` included) | `405`, with `Allow: GET` |
 | any other path | `404` |
 | any path, once the container is closed | `503` |
+
+Only a literal `/events` ends the events path: a key whose own last part is `events` (a custom storage whose keys
+hold slashes) reads its `<plugin>` with that slash escaped, `/plugins/ping/x%2Fevents`.
 
 Errors answer `{"error": "<message>"}`. Every answer is `application/json` with `Cache-Control: no-store`. The
 handler reads what the container keeps, like `plg.Info`, never waiting for a load or a call; it runs no plugin
@@ -1030,6 +1044,64 @@ A `<plugin>` (here, one serving its last good version beside an update its valid
   **memory** is in bytes. `status`, `language`, `severity` and `phase` are the values of `plg.Status`,
   `plg.Language`, `plg.Severity` and `plg.Phase`.
 - Key order and whitespace are not part of the format.
+
+An `<event>` is a `plg.Event`: `at`, `kind` (a `plg.EventKind`), `key`, `version`, `language`, `storage`, `owner`
+(as above), `report` (a report, or `null`) and `panic` (as `lastPanic`, or `null`), under the same rules:
+
+```json
+{"events": [
+  {"at": "2026-11-06T09:14:03.48823171Z", "kind": "loaded", "key": "pricing/discounts", "version": "1",
+   "language": "lua", "storage": "rules", "owner": {"…": "as above"}, "report": {"…": "the load's"}, "panic": null},
+  {"at": "2026-11-06T09:31:40.1207749Z", "kind": "rejected", "key": "pricing/discounts", "version": "2",
+   "language": "lua", "storage": "rules", "owner": {"…": "as above"}, "report": {"…": "the failed load's"},
+   "panic": null}
+]}
+```
+
+### From a terminal: `plg status` and `plg events`
+
+Plugin authors check their plugins in an environment through its admin handler. Name the environments in
+`~/.config/plg/profiles.yaml` (`$XDG_CONFIG_HOME/plg/profiles.yaml` when that is set):
+
+```yaml
+default: staging                                 # used without -profile (else the only profile)
+profiles:
+  - name: staging
+    url: https://staging.example.com/admin/plg   # where the service mounts plg.AdminHandler
+    token: {env: PLG_STAGING_TOKEN}              # sent as "Authorization: Bearer <token>"
+  - name: prod
+    url: https://prod.example.com/admin/plg
+    token: {command: [vault, read, -field=token, secret/plg/prod]}  # what it prints, trimmed
+```
+
+A token comes from an environment variable or from what a command prints (run without a shell, in the working
+directory); a profile without one sends none. The file is read as strictly as `plugin.yaml` (unknown and
+duplicate keys, anchors and aliases are errors). Then:
+
+```sh
+go run github.com/heynemann/go-plg/cmd/plg status                  # every plugin, one row each
+go run github.com/heynemann/go-plg/cmd/plg status -team payments   # the team's plugins only
+go run github.com/heynemann/go-plg/cmd/plg status pricing/discounts -profile prod   # one plugin in detail
+go run github.com/heynemann/go-plg/cmd/plg events pricing/discounts                 # its newest events
+```
+
+```text
+KEY                STATUS             VERSION  LANGUAGE  TEAM      PANICS  PROBLEM
+pricing/bulk       serving            3        go        pricing   0       -
+pricing/discounts  serving_last_good  1        lua       payments  1       plg: plugin failed to load: …
+```
+
+```text
+AT                    KIND      VERSION  DETAIL
+2026-11-06T09:14:03Z  loaded    1        -
+2026-11-06T09:20:11Z  panicked  1        plg: pricing/discounts: call Discount failed: not enough memory
+2026-11-06T09:31:40Z  rejected  2        plg: plugin failed to load: …
+```
+
+`-format json` prints the handler's answer instead (`status -team` keeps the team's plugins in it). Flags may come
+before or after the key. Errors (an unknown key, a refused token, an unreachable service) go to stderr with exit
+code 1; misuse exits 2. Control characters in what plugins wrote (their messages, panics) are replaced in tables,
+so a plugin cannot drive your terminal.
 
 ## Putting it together: fit to serve, and who to talk to
 
