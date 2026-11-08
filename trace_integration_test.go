@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -338,14 +339,16 @@ func TestHostMethodsAreChildSpans(t *testing.T) {
 	}
 }
 
-// BenchmarkCallLuaTraced is BenchmarkCallLua under each tracer provider: the global default (no SDK installed),
-// a no-op provider, and an SDK provider recording every span (exporting none): a no-op provider adds no
-// allocation to a call.
-func BenchmarkCallLuaTraced(b *testing.B) {
-	for _, tc := range []struct {
-		provider func(b *testing.B) trace.TracerProvider
-		name     string
-	}{
+// tracerProvider is a tracer provider a benchmark runs under, built for b.
+type tracerProvider struct {
+	provider func(b *testing.B) trace.TracerProvider
+	name     string
+}
+
+// tracerProviders returns the global default (no SDK installed), a no-op provider, and an SDK provider recording
+// every span (exporting none).
+func tracerProviders() []tracerProvider {
+	return []tracerProvider{
 		{name: "tracer=default", provider: func(*testing.B) trace.TracerProvider { return nil }},
 		{name: "tracer=noop", provider: func(*testing.B) trace.TracerProvider { return noop.NewTracerProvider() }},
 		{name: "tracer=sdk", provider: func(b *testing.B) trace.TracerProvider {
@@ -357,7 +360,13 @@ func BenchmarkCallLuaTraced(b *testing.B) {
 
 			return provider
 		}},
-	} {
+	}
+}
+
+// BenchmarkCallLuaTraced is BenchmarkCallLua under each of tracerProviders: a no-op provider adds no allocation to
+// a call.
+func BenchmarkCallLuaTraced(b *testing.B) {
+	for _, tc := range tracerProviders() {
 		b.Run(tc.name, func(b *testing.B) {
 			ctr := newContainer(b, plg.WithTracerProvider(tc.provider(b)))
 			registerFooersIn(b, luaLanguage(), ctr, "fooer", map[string]string{"ref": "fooer"})
@@ -373,6 +382,37 @@ func BenchmarkCallLuaTraced(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+		})
+	}
+}
+
+// BenchmarkCallLuaTracedParallel is BenchmarkCallLuaTraced from GOMAXPROCS goroutines, each with an instance of its
+// own (compare BenchmarkCallLuaParallel/pool=N): the calls start and end their spans, and look up the global
+// provider, concurrently.
+func BenchmarkCallLuaTracedParallel(b *testing.B) {
+	size := runtime.GOMAXPROCS(0)
+
+	for _, tc := range tracerProviders() {
+		b.Run(tc.name, func(b *testing.B) {
+			ctr := newContainer(b, plg.WithTracerProvider(tc.provider(b)))
+			dirs := map[string]string{"ref": "fooer"}
+			registerFooersIn(b, luaLanguage(), ctr, "fooer", dirs, plg.WithPool(size, size))
+
+			ref := getFooer(b, ctr, "fooer/ref")
+			ctx := b.Context()
+
+			b.ReportAllocs()
+			b.ResetTimer() // after starting the instances
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					_, err := ref.Foo(ctx, "bench")
+					if err != nil {
+						b.Error(err)
+
+						return
+					}
+				}
+			})
 		})
 	}
 }
