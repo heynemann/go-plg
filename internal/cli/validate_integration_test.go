@@ -44,7 +44,8 @@ func modules() string {
 // TestValidateLoadsGoodPluginsOfEveryLanguage validates a plugin of each language implementing the testdata's
 // contract, resolved through a file-based GOPROXY into a module cache of the test's own: each step passes, the
 // contract module is the pinned one, a Go plugin's Host is named by its Create and its go.mod pin checked, and
-// Create runs in the language's real guest. Validating again with GOPROXY=off works from the module cache.
+// Create runs in the language's real guest. Validating again with GOPROXY=off works from the module cache, and
+// -cache-dir holds the compiled guest's cache entries, which validating again with it reuses, compiling nothing.
 func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 	t.Parallel()
 
@@ -143,9 +144,18 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 	cached := validate(environ, "luagood", "-cache-dir", cacheDir)
 	require.Equal(t, 0, cached.code, "%s%s", cached.stdout, cached.stderr)
 
-	compiled, err := os.ReadDir(cacheDir)
-	require.NoError(t, err)
-	assert.NotEmpty(t, compiled, "-cache-dir is where the guest is compiled to")
+	compiled := cacheFiles(t, cacheDir)
+	require.NotEmpty(t, compiled, "-cache-dir is where the guest is compiled to")
+
+	for name := range compiled {
+		rel, err := filepath.Rel(cacheDir, name)
+		require.NoError(t, err)
+		assert.Regexp(t, `^wazero-[^/]+/[0-9a-f]{64}$`, filepath.ToSlash(rel), "a compiled module's cache entry")
+	}
+
+	cached = validate(environ, "luagood", "-cache-dir", cacheDir)
+	require.Equal(t, 0, cached.code, "%s%s", cached.stdout, cached.stderr)
+	assert.Equal(t, compiled, cacheFiles(t, cacheDir), "the second run compiles nothing new")
 }
 
 // TestValidateFailsEachBrokenPlugin validates broken plugins: each fails at its step with a message naming the
