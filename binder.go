@@ -275,10 +275,8 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, call pl
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{
-					Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Owner: *p.desc.owner(),
-					tags: p.pool.id.owner,
-				}
+				failure := p.pool.id.panicked(PhaseCall)
+				failure.Method = meth.name
 				p.pool.panics.recovered(ctx, failure, v)
 
 				discard, err = true, failure
@@ -358,10 +356,8 @@ func decodeResults(body []byte, call plgimpl.Call) error {
 
 // failed reports a call the guest failed, with what the guest wrote to stderr meanwhile.
 func (p *plugin) failed(ctx context.Context, held *slot, meth *method, value any) *PanicError {
-	failure := &PanicError{
-		Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Value: value,
-		Guest: held.inst.Guest(), Owner: *p.desc.owner(), tags: p.pool.id.owner,
-	}
+	failure := p.pool.id.panicked(PhaseCall)
+	failure.Method, failure.Value, failure.Guest = meth.name, value, held.inst.Guest()
 	p.pool.panics.report(ctx, failure)
 
 	return failure

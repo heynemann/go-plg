@@ -773,7 +773,7 @@ func (c *Container) newLauncher(reg *registration, id pluginID, src *source, spe
 	info := PluginInfo{
 		Owner: *src.desc.owner(), Key: id.key, Version: src.desc.Version, Language: id.lang, Storage: src.storeName,
 	}
-	secrets := newPluginSecrets(reg.cfg, &info, src.desc.Secrets, c.panics, output, id.owner)
+	secrets := newPluginSecrets(reg.cfg, &info, src.desc.Secrets, c.panics, output, id)
 
 	return &launcher{
 		mod:           mod,

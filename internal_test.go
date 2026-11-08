@@ -4751,8 +4751,9 @@ func testSecrets(t *testing.T, resolve secretResolver, ttl time.Duration, names 
 
 	cfg := &registerConfig{resolve: resolve, secretTTL: ttl}
 	info := PluginInfo{Key: "s/p", Version: "v1", Language: LanguageLua}
+	id := pluginID{owner: noOwner, key: info.Key, lang: info.Language}
 
-	return newPluginSecrets(cfg, &info, names, nil, slog.New(slog.NewJSONHandler(&logs, nil)), nil), &logs
+	return newPluginSecrets(cfg, &info, names, nil, slog.New(slog.NewJSONHandler(&logs, nil)), id), &logs
 }
 
 // read reads the secret name as a guest does: through serve, decoding its answer.

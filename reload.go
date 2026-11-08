@@ -503,13 +503,7 @@ func (c *Container) retire(ctx context.Context, gen *plugin) {
 func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{
-				Key:      gen.key,
-				Language: gen.desc.Language,
-				Phase:    PhaseClose,
-				Owner:    *gen.desc.owner(),
-				tags:     gen.pool.id.owner,
-			}
+			failure := gen.pool.id.panicked(PhaseClose)
 			c.panics.recovered(ctx, failure, v)
 
 			gen.closeErr = errors.Join(gen.closeErr, failure)

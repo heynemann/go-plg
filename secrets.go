@@ -146,7 +146,7 @@ type pluginSecrets struct {
 	redact  *redact.Redactor // the version's resolved values; nil when it declares none
 	panics  *panicReporter
 	logger  *slog.Logger // the version's guarded logger
-	owner   *ownerTags
+	id      pluginID
 	slots   map[string]*atomic.Pointer[resolvedSecret] // by declared name; immutable map
 	names   []string                                   // declared, in plugin.yaml's order
 	info    PluginInfo
@@ -159,12 +159,12 @@ type resolvedSecret struct {
 	value   string
 }
 
-// newPluginSecrets returns the secrets of the plugin version info describes, which declares names.
+// newPluginSecrets returns the secrets of the plugin version id, which info describes and which declares names.
 func newPluginSecrets(cfg *registerConfig, info *PluginInfo, names []string, panics *panicReporter,
-	logger *slog.Logger, owner *ownerTags,
+	logger *slog.Logger, id pluginID,
 ) *pluginSecrets {
 	secrets := &pluginSecrets{
-		resolve: cfg.resolve, panics: panics, logger: logger, owner: owner, names: names, info: *info,
+		resolve: cfg.resolve, panics: panics, logger: logger, id: id, names: names, info: *info,
 		ttl: cfg.secretTTL, slots: make(map[string]*atomic.Pointer[resolvedSecret], len(names)),
 	}
 
@@ -261,10 +261,9 @@ func (s *pluginSecrets) call(ctx context.Context, name string) (string, error) {
 	func() {
 		defer func() {
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
-				s.panics.recovered(ctx, &PanicError{
-					Key: s.info.Key, Language: s.info.Language, Phase: PhaseCallback, Method: secretsMethod,
-					Owner: s.owner.owner, tags: s.owner,
-				}, v)
+				failure := s.id.panicked(PhaseCallback)
+				failure.Method = secretsMethod
+				s.panics.recovered(ctx, failure, v)
 
 				value, err = "", errSecretPanic
 			}
