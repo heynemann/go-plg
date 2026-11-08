@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/goabi"
+	"github.com/heynemann/go-plg/internal/gorestrict"
 )
 
 var (
@@ -143,7 +144,7 @@ func parseGo(fset *token.FileSet, files fs.FS, dir string) ([]*ast.File, error) 
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.Type().IsRegular() || path.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+		if !gorestrict.IsSource(name, entry) {
 			continue
 		}
 
