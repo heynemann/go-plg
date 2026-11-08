@@ -28,6 +28,47 @@ func shapes(t *testing.T) *typings.Contract {
 	}
 }
 
+// clashes is the testdata contract whose names clash.
+func clashes(t *testing.T) *typings.Contract {
+	t.Helper()
+
+	pkg := load(t, "clashes", "example.com/clashes")
+
+	return &typings.Contract{Interface: named(t, pkg, "Lease"), Implements: "example.com/clashes.Lease@v1.0.0"}
+}
+
+// typeCheckGo type-checks the Go skeleton source against the contract's package, the packages its types come from
+// and plg's plugin package.
+func typeCheckGo(t *testing.T, contract *typings.Contract, source []byte) *types.Package {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "plugin.go", source, 0)
+	require.NoError(t, err)
+
+	sourceImporter := importer.ForCompiler(fset, "source", nil)
+	contractPkg := contract.Interface.Obj().Pkg()
+
+	conf := types.Config{Importer: importerFunc(func(path string) (*types.Package, error) {
+		if path == contractPkg.Path() {
+			return contractPkg, nil
+		}
+
+		for _, imported := range contractPkg.Imports() { // the very packages the contract's types come from
+			if imported.Path() == path {
+				return imported, nil
+			}
+		}
+
+		return sourceImporter.Import(path) // plg's plugin package
+	})}
+
+	pkg, err := conf.Check("example.com/"+file.Name.Name, fset, []*ast.File{file}, nil)
+	require.NoError(t, err, string(source))
+
+	return pkg
+}
+
 // importerFunc adapts a function to types.Importer.
 type importerFunc func(path string) (*types.Package, error)
 
@@ -50,30 +91,8 @@ func TestGoScaffoldImplementsTheInterface(t *testing.T) {
 		[]string{scaffold.Files[0].Name, scaffold.Files[1].Name},
 	)
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "plugin.go", scaffold.Files[0].Data, 0)
-	require.NoError(t, err)
-	assert.Equal(t, "mystore", file.Name.Name)
-
-	source := importer.ForCompiler(fset, "source", nil)
-	contractPkg := contract.Interface.Obj().Pkg()
-
-	conf := types.Config{Importer: importerFunc(func(path string) (*types.Package, error) {
-		if path == contractPkg.Path() {
-			return contractPkg, nil
-		}
-
-		for _, imported := range contractPkg.Imports() { // the very packages the contract's types come from
-			if imported.Path() == path {
-				return imported, nil
-			}
-		}
-
-		return source.Import(path) // plg's plugin package
-	})}
-
-	pkg, err := conf.Check("example.com/mystore", fset, []*ast.File{file}, nil)
-	require.NoError(t, err, string(scaffold.Files[0].Data))
+	pkg := typeCheckGo(t, contract, scaffold.Files[0].Data)
+	assert.Equal(t, "mystore", pkg.Name())
 
 	create, ok := pkg.Scope().Lookup("Create").Type().(*types.Signature)
 	require.True(t, ok)
@@ -89,6 +108,28 @@ func TestGoScaffoldImplementsTheInterface(t *testing.T) {
 	require.NotNil(t, validate)
 	assert.Equal(t, "func(ctx context.Context, in example.com/shapes.Limits) "+
 		"([]github.com/heynemann/go-plg/plugin.Issue, error)", validate.Type().String())
+}
+
+// TestGoScaffoldNamesNoParameterLikeAPackage writes the Go skeleton of a contract whose method is the first to use
+// time and has a parameter named time: the parameter is unnamed, so the method's time.Time{} is the package's
+// and the skeleton compiles and implements the interface.
+func TestGoScaffoldNamesNoParameterLikeAPackage(t *testing.T) {
+	t.Parallel()
+
+	contract := clashes(t)
+
+	scaffold, err := typings.NewScaffold(typings.LanguageGo, contract, "lease")
+	require.NoError(t, err)
+
+	source := string(scaffold.Files[0].Data)
+	assert.Contains(t, source, "Expiry(ctx context.Context, _ time.Duration) (time.Time, error) {\n"+
+		"\treturn time.Time{}, nil\n}", source)
+
+	pkg := typeCheckGo(t, contract, scaffold.Files[0].Data)
+
+	iface, ok := contract.Interface.Underlying().(*types.Interface)
+	require.True(t, ok)
+	assert.True(t, types.Implements(types.NewPointer(pkg.Scope().Lookup("lease").Type()), iface))
 }
 
 // exampleFile is what a scaffold's test case file holds.

@@ -382,21 +382,17 @@ func (g *goFile) qualified(named *types.Named) string {
 	return g.typeString(named)
 }
 
-// method writes the method name of signature sig, returning its results' zero values.
+// method writes the method name of signature sig, returning its results' zero values. It imports the packages the
+// signature uses before naming the parameters, so that none is named like a package the method uses.
 func (g *goFile) method(out *strings.Builder, recv, name string, sig *types.Signature) {
 	params := make([]string, sig.Params().Len())
 	for i := range sig.Params().Len() {
-		pname := sig.Params().At(i).Name()
-		if pname == "" || g.taken[pname] || token.IsKeyword(pname) {
-			pname = "_"
-		}
-
 		typ := g.typeString(sig.Params().At(i).Type())
 		if sig.Variadic() && i == sig.Params().Len()-1 {
 			typ = "..." + strings.TrimPrefix(typ, "[]")
 		}
 
-		params[i] = pname + " " + typ
+		params[i] = typ
 	}
 
 	results := make([]string, sig.Results().Len())
@@ -406,6 +402,15 @@ func (g *goFile) method(out *strings.Builder, recv, name string, sig *types.Sign
 		typ := sig.Results().At(i).Type()
 		results[i] = g.typeString(typ)
 		zeros[i] = g.zero(typ)
+	}
+
+	for i := range sig.Params().Len() {
+		pname := sig.Params().At(i).Name()
+		if pname == "" || g.taken[pname] || token.IsKeyword(pname) {
+			pname = "_"
+		}
+
+		params[i] = pname + " " + params[i]
 	}
 
 	resultList := strings.Join(results, ", ")
