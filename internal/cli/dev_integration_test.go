@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -302,4 +304,79 @@ func TestDevStopsAtTheEndOfItsInput(t *testing.T) {
 	assert.Contains(t, rows(stdout.String()), "plg.yaml warning "+filepath.Join(root, "plg.yaml")+" does not list "+
 		"this plugin: it is validated without the repository's settings")
 	assert.Contains(t, stdout.String(), "watching "+filepath.Join(root, "rule")+"\n")
+}
+
+// TestDevReusesTheCompilationCache runs plg dev with a compilation cache of its own: its first run compiles the
+// guest into it, and the run after a save compiles nothing new (every cache file is the one the first run wrote,
+// unchanged): warm guests are the on-disk compilation cache, reused across saves.
+func TestDevReusesTheCompilationCache(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	root := t.TempDir()
+	cache := t.TempDir()
+
+	created := plgInEnv(environ, root, "init", "-implements", pricingRule, "-lang", "lua", "pricing")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+
+	changes := make(chan []string)
+	stdin, typed := io.Pipe()
+	printed, stdout := io.Pipe()
+	done := make(chan int, 1)
+
+	go func() {
+		defer func() { assert.NoError(t, stdout.Close()) }()
+
+		done <- cli.Main([]string{"dev", "-cache-dir", cache, "pricing"}, &cli.Env{
+			Stdin: stdin, Stdout: stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+			Environ: func() []string { return environ }, Dir: root,
+			Watch: func(context.Context, []string) <-chan []string { return changes },
+		})
+	}()
+
+	out := bufio.NewReader(printed)
+	plugin := filepath.Join(root, "pricing")
+
+	assert.Contains(t, untilPrompt(t, out), "plg dev: "+plugin+" is valid\n")
+
+	compiled := cacheFiles(t, cache)
+	require.NotEmpty(t, compiled, "the first run compiles the guest into the cache")
+
+	replaceIn(t, plugin, "plugin.lua", "return { total = 0,", "return { total = 0 ,")
+
+	changes <- []string{filepath.Join(plugin, "plugin.lua")}
+
+	assert.Contains(t, untilPrompt(t, out), "plg dev: "+plugin+" is valid\n")
+	assert.Equal(t, compiled, cacheFiles(t, cache), "the second run compiles nothing new")
+
+	require.NoError(t, typed.Close())
+
+	_, err := io.ReadAll(out)
+	require.NoError(t, err)
+	assert.Equal(t, 0, <-done)
+}
+
+// cacheFiles returns the compilation cache's files in dir with each one's size and modification time.
+func cacheFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+
+	files := map[string]string{}
+
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err //nolint:wrapcheck // the test fails with it
+		}
+
+		files[path] = strconv.FormatInt(info.Size(), 10) + " " + info.ModTime().String()
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return files
 }

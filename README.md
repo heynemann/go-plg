@@ -697,7 +697,8 @@ otherwise. `-host` applies to every plugin.
   each shared directory into a temporary directory and validates that copy (a plugin holding a file where a
   shared directory goes fails the `shared` step). Lua and TypeScript plugins find a shared directory at its path
   in the repository, from the plugin's root: `require("lib.tiers")`, `import { tier } from "./lib/tiers"` (in the
-  repository, TypeScript's `rootDirs` and the Lua Language Server's workspace root resolve the same names). Go
+  repository, the generated `tsconfig.json`'s `rootDirs` and `.luarc.json`'s `workspace.library` make editors resolve
+  the same names). Go
   plugins import shared packages by their real import path (the module path of the go.mod above the shared
   directory, then its path below it), so `go build ./...` and editors work in the repository; validate copies the
   shared directories holding Go files into the plugin's [`vendor/`](#go-plugins) at that path. A shared Go
@@ -767,13 +768,20 @@ above it, which gains that requirement instead (`go mod tidy` afterwards writes 
 another version of the contract module stops `plg init` before it writes anything. A plugin inside an author
 repository is added to its `plg.yaml`, after the plugins it lists, its comments kept. The new plugin passes
 `plg validate` as written, with a warning until its owner block is filled in (an error under
-`requireOwnership: true`).
+`requireOwnership: true`); a Go plugin on a contract with `//plg:validation` also gets a `types` warning, since
+validate does not resolve its `Validate`'s import of plg's `plugin` package, until `go mod tidy` adds plg to its
+module. In an author repository with `shared:` directories, the typings of a Lua or TypeScript plugin (from
+`plg init` and `plg types`, checked by validate) include the editor configuration resolving them at their
+repository paths: `tsconfig.json`'s `rootDirs` merges the plugin with the repository's root, and a `.luarc.json`
+lists them in the Lua Language Server's `workspace.library`.
 
 `plg dev [plugin dir]` (default: the current directory, or an author repository's only plugin) validates the plugin
 as `plg validate` does, then again whenever its files, its tests, the repository's `plg.yaml` or its shared
 directories change (it polls them every quarter of a second), printing each run's table. The contract module is
-resolved once (later runs reuse it without the go command) and the guests and the TypeScript compiler stay
-compiled in the compilation cache (`-cache-dir`), so a run after a save costs the load and the test cases. It
+resolved once (later runs reuse it without the go command) and the guests are warm in the sense of the
+compilation cache: the guests and the TypeScript compiler compiled on the first run are loaded from the on-disk
+cache (`-cache-dir`) on every run after a save, which compiles nothing new, so it costs the load and the test
+cases. Each run still starts a fresh container, as `plg validate` does. It
 reads commands from stdin:
 
 ```text

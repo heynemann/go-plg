@@ -49,7 +49,7 @@ func (v *validation) writeTypings(ctx context.Context) bool {
 
 	defer cleanup()
 
-	typ, err := generateTypings(res)
+	typ, err := generateTypings(res, v.sharedDirs())
 	if err != nil {
 		return v.failed("typings", err)
 	}

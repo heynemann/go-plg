@@ -24,6 +24,7 @@ const (
 	TypeScriptFile = "plg.d.ts"      // TypeScript declarations
 	TSConfigFile   = "tsconfig.json" // the compiler options plg validate checks with, for editors
 	LuaFile        = "plg.d.lua"     // Lua Language Server annotations
+	LuaRCFile      = ".luarc.json"   // the Lua Language Server's settings, in a repository with shared directories
 )
 
 // The languages typings exist for, as plugin.yaml names them.
@@ -61,6 +62,13 @@ type File struct {
 	Data []byte
 }
 
+// Shared is where a plugin in an author repository finds the repository's shared directories, for the editor
+// configuration the typings then include.
+type Shared struct {
+	Root string   // the repository's root, relative to the plugin's directory (slash-separated)
+	Dirs []string // the shared directories, relative to Root (slash-separated)
+}
+
 // Typings are the files generated for one plugin language.
 type Typings struct {
 	Language string
@@ -69,8 +77,9 @@ type Typings struct {
 	Files []File
 }
 
-// Generate generates the typings of the contract for language.
-func Generate(language string, contract *Contract) (*Typings, error) {
+// Generate generates the typings of the contract for language; shared, when not nil, adds the editor
+// configuration that resolves the repository's shared directories.
+func Generate(language string, contract *Contract, shared *Shared) (*Typings, error) {
 	planned, err := newModel(contract)
 	if err != nil {
 		return nil, err
@@ -84,12 +93,17 @@ func Generate(language string, contract *Contract) (*Typings, error) {
 			Language: language,
 			Files: []File{
 				{Name: TypeScriptFile, Data: planned.typeScript()},
-				{Name: TSConfigFile, Data: []byte(tsconfig)},
+				{Name: TSConfigFile, Data: tsconfig(shared)},
 			},
 			iface: iface,
 		}, nil
 	case LanguageLua:
-		return &Typings{Language: language, Files: []File{{Name: LuaFile, Data: planned.lua()}}, iface: iface}, nil
+		files := []File{{Name: LuaFile, Data: planned.lua()}}
+		if shared != nil {
+			files = append(files, File{Name: LuaRCFile, Data: luarc(shared)})
+		}
+
+		return &Typings{Language: language, Files: files, iface: iface}, nil
 	default:
 		return nil, fmt.Errorf("%w: %s (Go plugins import the contract package itself)", ErrLanguage, language)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/heynemann/go-plg/internal/authorrepo"
 	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/modfetch"
+	"github.com/heynemann/go-plg/internal/typings"
 )
 
 // validateRepo validates every plugin the author repository in run.dir lists, in its plg.yaml's order: a section
@@ -253,4 +254,19 @@ func (t *stepTable) summary() string {
 	default:
 		return ""
 	}
+}
+
+// sharedDirs is where the plugin finds its repository's shared directories, for the editor configuration its
+// typings include; nil outside a repository or in one without shared directories.
+func (v *validation) sharedDirs() *typings.Shared {
+	if v.repo == nil || len(v.repo.Shared) == 0 {
+		return nil
+	}
+
+	root, err := filepath.Rel(v.dir, v.repo.Dir)
+	if err != nil {
+		return nil
+	}
+
+	return &typings.Shared{Root: filepath.ToSlash(root), Dirs: v.repo.Shared}
 }

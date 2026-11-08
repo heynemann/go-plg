@@ -3,6 +3,7 @@
 // (plg.d.ts), no DOM or Node.js.
 {
   "compilerOptions": {
+    "rootDirs": [".", ".."],
     "target": "es2023",
     "lib": ["es2023"],
     "types": [],

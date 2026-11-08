@@ -146,6 +146,73 @@ func TestInitAddsThePluginToItsRepository(t *testing.T) {
 	assert.Equal(t, string(goMod), string(unchanged))
 }
 
+// TestInitWritesEditorConfigurationForSharedDirectories gives Lua and TypeScript plugins in an author repository
+// with a shared directory the editor configuration resolving it at its repository path (the Lua Language
+// Server's workspace library, TypeScript's rootDirs): plg types for a plugin created before plg.yaml shared the
+// directory, plg init for a new one; validate then finds them up to date. plg types never overwrites a
+// .luarc.json it did not write, and writes it again once it is moved away.
+func TestInitWritesEditorConfigurationForSharedDirectories(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	root := t.TempDir()
+
+	created := plgInEnv(environ, root, "init", "-implements", pricingRule, "-lang", "lua", "rules/lua")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+
+	luarc := filepath.Join(root, "rules", "lua", ".luarc.json")
+	assert.NoFileExists(t, luarc, "no shared directories outside a repository")
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "plg.yaml"), []byte("plugins: [rules/lua]\nshared: [lib]\n"),
+		0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "lib"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "lib", "tiers.lua"), []byte("return {}\n"), 0o600))
+
+	stale := plgInEnv(environ, root, "validate", "rules/lua")
+	assert.Equal(t, 1, stale.code)
+	assert.Contains(t, stale.stdout, "stale: .luarc.json not what plg types writes")
+
+	written := plgInEnv(environ, root, "types", "rules/lua")
+	require.Equal(t, 0, written.code, written.stdout+written.stderr)
+	assert.Contains(t, rows(written.stdout), "typings ok wrote .luarc.json; plg.d.lua already up to date")
+
+	created = plgInEnv(environ, root, "init", "-implements", pricingRule, "-lang", "ts", "rules/ts")
+	require.Equal(t, 0, created.code, created.stdout+created.stderr)
+
+	settings, err := readFile(luarc)
+	require.NoError(t, err)
+	assert.Contains(t, string(settings), `"workspace.library": ["../../lib"]`)
+
+	tsconfig, err := readFile(filepath.Join(root, "rules", "ts", "tsconfig.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(tsconfig), `"rootDirs": [".", "../.."],`)
+
+	valid := plgInEnv(environ, root, "validate", ".")
+	require.Equal(t, 0, valid.code, valid.stdout+valid.stderr)
+
+	const mine = "{\"workspace.library\": [\"elsewhere\"]}\n"
+
+	require.NoError(t, os.WriteFile(luarc, []byte(mine), 0o600))
+
+	refused := plgInEnv(environ, root, "types", "rules/lua")
+	assert.Equal(t, 1, refused.code, refused.stdout+refused.stderr)
+	assert.Contains(t, refused.stdout, "did not write is in the way")
+
+	kept, err := readFile(luarc)
+	require.NoError(t, err)
+	assert.Equal(t, mine, string(kept)) //nolint:testifylint // byte for byte
+
+	require.NoError(t, os.Remove(luarc))
+
+	written = plgInEnv(environ, root, "types", "rules/lua")
+	require.Equal(t, 0, written.code, written.stdout+written.stderr)
+	assert.Contains(t, rows(written.stdout), "typings ok wrote .luarc.json; plg.d.lua already up to date")
+
+	again, err := readFile(luarc)
+	require.NoError(t, err)
+	assert.Equal(t, string(settings), string(again))
+}
+
 // TestInitUsage checks plg init's arguments.
 func TestInitUsage(t *testing.T) {
 	t.Parallel()

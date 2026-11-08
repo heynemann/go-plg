@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -73,7 +75,7 @@ func golden(t *testing.T, source string) fs.FS {
 func TestGoldenTypingsTypeCheck(t *testing.T) {
 	t.Parallel()
 
-	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t))
+	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t), nil)
 	require.NoError(t, err)
 
 	check := checker(t)
@@ -110,7 +112,7 @@ export function Create() {
 func TestCheckTypeScriptRefusesLuaTypings(t *testing.T) {
 	t.Parallel()
 
-	typ, err := typings.Generate(typings.LanguageLua, everything(t))
+	typ, err := typings.Generate(typings.LanguageLua, everything(t), nil)
 	require.NoError(t, err)
 
 	_, err = typ.CheckTypeScript(t.Context(), nil, golden(t, ""), "plugin.ts")
@@ -125,7 +127,7 @@ func TestTypeScriptScaffoldTypeChecks(t *testing.T) {
 
 	contract := shapes(t)
 
-	typ, err := typings.Generate(typings.LanguageTypeScript, contract)
+	typ, err := typings.Generate(typings.LanguageTypeScript, contract, nil)
 	require.NoError(t, err)
 
 	scaffold, err := typings.NewScaffold(typings.LanguageTypeScript, contract, "shape")
@@ -143,4 +145,80 @@ func TestTypeScriptScaffoldTypeChecks(t *testing.T) {
 	diags, err := typ.CheckTypeScript(t.Context(), checker(t), plugin, scaffold.Entrypoint)
 	require.NoError(t, err)
 	assert.Empty(t, diags, string(scaffold.Files[0].Data))
+}
+
+// TestSharedDirectoriesResolveInEditors type-checks, with the real compiler and the generated tsconfig.json, a
+// plugin in an author repository importing a shared directory as validate's copy places it (`./lib/tiers` from
+// the plugin's root): its rootDirs resolve the import to the shared directory at its repository path, which the
+// tsconfig.json of a plugin outside a repository does not.
+func TestSharedDirectoriesResolveInEditors(t *testing.T) {
+	t.Parallel()
+
+	check := checker(t)
+
+	for _, tc := range []struct {
+		shared *typings.Shared
+		name   string
+		failed bool
+	}{
+		{name: "shared", shared: &typings.Shared{Root: "../..", Dirs: []string{"lib"}}},
+		{name: "outside a repository", failed: true},
+	} {
+		typ, err := typings.Generate(typings.LanguageTypeScript, everything(t), tc.shared)
+		require.NoError(t, err)
+
+		var files memfs.Builder
+
+		for _, file := range typ.Files {
+			require.NoError(t, files.Add("plugins/pricing/"+file.Name, file.Data))
+		}
+
+		require.NoError(t, files.Add("plugins/pricing/main.ts",
+			[]byte("import { tier } from \"./lib/tiers\";\n\nexport const top: number = tier(3);\n")))
+		require.NoError(t, files.Add("lib/tiers.ts",
+			[]byte("export function tier(n: number): number {\n  return n * 2;\n}\n")))
+
+		repo, err := files.Build()
+		require.NoError(t, err)
+
+		diags, err := check.Check(t.Context(), "/repo/plugins/pricing", "/repo/plugins/pricing/tsconfig.json",
+			engine.Mount{FS: repo, GuestPath: "/repo"})
+		require.NoError(t, err, tc.name)
+
+		if !tc.failed {
+			assert.Empty(t, diags, tc.name)
+
+			continue
+		}
+
+		require.Len(t, diags, 1, tc.name)
+		assert.Equal(t, "TS2307", diags[0].Code, tc.name)
+	}
+}
+
+// TestLuaSharedDirectoriesResolveInEditors checks that the Lua typings of a plugin in an author repository with
+// shared directories include a .luarc.json whose workspace library lists them at their repository paths, and
+// that a plugin outside one gets none.
+func TestLuaSharedDirectoriesResolveInEditors(t *testing.T) {
+	t.Parallel()
+
+	typ, err := typings.Generate(typings.LanguageLua, everything(t),
+		&typings.Shared{Root: "../..", Dirs: []string{"lib", "shared/tiers"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{typings.LuaFile, typings.LuaRCFile}, typ.Names())
+
+	rc := typ.Files[1].Data
+	assert.True(t, typings.Generated(rc))
+
+	_, settings, ok := strings.Cut(string(rc), "\n{")
+	require.True(t, ok)
+
+	var parsed map[string][]string
+
+	require.NoError(t, sonic.Unmarshal([]byte("{"+settings), &parsed))
+	assert.Equal(t, map[string][]string{"workspace.library": {"../../lib", "../../shared/tiers"}}, parsed)
+
+	alone, err := typings.Generate(typings.LanguageLua, everything(t), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{typings.LuaFile}, alone.Names())
 }

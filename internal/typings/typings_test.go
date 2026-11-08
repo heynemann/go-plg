@@ -81,7 +81,7 @@ func TestGeneratesTheGoldenTypings(t *testing.T) {
 	t.Parallel()
 
 	for _, language := range []string{typings.LanguageTypeScript, typings.LanguageLua} {
-		typ, err := typings.Generate(language, everything(t))
+		typ, err := typings.Generate(language, everything(t), nil)
 		require.NoError(t, err)
 
 		goldens := filepath.Join("testdata", "golden")
@@ -106,7 +106,7 @@ func TestNamespacesAvoidTheGlobals(t *testing.T) {
 	pkg := load(t, "json", "example.com/json")
 	contract := &typings.Contract{Interface: named(t, pkg, "Codec"), Implements: "example.com/json.Codec@v1.0.0"}
 
-	ts, err := typings.Generate(typings.LanguageTypeScript, contract)
+	ts, err := typings.Generate(typings.LanguageTypeScript, contract, nil)
 	require.NoError(t, err)
 
 	declarations := string(ts.Files[0].Data)
@@ -116,7 +116,7 @@ func TestNamespacesAvoidTheGlobals(t *testing.T) {
 	assert.NotContains(t, declarations, "Validate?", "a contract without a validation input declares no Validate")
 	assert.NotContains(t, declarations, "\n// Host: ")
 
-	lua, err := typings.Generate(typings.LanguageLua, contract)
+	lua, err := typings.Generate(typings.LanguageLua, contract, nil)
 	require.NoError(t, err)
 
 	annotations := string(lua.Files[0].Data)
@@ -136,7 +136,7 @@ func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {
 
 	contract := everything(t)
 
-	_, err := typings.Generate("go", contract)
+	_, err := typings.Generate("go", contract, nil)
 	require.ErrorIs(t, err, typings.ErrLanguage)
 	require.EqualError(t, err, "typings: no typings for this language: go (Go plugins import the contract package "+
 		"itself)")
@@ -171,7 +171,7 @@ func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {
 			"return an error last"},
 		{&typings.Contract{Interface: channel}, "method Do: parameter 1: "},
 	} {
-		_, err := typings.Generate(typings.LanguageTypeScript, tc.contract)
+		_, err := typings.Generate(typings.LanguageTypeScript, tc.contract, nil)
 		require.ErrorIs(t, err, typings.ErrContract, tc.want)
 		assert.Contains(t, err.Error(), tc.want)
 	}
@@ -182,7 +182,7 @@ func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {
 func TestTypingsOnDisk(t *testing.T) {
 	t.Parallel()
 
-	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t))
+	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t), nil)
 	require.NoError(t, err)
 
 	dir := t.TempDir()

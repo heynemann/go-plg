@@ -178,7 +178,7 @@ func (v *validation) pluginFiles(res *resolved) ([]typings.File, bool) {
 	files := []typings.File{{Name: "plugin.yaml", Data: manifestFor(&res.desc, scaffold.Entrypoint)}}
 
 	if res.desc.Language != plg.LanguageGo {
-		typ, err := typings.Generate(string(res.desc.Language), contract)
+		typ, err := typings.Generate(string(res.desc.Language), contract, v.sharedDirs())
 		if err != nil {
 			return nil, v.failed("typings", describable(res, err))
 		}

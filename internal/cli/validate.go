@@ -470,7 +470,7 @@ func (v *validation) defaultHost(loaded *contractload.Loaded, pkgPath string) st
 
 // typings checks that a Lua or TypeScript plugin's committed typings are those plg types generates.
 func (v *validation) typings(res *resolved) (*typings.Typings, bool) {
-	typ, err := generateTypings(res)
+	typ, err := generateTypings(res, v.sharedDirs())
 	if err != nil {
 		return nil, v.failed("typings", err)
 	}
@@ -486,9 +486,9 @@ func (v *validation) typings(res *resolved) (*typings.Typings, bool) {
 	return typ, true
 }
 
-// generateTypings generates the typings of the plugin's language.
-func generateTypings(res *resolved) (*typings.Typings, error) {
-	typ, err := typings.Generate(string(res.desc.Language), typingsContract(res))
+// generateTypings generates the typings of the plugin's language, with the editor configuration for shared.
+func generateTypings(res *resolved, shared *typings.Shared) (*typings.Typings, error) {
+	typ, err := typings.Generate(string(res.desc.Language), typingsContract(res), shared)
 	if err != nil {
 		return nil, describable(res, err)
 	}

@@ -3,6 +3,7 @@ package typings
 import (
 	"fmt"
 	"go/types"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -14,13 +15,21 @@ import (
 
 // tsconfig is the generated tsconfig.json: the options plg validate type-checks a TypeScript plugin with, which
 // editors then share. The guest runs ECMAScript 2023 (QuickJS-ng) with plg's globals only; esbuild bundles
-// relative imports with or without their extension, JSON and text files.
-const tsconfig = `// ` + generatedLine + `
+// relative imports with or without their extension, JSON and text files. In an author repository with shared
+// directories, rootDirs merges the plugin's directory with the repository's root, so that editors resolve
+// `./lib/tiers` from the plugin's root to the shared directory at its repository path, as validate's copy does.
+func tsconfig(shared *Shared) []byte {
+	rootDirs := ""
+	if shared != nil {
+		rootDirs = `    "rootDirs": [".", ` + strconv.Quote(shared.Root) + `],` + "\n"
+	}
+
+	return []byte(`// ` + generatedLine + `
 // The compiler options plg validate type-checks this plugin with: the ECMAScript 2023 built-ins and plg's globals
 // (` + TypeScriptFile + `), no DOM or Node.js.
 {
   "compilerOptions": {
-    "target": "es2023",
+` + rootDirs + `    "target": "es2023",
     "lib": ["es2023"],
     "types": [],
     "module": "esnext",
@@ -33,7 +42,25 @@ const tsconfig = `// ` + generatedLine + `
     "noEmit": true
   }
 }
-`
+`)
+}
+
+// luarc is the generated .luarc.json of a Lua plugin in an author repository with shared directories: the Lua
+// Language Server's workspace library lists them, so that editors resolve `require("lib.tiers")` to the shared
+// directory at its repository path, as validate's copy does.
+func luarc(shared *Shared) []byte {
+	library := make([]string, len(shared.Dirs))
+	for i, dir := range shared.Dirs {
+		library[i] = strconv.Quote(path.Join(shared.Root, dir))
+	}
+
+	return []byte(`// ` + generatedLine + `
+// The Lua Language Server's settings for this plugin: the repository's shared directories it requires.
+{
+  "workspace.library": [` + strings.Join(library, ", ") + `]
+}
+`)
+}
 
 // tsGlobals declares what plg gives every TypeScript plugin besides the ECMAScript built-ins (the TypeScript
 // guest's prelude): plg's shared types, console, fetch, Headers, Response, secrets and text imports.
