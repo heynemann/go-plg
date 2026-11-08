@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,17 +32,17 @@ func artifactFiles() map[string]string {
 }
 
 // artifactTree returns files as a tree.
-func artifactTree(t *testing.T, files map[string]string) *memfs.FS {
-	t.Helper()
+func artifactTree(tb testing.TB, files map[string]string) *memfs.FS {
+	tb.Helper()
 
 	var tree memfs.Builder
 
 	for name, data := range files {
-		require.NoError(t, tree.Add(name, []byte(data)))
+		require.NoError(tb, tree.Add(name, []byte(data)))
 	}
 
 	built, err := tree.Build()
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	return built
 }
@@ -56,14 +57,14 @@ func artifactRecord(files *memfs.FS) *adminjson.Provenance {
 }
 
 // packArtifact returns the artifact plg pack writes for files.
-func packArtifact(t *testing.T, files map[string]string) []byte {
-	t.Helper()
+func packArtifact(tb testing.TB, files map[string]string) []byte {
+	tb.Helper()
 
-	tree := artifactTree(t, files)
+	tree := artifactTree(tb, files)
 
 	var out bytes.Buffer
 
-	require.NoError(t, artifact.Write(&out, tree, artifactRecord(tree)))
+	require.NoError(tb, artifact.Write(&out, tree, artifactRecord(tree)))
 
 	return out.Bytes()
 }
@@ -85,8 +86,8 @@ type rawEntry struct {
 // end; with open set, the archive is cut after the last header, its data missing.
 //
 //nolint:revive // flag-parameter: open picks the one malformed shape (data missing) the tests need besides whole ones
-func rawArchive(t *testing.T, trailing int64, open bool, entries ...rawEntry) []byte {
-	t.Helper()
+func rawArchive(tb testing.TB, trailing int64, open bool, entries ...rawEntry) []byte {
+	tb.Helper()
 
 	var out bytes.Buffer
 
@@ -99,23 +100,23 @@ func rawArchive(t *testing.T, trailing int64, open bool, entries ...rawEntry) []
 			header = &tar.Header{Typeflag: tar.TypeReg, Name: entry.name, Size: int64(len(entry.data)), Mode: 0o644}
 		}
 
-		require.NoError(t, archive.WriteHeader(header))
+		require.NoError(tb, archive.WriteHeader(header))
 
 		if open && i == len(entries)-1 {
-			require.NoError(t, compressed.Close())
+			require.NoError(tb, compressed.Close())
 
 			return out.Bytes()
 		}
 
 		_, err := io.WriteString(archive, entry.data)
-		require.NoError(t, err)
+		require.NoError(tb, err)
 	}
 
-	require.NoError(t, archive.Close())
+	require.NoError(tb, archive.Close())
 
 	_, err := io.CopyN(compressed, zeros{}, trailing)
-	require.NoError(t, err)
-	require.NoError(t, compressed.Close())
+	require.NoError(tb, err)
+	require.NoError(tb, compressed.Close())
 
 	return out.Bytes()
 }
@@ -130,18 +131,18 @@ func (zeros) Read(p []byte) (int, error) {
 }
 
 // provenanceEntry is the provenance record entry of files (default artifactFiles()) as plg pack writes it.
-func provenanceEntry(t *testing.T, files map[string]string) rawEntry {
-	t.Helper()
+func provenanceEntry(tb testing.TB, files map[string]string) rawEntry {
+	tb.Helper()
 
 	if files == nil {
 		files = artifactFiles()
 	}
 
-	record := artifactRecord(artifactTree(t, files))
+	record := artifactRecord(artifactTree(tb, files))
 	record.Format = artifact.Format
 
 	data, err := sonic.ConfigStd.Marshal(record)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	return rawEntry{name: artifact.ProvenanceName, data: string(data)}
 }
@@ -392,4 +393,99 @@ func TestOpenArtifactRejectsWhatPackNeverWrites(t *testing.T) {
 		require.ErrorContains(t, err, tc.msg, tc.name)
 		assert.Nil(t, art, tc.name)
 	}
+}
+
+// FuzzOpenArtifact opens arbitrary bytes as an artifact, seeded with what plg pack writes, the archives the tests
+// above damage and the malformed ones they hand-make. Whatever the bytes, OpenArtifact either fails with
+// ErrInvalidArtifact or ErrPluginTooLarge and returns no artifact, or returns files within the limits of a
+// plugin's files, plugin.yaml among them, whose digest is the one its provenance records.
+func FuzzOpenArtifact(f *testing.F) {
+	packed := packArtifact(f, artifactFiles())
+	flipped := bytes.Clone(packed)
+	flipped[len(packed)/2] ^= 0xff
+	checksum := bytes.Clone(packed)
+	checksum[len(packed)-6] ^= 0xff
+
+	provenance := provenanceEntry(f, nil)
+	with := func(entries ...rawEntry) []byte {
+		return rawArchive(f, 0, false, append(append([]rawEntry{provenance}, fileEntries()...), entries...)...)
+	}
+	header := func(typ byte, name, link string) rawEntry {
+		return rawEntry{header: &tar.Header{Typeflag: typ, Name: name, Linkname: link, Mode: 0o644}}
+	}
+
+	for _, seed := range [][]byte{
+		packed, with(), packed[:10], packed[:64], packed[:len(packed)/2], packed[:len(packed)-1], flipped, checksum,
+		nil, []byte("not an artifact"),
+		rawArchive(f, 0, true, provenance, rawEntry{name: "plugin/main.lua", data: "x"}),
+		rawArchive(f, 0, true, provenance, rawEntry{header: &tar.Header{
+			Typeflag: tar.TypeReg, Name: "plugin/huge.bin", Size: plg.MaxPluginFileSize + 1, Mode: 0o644,
+		}}),
+		rawArchive(f, 0, false, provenance, rawEntry{name: "plugin/" + strings.Repeat("d/", 1500) + "f"}),
+		rawArchive(f, 4096, false, append([]rawEntry{provenance}, fileEntries()...)...),
+		with(rawEntry{name: "plugin/../../etc/passwd", data: "x"}),
+		with(rawEntry{name: "/etc/cron.d/evil", data: "x"}),
+		with(rawEntry{name: "plugin/./x", data: "x"}),
+		with(header(tar.TypeDir, "plugin/", "")),
+		with(header(tar.TypeSymlink, "plugin/link", "/etc/passwd")),
+		with(header(tar.TypeLink, "plugin/hard", "plugin/main.lua")),
+		with(rawEntry{name: "plugin/main.lua", data: "x"}),
+		with(rawEntry{name: "plugin/main.lua/x", data: "x"}),
+		with(provenance),
+		rawArchive(f, 0, false, fileEntries()...),
+		rawArchive(f, 0, false, append([]rawEntry{{name: artifact.ProvenanceName, data: "{"}}, fileEntries()...)...),
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		art, err := openArtifact(data)
+		if err != nil {
+			if !errors.Is(err, plg.ErrPluginTooLarge) {
+				require.ErrorIs(t, err, plg.ErrInvalidArtifact)
+			}
+
+			require.Nil(t, art)
+
+			return
+		}
+
+		var (
+			tree            memfs.Builder
+			entries, paths  int
+			total           int64
+			manifestIsAFile bool
+		)
+
+		require.NoError(t, fs.WalkDir(art, ".", func(name string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || name == "." {
+				return walkErr
+			}
+
+			entries++
+			paths += len(name)
+
+			if entry.IsDir() {
+				return nil
+			}
+
+			contents, readErr := art.ReadFile(name)
+			require.NoError(t, readErr)
+			assert.LessOrEqual(t, len(contents), plg.MaxPluginFileSize, name)
+
+			total += int64(len(contents))
+			manifestIsAFile = manifestIsAFile || name == "plugin.yaml"
+
+			return tree.Add(name, contents)
+		}))
+
+		assert.True(t, manifestIsAFile, "an artifact holds plugin.yaml")
+		assert.LessOrEqual(t, total, int64(plg.MaxPluginSize))
+		assert.LessOrEqual(t, entries, plg.MaxPluginEntries)
+		assert.LessOrEqual(t, paths, plg.MaxPluginPathBytes)
+
+		files, err := tree.Build()
+		require.NoError(t, err)
+		assert.Equal(t, art.Provenance().Digest, artifact.Digest(files), "the files are those the provenance records")
+	})
 }
