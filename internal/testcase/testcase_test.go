@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -941,6 +942,37 @@ func TestDiffsShowEveryKindOfValue(t *testing.T) {
 	assert.True(t, results[2].Passed(), results[2].Failure)
 }
 
+// TestNaNAndTheInfinitiesAreValuesOfTheirOwn: a case expects NaN as .nan and the infinities as .inf and -.inf,
+// and a difference shows them so; NaN is the same value as NaN.
+func TestNaNAndTheInfinitiesAreValuesOfTheirOwn(t *testing.T) {
+	t.Parallel()
+
+	contract := newContract()
+	contract.Methods[quoteMethod].Type = reflect.TypeFor[func(context.Context, order) (float64, error)]()
+
+	tests := []struct {
+		expect  string
+		details []string
+		got     float64
+	}{
+		{expect: ".nan", got: math.NaN()},
+		{expect: ".inf", got: math.Inf(1)},
+		{expect: "-.inf", got: math.Inf(-1)},
+		{expect: ".nan", got: 1.5, details: []string{"result: expected .nan, got 1.5"}},
+		{expect: "1.5", got: math.NaN(), details: []string{"result: expected 1.5, got .nan"}},
+		{expect: ".inf", got: math.Inf(-1), details: []string{"result: expected .inf, got -.inf"}},
+		{expect: ".nan", got: math.Inf(1), details: []string{"result: expected .nan, got .inf"}},
+	}
+
+	for _, tc := range tests {
+		files := cases("- {name: x, call: Quote, input: {order: {}}, expect: {result: " + tc.expect + "}}\n")
+		results := testcase.Run(t.Context(), contract, files, &runner{play: returning(tc.got)}, testcase.Load(files)[0])
+
+		assert.Equal(t, tc.details, results[0].Details, "expect %s, got %v", tc.expect, tc.got)
+		assert.Equal(t, tc.details == nil, results[0].Passed(), "expect %s, got %v", tc.expect, tc.got)
+	}
+}
+
 // TestHostStubsAnswerThePluginsHostCalls runs cases whose plugin calls the Host's Tier, and holds what the
 // stubs answered, the calls they count and the problems that fail a case.
 func TestHostStubsAnswerThePluginsHostCalls(t *testing.T) {
@@ -1311,7 +1343,8 @@ func TestFormatWritesValuesAsCasesDo(t *testing.T) {
 		{(*gift)(nil), "null"},
 		{[]byte("hi"), `"aGk="`},
 		{time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC), "2026-01-02T03:04:05.000000006Z"},
-		{[]float64{1.5, 2}, "[1.5, 2]"},
+		{[]float64{1.5, 2, math.NaN(), math.Inf(1)}, "[1.5, 2, .nan, .inf]"},
+		{float32(math.Inf(-1)), "-.inf"},
 		{"quote\"d", `"quote\"d"`},
 		{line{SKU: "a", Qty: 1}, `{sku: "a", qty: 1, cents: 0}`},
 		{[]level{2}, "[2]"},

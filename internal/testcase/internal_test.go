@@ -1,6 +1,7 @@
 package testcase
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -70,7 +71,7 @@ func TestScalarsRoundTripEveryScalarShape(t *testing.T) {
 	samples := map[shape][]any{
 		shapeBool:    {true},
 		shapeInteger: {int8(-128), uint64(1<<64 - 1)},
-		shapeFloat:   {1.5, float32(0.1), 1e21},
+		shapeFloat:   {1.5, float32(0.1), 1e21, math.NaN(), math.Inf(1), float32(math.Inf(-1))},
 		shapeString:  {"quote\"d\n"},
 		shapeBytes:   {[]byte("hi")},
 		shapeTime:    {time.Date(2026, 1, 2, 3, 4, 5, 6, time.FixedZone("", 3600))},

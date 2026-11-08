@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"time"
@@ -95,7 +96,7 @@ type scalar struct {
 var scalars = [...]scalar{
 	shapeBool:    {set: setBool, format: formatBool, equal: reflect.Value.Equal},
 	shapeInteger: {set: setInteger, format: formatInteger, equal: reflect.Value.Equal},
-	shapeFloat:   {set: setFloat, format: formatFloat, equal: reflect.Value.Equal},
+	shapeFloat:   {set: setFloat, format: formatFloat, equal: equalFloats},
 	shapeString:  {set: setString, format: formatString, equal: reflect.Value.Equal},
 	shapeBytes:   {set: setBytes, format: formatBytes, equal: equalBytes},
 	shapeTime:    {set: setTime, format: formatTime, equal: equalTimes},
@@ -196,8 +197,18 @@ func formatInteger(value reflect.Value) string {
 	return strconv.FormatUint(value.Uint(), 10)
 }
 
+// formatFloat writes NaN and the infinities as YAML's .nan, .inf and -.inf.
 func formatFloat(value reflect.Value) string {
-	return strconv.FormatFloat(value.Float(), 'g', -1, value.Type().Bits())
+	switch number := value.Float(); {
+	case math.IsNaN(number):
+		return ".nan"
+	case math.IsInf(number, 1):
+		return ".inf"
+	case math.IsInf(number, -1):
+		return "-.inf"
+	default:
+		return strconv.FormatFloat(number, 'g', -1, value.Type().Bits())
+	}
 }
 
 func formatString(value reflect.Value) string {
@@ -212,6 +223,13 @@ func formatTime(value reflect.Value) string {
 	when, _ := reflect.TypeAssert[time.Time](value) // shapeTime's type
 
 	return when.Format(time.RFC3339Nano)
+}
+
+// equalFloats takes NaN for the same value as NaN, so that a case can expect .nan.
+func equalFloats(want, got reflect.Value) bool {
+	wanted, returned := want.Float(), got.Float()
+
+	return wanted == returned || math.IsNaN(wanted) && math.IsNaN(returned)
 }
 
 func equalBytes(want, got reflect.Value) bool {
