@@ -151,42 +151,111 @@ func TestTrimDropsWhatMayEndAValue(t *testing.T) {
 	}
 }
 
-// FuzzPiecesNeverShowAValue: a text cut into pieces where Cut says, each scrubbed, never shows a value whose start
-// Cut could keep (a value at most half a piece long), wherever it falls.
-func FuzzPiecesNeverShowAValue(f *testing.F) {
-	f.Add("0123456789SECRETabcdef0123456789abcdefSECRET", "SECRET", uint8(16))
-	f.Add("xxxxxxxxxxxxxxxTOKENTOKENTOKEN", "TOKEN", uint8(9))
-	f.Add("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaa", uint8(8))
+// TestALongValueLeavesTheOthersProtected: a value too long for a text to protect does not stop Cut and Trim from
+// protecting the values that fit, and Span sizes a text that protects them all.
+func TestALongValueLeavesTheOthersProtected(t *testing.T) {
+	t.Parallel()
 
-	f.Fuzz(func(t *testing.T, text, value string, size uint8) {
-		piece := int(size%57) + 8
+	var secrets redact.Redactor
+
+	secrets.Add("k", "SECRET")
+	secrets.Add("cert", strings.Repeat("C", 20)) // longer than half of the 16-byte texts below
+
+	assert.Equal(t, 13, secrets.Cut([]byte("0123456SECRETdef")), "SECRET straddling the cut stays whole")
+	assert.Equal(t, 11, secrets.Cut([]byte("0123456789abcdef")), "the last bytes that may start SECRET are kept")
+	assert.Equal(t, 3, secrets.Trim([]byte("012SECRET9abcdef")), "SECRET straddling the trim stays whole")
+	assert.Equal(t, 5, secrets.Trim([]byte("0123456789abcdef")), "the first bytes that may end SECRET go")
+
+	assert.Equal(t, 40, secrets.Span(16), "twice the longest value")
+	assert.Equal(t, 4096, secrets.Span(4096), "at least the size asked for")
+
+	var none *redact.Redactor
+
+	assert.Equal(t, 16, none.Span(16))
+}
+
+// TestScrubsWithoutAMatchDoNotAllocate: String runs on every line a guest writes and every request a
+// plugin makes, mostly holding no value; with several values held it allocates only when one matches (`make
+// allocs`, part of `make check`, runs it under the race detector).
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestScrubsWithoutAMatchDoNotAllocate(t *testing.T) {
+	if testing.CoverMode() != "" {
+		t.Skip("allocations are measured without coverage instrumentation, by make allocs")
+	}
+
+	var secrets redact.Redactor
+
+	secrets.Add("api_key", "tok-123456")
+	secrets.Add("db_password", "hunter2-hunter2")
+
+	text := "GET https://api.example.com/v1/items: 200 OK"
+	got := ""
+
+	allocs := testing.AllocsPerRun(100, func() { got = secrets.String(text) })
+
+	assert.Zero(t, allocs)
+	assert.Equal(t, text, got)
+	assert.Equal(t, "GET [secret api_key]", secrets.String("GET tok-123456"), "a match is still scrubbed")
+}
+
+// FuzzPiecesNeverShowAValue: a text cut into pieces where Cut says, each scrubbed, never shows a value whose start
+// Cut could keep (a value at most half a piece long), wherever it falls and however long the other value is; and
+// pieces as long as Span says never show either value.
+func FuzzPiecesNeverShowAValue(f *testing.F) {
+	f.Add("0123456789SECRETabcdef0123456789abcdefSECRET", "SECRET", "LONGLONGLONGLONG", uint8(16))
+	f.Add("xxxxxxxxxxxxxxxTOKENTOKENTOKEN", "TOKEN", "TOKENTOKENTOKENTOKEN", uint8(9))
+	f.Add("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaa", "b", uint8(8))
+	f.Add(strings.Repeat("x", 11)+"SECRET"+strings.Repeat("y", 9)+strings.Repeat("Z", 30)+"SECRET",
+		"SECRET", strings.Repeat("Z", 30), uint8(16))
+
+	f.Fuzz(func(t *testing.T, text, short, long string, size uint8) {
+		values := []string{short, long}
 		// A value the mask holds, or that a mask could complete, is out of scope: no value is scrubbed twice.
-		if value == "" || len(value)-1 > piece/2 || strings.ContainsAny(value, "[secret k]") {
-			t.Skip()
+		for _, v := range values {
+			if v == "" || strings.ContainsAny(v, "[secret kl]") {
+				t.Skip()
+			}
 		}
 
 		var secrets redact.Redactor
 
-		secrets.Add("k", value)
+		secrets.Add("k", short)
+		secrets.Add("l", long)
 
-		var shown []string
+		base := int(size%57) + 8
 
-		for buf := []byte(text); ; {
-			if len(buf) <= piece {
-				shown = append(shown, secrets.String(string(buf)))
+		for _, piece := range []int{base, secrets.Span(base)} {
+			shown := pieces(t, &secrets, text, piece)
 
-				break
+			for _, v := range values {
+				if len(v)-1 > piece/2 {
+					continue // too long for the piece: not protected
+				}
+
+				for _, s := range shown {
+					require.NotContains(t, s, v, "pieces of %d bytes: %q", piece, shown)
+				}
 			}
-
-			cut := secrets.Cut(buf[:piece])
-			require.Positive(t, cut, "every piece makes progress")
-
-			shown = append(shown, secrets.String(string(buf[:cut])))
-			buf = buf[cut:]
-		}
-
-		for _, s := range shown {
-			require.NotContains(t, s, value, "pieces %q", shown)
 		}
 	})
+}
+
+// pieces returns text cut into pieces of at most piece bytes where Cut says, each scrubbed.
+func pieces(t *testing.T, secrets *redact.Redactor, text string, piece int) []string {
+	t.Helper()
+
+	var shown []string
+
+	for buf := []byte(text); ; {
+		if len(buf) <= piece {
+			return append(shown, secrets.String(string(buf)))
+		}
+
+		cut := secrets.Cut(buf[:piece])
+		require.Positive(t, cut, "every piece makes progress")
+
+		shown = append(shown, secrets.String(string(buf[:cut])))
+		buf = buf[cut:]
+	}
 }

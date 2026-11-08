@@ -1291,8 +1291,11 @@ const token = secrets.get("coupon_token");       // TypeScript: throws an Error 
   plugin is told the secret could not be resolved; why goes to the service's log only.
 - **Scrubbed.** plg replaces every value it resolved for a version (its newest 8 per secret) with
   `[secret <name>]` in what it reports of the plugin: guest output, returned errors, panic values and stderr,
-  Validate issues, and HTTP log records and spans. It matches exact values: an encoded or sliced secret is not
-  caught. What a successful call returns is the service's and is not scrubbed.
+  Validate issues, and HTTP log records and spans. Long values are caught too, up to `plg.MaxSecretSize`: an
+  output line is logged in pieces of 4 KiB, or of twice the longest value when that is longer, cut where no value
+  is split; the stderr a panic reports (its last 32 KiB) comes from a buffer of 32 KiB or twice the longest value,
+  and never starts with the end of a value. It matches exact values: an encoded, sliced or otherwise transformed
+  secret is not caught. What a successful call returns is the service's and is not scrubbed.
 
 `plg validate` reads fail outside test cases; test cases fake them with `secrets:` (see
 [Test cases](#test-cases-testsyaml)).

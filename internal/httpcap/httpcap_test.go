@@ -22,6 +22,7 @@ import (
 
 	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 func TestMain(m *testing.M) {
@@ -598,7 +599,8 @@ type benchTarget struct {
 	req     []byte
 }
 
-func benchClient(b *testing.B) benchTarget {
+// benchClient returns a benchTarget whose handler's Scrub hook is scrub (nil: none).
+func benchClient(b *testing.B, scrub func(string) string) benchTarget {
 	b.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -614,7 +616,7 @@ func benchClient(b *testing.B) benchTarget {
 	require.NoError(b, err)
 	b.Cleanup(client.Close)
 
-	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}}
+	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}, Scrub: scrub}
 
 	return benchTarget{handler: client.Handler("bench/p", &hooks), req: request(http.MethodGet, srv.URL, nil, "")}
 }
@@ -622,7 +624,24 @@ func benchClient(b *testing.B) benchTarget {
 // BenchmarkRoundTrip is the host side of one plugin request (checks, request, response encoding) against a
 // loopback server, without the guest.
 func BenchmarkRoundTrip(b *testing.B) {
-	target := benchClient(b)
+	benchRoundTrip(b, nil)
+}
+
+// BenchmarkRoundTripScrubbed is BenchmarkRoundTrip for a plugin that read two secrets: its Scrub hook scrubs the
+// request's URL, which holds neither.
+func BenchmarkRoundTripScrubbed(b *testing.B) {
+	var secrets redact.Redactor
+
+	secrets.Add("api_key", "tok-123456")
+	secrets.Add("db_password", "hunter2-hunter2")
+
+	benchRoundTrip(b, secrets.String)
+}
+
+func benchRoundTrip(b *testing.B, scrub func(string) string) {
+	b.Helper()
+
+	target := benchClient(b, scrub)
 
 	var dst []byte
 
@@ -634,7 +653,7 @@ func BenchmarkRoundTrip(b *testing.B) {
 }
 
 func BenchmarkRoundTripParallel(b *testing.B) {
-	target := benchClient(b)
+	target := benchClient(b, nil)
 
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {

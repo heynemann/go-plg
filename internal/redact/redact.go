@@ -107,33 +107,53 @@ func countOf(entries []entry, name string) int {
 	return n
 }
 
-// String returns text with every value r holds replaced by its secret's mask.
+// String returns text with every value r holds replaced by its secret's mask. A text holding no value is returned
+// as it is, without allocating: it runs on every line a guest writes and every request a plugin makes.
 func (r *Redactor) String(text string) string {
-	if r == nil {
+	cur := r.current()
+	if cur == nil {
 		return text
 	}
 
-	if cur := r.set.Load(); cur != nil {
-		return cur.replacer.Replace(text)
+	// The replacer allocates as it scans for several values, even when none matches; Contains does not.
+	for _, e := range cur.entries {
+		if strings.Contains(text, e.value) {
+			return cur.replacer.Replace(text)
+		}
 	}
 
 	return text
 }
 
+// Span returns how many bytes a piece of text must hold, at least size, for [Redactor.Cut] and [Redactor.Trim] to
+// protect every value r holds: twice the longest value when that is more than size.
+func (r *Redactor) Span(size int) int {
+	if cur := r.current(); cur != nil {
+		return max(size, 2*cur.longest)
+	}
+
+	return size
+}
+
 // Cut returns where to cut text, the start of an output too long to report at once, so that what precedes the cut
 // can be reported (scrubbed) now and the rest kept for later: it keeps the last bytes, which may be the start of a
-// value the output goes on with, and never cuts a whole value text holds in two. It returns len(text) when there is
-// nothing to keep, or when keeping the start of the longest value would keep more than half of text (values as long
-// as that are then scrubbed only when they fall within one piece).
+// value the output goes on with, and never cuts a whole value text holds in two. It protects each value at most
+// half as long as text (plus one); see [Redactor.Span]. It returns len(text) when there is nothing to keep.
 func (r *Redactor) Cut(text []byte) int {
 	cur := r.current()
-	if cur == nil || cur.longest-1 > len(text)/2 {
+
+	keep := cur.reach(len(text)) - 1
+	if keep <= 0 {
 		return len(text)
 	}
 
-	cut := len(text) - (cur.longest - 1)
+	cut := len(text) - keep
 
 	for _, e := range cur.entries {
+		if len(e.value)-1 > keep {
+			continue // too long for text: not protected
+		}
+
 		if s := straddling(text, e.value, cut); s >= 0 {
 			cut = max(cut, s+len(e.value))
 		}
@@ -143,23 +163,45 @@ func (r *Redactor) Cut(text []byte) int {
 }
 
 // Trim returns how many bytes to drop from the start of text, the end of a longer one, so that it does not start
-// with the end of a value whose start was cut away, and no whole value it holds is cut in two. It returns 0 when
-// there is nothing to drop, or when the longest value is longer than half of text.
+// with the end of a value whose start was cut away, and no whole value it holds is cut in two. Like [Redactor.Cut]
+// it protects each value at most half as long as text (plus one). It returns 0 when there is nothing to drop.
 func (r *Redactor) Trim(text []byte) int {
 	cur := r.current()
-	if cur == nil || cur.longest-1 > len(text)/2 {
+
+	keep := cur.reach(len(text)) - 1
+	if keep <= 0 {
 		return 0
 	}
 
-	cut := cur.longest - 1
+	cut := keep
 
 	for _, e := range cur.entries {
+		if len(e.value)-1 > keep {
+			continue // too long for text: not protected
+		}
+
 		if s := straddling(text, e.value, cut); s >= 0 {
 			cut = min(cut, s)
 		}
 	}
 
 	return cut
+}
+
+// reach returns the length of the longest value a text of size bytes can protect, one at most size/2+1 bytes long
+// (0: none).
+func (s *set) reach(size int) int {
+	longest := 0
+
+	if s != nil {
+		for _, e := range s.entries {
+			if len(e.value)-1 <= size/2 {
+				longest = max(longest, len(e.value))
+			}
+		}
+	}
+
+	return longest
 }
 
 // current returns r's set, nil when it holds none.

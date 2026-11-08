@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -474,4 +475,121 @@ func TestTheTailDropsTheEndOfACutSecret(t *testing.T) {
 	assert.GreaterOrEqual(t, len(got), len(rest)-len("tok-123456"), "at most a value's length is dropped")
 
 	capture.End(t.Context())
+}
+
+// onlyFiller fails unless each record, without the masks it holds, is made of filler bytes only: no fragment of
+// a value shows.
+func onlyFiller(t *testing.T, records []string, filler string) {
+	t.Helper()
+
+	for i, r := range records {
+		r = strings.ReplaceAll(r, redact.Mask("api_key"), "")
+		r = strings.ReplaceAll(r, redact.Mask("cert"), "")
+		assert.Empty(t, strings.Trim(r, filler), "record %d shows part of a value", i)
+	}
+}
+
+// TestALongSecretLeavesShortOnesWhole: a value longer than half of MaxLine (a PEM key, say) neither leaves a short
+// one straddling MaxLine split across records nor is split itself.
+func TestALongSecretLeavesShortOnesWhole(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	cert := strings.Repeat("P", 3000)
+	secrets.Add("cert", cert)
+
+	capture, logs := newScrubbingCapture(secrets)
+	capture.Begin(t.Context())
+
+	filler := strings.Repeat("a", 2000)
+	line := strings.Repeat("a", guestout.MaxLine-6) + "tok-123456" + filler + cert + filler + "tok-123456" + filler
+	write(t, capture.Stdout(), line, "\n")
+	capture.End(t.Context())
+
+	got := logs.texts("stdout")
+	require.Greater(t, len(got), 1, "logged in pieces")
+
+	scrubbed := strings.ReplaceAll(strings.ReplaceAll(line, "tok-123456", "[secret api_key]"), cert, "[secret cert]")
+	assert.Equal(t, scrubbed, strings.Join(got, ""), "no value was split")
+	onlyFiller(t, got, "a")
+}
+
+// TestASecretLongerThanMaxLineIsScrubbed: a value longer than MaxLine is logged as its mask, printed on a line of
+// its own or within a longer one, in one write or across many.
+func TestASecretLongerThanMaxLineIsScrubbed(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	cert := strings.Repeat("Q", 5000)
+	secrets.Add("cert", cert)
+
+	capture, logs := newScrubbingCapture(secrets)
+	capture.Begin(t.Context())
+
+	write(t, capture.Stdout(), cert+"\n")
+	assert.Equal(t, []string{"[secret cert]"}, logs.texts("stdout"), "printed whole")
+
+	line := strings.Repeat("x", 10000) + cert + strings.Repeat("x", 3000) + "\n"
+	for chunk := range slices.Chunk([]byte(line), 1000) {
+		write(t, capture.Stderr(), string(chunk))
+	}
+
+	got := logs.texts("stderr")
+	assert.Equal(t, strings.ReplaceAll(line[:len(line)-1], cert, "[secret cert]"), strings.Join(got, ""),
+		"within a longer line, across writes")
+	onlyFiller(t, got, "x")
+	assert.Equal(t, strings.ReplaceAll(line, cert, "[secret cert]"), capture.Guest())
+
+	capture.End(t.Context())
+}
+
+// TestTheTailScrubsASecretLongerThanHalfOfIt: stderr's ring grows to twice the longest value, read in the middle
+// of a step, keeping what it held: a tail that would start within the value holds it whole, or drops its end.
+func TestTheTailScrubsASecretLongerThanHalfOfIt(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	capture, _ := newScrubbingCapture(secrets)
+	cert := strings.Repeat("Q", 40000)
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), "start ")
+	secrets.Add("cert", strings.Repeat("R", 20000))
+	write(t, capture.Stderr(), "end")
+	assert.Equal(t, "start end", capture.Guest(), "the ring grew keeping what it held")
+	capture.End(t.Context())
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), strings.Repeat("x", 50000))
+	secrets.Add("cert", cert)
+	write(t, capture.Stderr(), cert+strings.Repeat("y", 30000))
+	assert.Equal(t, "[secret cert]"+strings.Repeat("y", 30000), capture.Guest(),
+		"the last TailSize bytes would start within the value: it is kept whole")
+	capture.End(t.Context())
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), cert+strings.Repeat("y", 60000))
+	assert.Equal(t, strings.Repeat("y", guestout.TailSize), capture.Guest(), "the end of a cut value is dropped")
+	capture.End(t.Context())
+}
+
+// BenchmarkScrubbedStderrLine is BenchmarkStderrLine for a plugin that read two secrets: the line, holding
+// neither, is scrubbed too.
+func BenchmarkScrubbedStderrLine(b *testing.B) {
+	secrets := secretValues()
+	secrets.Add("db_password", "hunter2-hunter2")
+
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", secrets)
+	line := []byte("/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)\n")
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		capture.Begin(b.Context())
+
+		_, err := capture.Stderr().Write(line)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
 }

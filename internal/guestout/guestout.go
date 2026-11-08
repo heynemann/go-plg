@@ -19,13 +19,17 @@ import (
 
 // Bounds.
 const (
-	// MaxLine is the longest line logged in one record; longer lines are logged in pieces.
+	// MaxLine is the longest line logged in one record; longer lines are logged in pieces. When the plugin's
+	// secrets hold a value longer than half of it, a piece holds twice that value's length instead, so that a value
+	// is never split across pieces, unscrubbed (see [redact.Redactor.Span]).
 	MaxLine = 4 << 10
 	// StepBudget is how many bytes of each stream are logged per step; the rest is dropped, with one notice.
 	// Every record costs its line's length plus one (its newline, or its cut), so a step also logs at most
 	// StepBudget records per stream, however many empty lines the guest writes.
 	StepBudget = 64 << 10
-	// TailSize is how many of the last bytes of stderr [Capture.Guest] can return.
+	// TailSize is how many of the last bytes of stderr [Capture.Guest] can return. The ring keeping them holds
+	// twice the longest value of the plugin's secrets instead when that is more, so that the tail never starts
+	// within a value it cannot tell.
 	TailSize = 32 << 10
 )
 
@@ -37,11 +41,12 @@ type Capture struct {
 	ctx     context.Context  //nolint:containedctx // the step's, see above; nil between steps
 	secrets *redact.Redactor // scrubs lines and the tail; nil scrubs nothing
 	key     string
-	tail    []byte // ring of the last TailSize bytes of stderr, allocated on the first write
+	tail    []byte // ring of the last bytes of stderr (TailSize at least), allocated on the first write
 	stdout  stream
 	stderr  stream
 	written uint64 // bytes ever written to stderr
 	mark    uint64 // written when the current step began
+	held    uint64 // how many of the ring's bytes were written to it (fewer than its size until it fills)
 }
 
 // stream is one output stream: the partial line not logged yet and the step's logging budget.
@@ -93,47 +98,70 @@ func (c *Capture) End(ctx context.Context) {
 	c.ctx = nil
 }
 
-// Guest returns what stderr received since the step began: its last [TailSize] bytes at most, scrubbed. When the
-// step wrote more than that, a start that may be the end of a secret's value is left out.
+// Guest returns what stderr received since the step began, scrubbed: its last [TailSize] bytes at most. When the
+// step wrote more than the ring holds, a start that may be the end of a secret's value is left out.
 func (c *Capture) Guest() string {
-	n := min(c.written-c.mark, TailSize)
+	n := min(c.written-c.mark, c.held)
 	if n == 0 {
 		return ""
 	}
 
-	out := make([]byte, n)
-	k := copy(out, c.tail[(c.written-n)%TailSize:])
-	copy(out[k:], c.tail)
-
-	if c.written-c.mark > TailSize {
+	out := c.last(n)
+	if c.written-c.mark > n {
 		out = out[c.secrets.Trim(out):]
 	}
 
-	return c.secrets.String(string(out))
+	text := c.secrets.String(string(out))
+
+	return text[max(0, len(text)-TailSize):]
 }
 
-// keepTail appends data to the ring of stderr's last bytes.
-func (c *Capture) keepTail(data []byte) {
-	if c.tail == nil {
-		c.tail = make([]byte, TailSize)
+// last returns a copy of the last n bytes of the ring, n at most c.held.
+func (c *Capture) last(n uint64) []byte {
+	if n == 0 {
+		return nil
 	}
+
+	out := make([]byte, n)
+	k := copy(out, c.tail[(c.written-n)%uint64(len(c.tail)):])
+	copy(out[k:], c.tail)
+
+	return out
+}
+
+// keepTail appends data to the ring of stderr's last bytes, first growing the ring to twice the longest secret
+// value when that is more than it holds.
+func (c *Capture) keepTail(data []byte) {
+	if size := c.secrets.Span(TailSize); len(c.tail) < size {
+		kept := c.last(c.held)
+		c.tail = make([]byte, size)
+		c.place(c.written-c.held, kept)
+	}
+
+	ring := uint64(len(c.tail))
 
 	size := uint64(len(data))
-	if size > TailSize {
-		c.written += size - TailSize
-		data = data[size-TailSize:]
-		size = TailSize
+	if size > ring {
+		c.written += size - ring
+		data = data[size-ring:]
+		size = ring
 	}
 
-	n := copy(c.tail[c.written%TailSize:], data)
-	copy(c.tail, data[n:])
+	c.place(c.written, data)
 
 	c.written += size
+	c.held = min(c.held+size, ring)
+}
+
+// place copies data, at most the ring's size, into the ring from position at of stderr's bytes on.
+func (c *Capture) place(at uint64, data []byte) {
+	n := copy(c.tail[at%uint64(len(c.tail)):], data)
+	copy(c.tail, data[n:])
 }
 
 // Write logs every complete line of data and keeps the rest for the next write. It never fails. The lines are
-// logged with the context of the step in progress (see [Capture.Begin]). A line longer than [MaxLine] is logged in
-// pieces, cut where no secret's value is split.
+// logged with the context of the step in progress (see [Capture.Begin]). A line longer than [MaxLine] (or than
+// twice the longest secret value, when that is more) is logged in pieces, cut where no secret's value is split.
 //
 // Its cost is linear in len(data) at most, since the guest's write runs in a host function that no deadline
 // interrupts: a newline is searched for only within the line being filled, and once the step's budget and its
@@ -150,7 +178,9 @@ func (s *stream) Write(data []byte) (int, error) {
 	}
 
 	for rest := data; len(rest) > 0 && !s.dropped; {
-		room := MaxLine - len(s.line)
+		// A piece holds the longest secret value twice, so that a value it cuts fits whole in the next one. The
+		// line may already be longer when a rotation dropped the longest value.
+		room := max(0, s.capture.secrets.Span(MaxLine)-len(s.line))
 		end := bytes.IndexByte(rest[:min(len(rest), room+1)], '\n')
 
 		if end < 0 && len(rest) > room {

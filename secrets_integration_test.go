@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -62,7 +63,9 @@ func secretsPlugin(tb testing.TB, lang contractLanguage, ctr *plg.Container, nam
 ) testcontract.Fooer {
 	tb.Helper()
 
-	opts = append(opts, plg.WithPool(1, 1), plg.WithStorage(lang.storage(tb, name, map[string]string{"p": "secrets"})))
+	opts = append([]plg.RegisterOption{
+		plg.WithPool(1, 1), plg.WithStorage(lang.storage(tb, name, map[string]string{"p": "secrets"})),
+	}, opts...)
 	require.NoError(tb, plg.Register[testcontract.Fooer](tb.Context(), ctr, name, opts...))
 
 	return getFooer(tb, ctr, name+"/p")
@@ -350,6 +353,37 @@ func benchSecret(b *testing.B, lang contractLanguage) {
 		}
 	}
 
+	b.StopTimer()
+
+	if keys.readsOf("api_key") != 1 {
+		b.Fatalf("the resolver ran %d times; the cache should answer every read in the loop", keys.readsOf("api_key"))
+	}
+}
+
+// BenchmarkSecretGoParallel is BenchmarkSecretGo from GOMAXPROCS goroutines, each with an instance of its own
+// (compare BenchmarkCallGoParallel/pool=N): every read is answered by the version's cache, which they share.
+func BenchmarkSecretGoParallel(b *testing.B) {
+	size := runtime.GOMAXPROCS(0)
+	keys := newVault(map[string]string{"api_key": "bench-value", "create": "created-value"})
+	plug := secretsPlugin(b, golang(), newContainer(b), "bench", plg.WithSecrets(keys.resolve),
+		plg.WithPool(size, size))
+	ctx := b.Context()
+
+	_, err := plug.Foo(ctx, "api_key")
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	b.ResetTimer() // after starting the instances and resolving the secret
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, err := plug.Foo(ctx, "api_key")
+			if err != nil {
+				b.Error(err)
+
+				return
+			}
+		}
+	})
 	b.StopTimer()
 
 	if keys.readsOf("api_key") != 1 {
