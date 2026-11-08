@@ -22,7 +22,7 @@ HTTP allowlist).
 - [Concepts](#concepts)
 - [Quick start](#quick-start)
 - [The interface](#the-interface)
-- [Code generation](#code-generation)
+- [Code generation](#code-generation) and [contract directives](#contract-directives)
 - [Writing plugins](#writing-plugins) ([Go](#go-plugins), [Lua](#lua-plugins), [TypeScript](#typescript-plugins))
 - [Guests and blank imports](#guests-and-blank-imports)
 - [Declaring the interface: `implements`](#declaring-the-interface-implements) and
@@ -301,6 +301,39 @@ Next to the interface, one line per package:
 `plg gen` refuses imports outside the Go guest's allowlist, naming each one. Without the generated file, Register
 fails with `plg.ErrNoContract`. Commit the generated file like any other source.
 
+### Contract directives
+
+The interface's doc comment may carry plg directives, Go-style comments with no space after the slashes (godoc
+hides them):
+
+```go
+// Rule decides a reward.
+//
+//plg:limits memory=64MiB timeout=2s pool=1..8
+//plg:guest-packages encoding/xml
+//plg:validation RuleInput
+type Rule interface {
+	Apply(ctx context.Context, user string) (Reward, error)
+}
+```
+
+- **`//plg:limits`** states the limits the interface's plugins should be tested under, as `key=value` pairs, each
+  at most once: `memory` (bytes, or a number of `B`, `KiB`, `MiB` or `GiB`, from 64 KiB to 4 GiB, as
+  `WithMemoryLimit` takes it), `timeout` (a positive Go duration) and `pool` (`MIN..MAX`, or `N` for `N..N`, with
+  1 ≤ MIN ≤ MAX ≤ 4096, as `WithPool` takes it). [`plg validate`](#checking-a-plugin-before-registering-it-plg-validate)
+  runs plugins under them; a service still sets its own limits with its Register options.
+- **`//plg:guest-packages`** lists packages beyond the Go guest's allowlist that the interface's Go plugins may
+  import (standard library packages, or pure-Go packages of modules a plugin's module requires), checked as
+  [`plg build-guest`](#deployment-plg-warm-and-plg-build-guest) checks its `-pkg`s. `plg validate` builds that custom
+  guest for such plugins; a service serving them builds it with `plg build-guest` and passes it to `WithGoGuest`.
+- **`//plg:validation`** names the data type, declared in the contract package, of the input the registration's
+  `WithValidation` passes to plugins' `Validate`.
+
+`plg gen` checks the directives of the interfaces it generates for: an unknown directive or key, a directive or key
+given twice, or a malformed value fails generation, naming the declaration (`rules.go:12:6: Rule: //plg:limits
+memory=64MB: invalid plg directive: memory=64MB: want bytes or a number of B, KiB, MiB or GiB from 64KiB (one wasm
+page) to 4GiB, as in 64MiB`).
+
 ## Writing plugins
 
 Every plugin is a directory of source files with an entrypoint and a `Create` that returns the plugin's
@@ -466,8 +499,10 @@ STEP       RESULT  DETAIL
 manifest   ok      go plugin gold implementing example.com/rewards/cohort.Provider@v1.2.0
 contract   ok      module example.com/rewards v1.2.0 (/home/ana/go/pkg/mod/example.com/rewards@v1.2.0)
 interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)
+limits     ok      memory=64MiB timeout=2s pool=1..8 (//plg:limits)
 go.mod     ok      /home/ana/plugins/gold/go.mod requires example.com/rewards v1.2.0
 types      ok      the plugin's package type-checks against cohort.Provider
+guest      ok      a custom Go guest with encoding/xml, found in the guest cache (/home/ana/.cache/plg/guests/3f9c….wasm)
 load       ok      Create ran in the go guest (version sha256:a753…)
 ```
 
@@ -485,7 +520,13 @@ output, compiles, issues) also goes.
   allowlisted imports), and the interface and its Host are described for the Go dispatcher and the script guests'
   schema, exactly as a service describes them by reflection: the dispatcher is the same, byte for byte. The method
   types are those the Go interpreter (yaegi, with the Go guest's symbol tables) gives the contract's source, so a
-  contract whose types the interpreter cannot build fails here, as a Go plugin of it would fail to load.
+  contract whose types the interpreter cannot build fails here, as a Go plugin of it would fail to load. The
+  interface's [directives](#contract-directives) are read here too; a malformed one fails the step.
+- **limits:** the limits the plugin runs under: an [author repository](#author-repositories-plgyaml)'s `limits`
+  over the contract's `//plg:limits`, and plg's defaults for what neither sets (the plugin language's memory limit,
+  a pool of 1 to GOMAXPROCS instances, no timeout); the row says where they come from (`memory=64MiB timeout=300ms
+  pool=1..2 (plg.yaml memory=64MiB over //plg:limits memory=16MiB timeout=300ms pool=1..2)`). The memory limit and
+  pool are the check's Register options, and the timeout bounds `Create`.
 - **go.mod** (Go plugins): the `go.mod` of the plugin's module (its directory's or the nearest above) must require
   the contract module at the pinned version, after its `replace` directives; a `replace` by a local directory is
   a warning, since its version cannot be told. When they differ, the step names the one to change, the older of
@@ -496,6 +537,14 @@ output, compiles, issues) also goes.
   a method of the wrong signature fails with its file:line:column (the Go interpreter would accept the plugin and
   fail only once the method is called). Its vendored packages are type-checked with it; a plugin importing a
   package beyond the contract, its vendored packages and the standard library is not type-checked (a warning).
+- **guest** (Go plugins of a contract with `//plg:guest-packages`): the custom Go guest with those packages, built
+  as `plg build-guest` builds one, from the plugin's module (its `go.mod` and `go.sum`, local `replace`s made
+  absolute; the module must provide the non-standard packages). The guest's plg is the version the `plg` command was
+  built at (a command built from a local checkout has none: the module's own plg then, which its build list must
+  have). The guest is kept in the guest cache (`-guest-cache`, default `<user cache dir>/plg/guests`) under a key of
+  everything it is built from: the go version, the module's `go.mod`, the packages, and each linked package's module
+  version, or the content of its files for a module replaced by a directory. The next run with the same inputs
+  finds it there and builds nothing; being the same bytes, its compiled form is a compilation-cache hit too.
 - **load:** the plugin is checked as [`plg.Check`](#checking-a-candidate-plgcheck) checks a candidate, against a
   registration of the resolved contract (its module's version is the one the pin is checked against, by the same
   rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
@@ -506,7 +555,8 @@ output, compiles, issues) also goes.
   followed by the hint `pass -host <A|B>`, and `-host <Interface>` (an interface of the contract package) picks one.
   Issues follow the `load` row, one row each.
 
-`-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest).
+`-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest);
+`-guest-cache` the directory of the custom Go guests.
 
 ### Author repositories: `plg.yaml`
 
@@ -522,7 +572,7 @@ shared:                  # directories copied into every plugin's files
   - lib
 limits:                  # override the contract's //plg:limits for every plugin
   memory: 64MiB          # bytes, or KiB, MiB, GiB; from 64KiB to 4GiB
-  timeout: 2s            # a deadline for Create
+  timeout: 2s            # bounds Create (not the guest compile or bundling before it)
   pool: 1..8             # N or MIN..MAX, from 1 to 4096
 requireOwnership: true   # a plugin without a complete owner fails instead of warning
 replace:                 # contract modules taken from local checkouts, like go.mod's replace
@@ -571,7 +621,8 @@ otherwise. `-host` applies to every plugin.
   directory, then its path below it), so `go build ./...` and editors work in the repository; validate copies the
   shared directories holding Go files into the plugin's [`vendor/`](#go-plugins) at that path. A shared Go
   directory must be in a Go module.
-- **limits** override, key by key, the limits the contract recommends; the `limits` row shows those in force.
+- **limits** override, key by key, the limits the contract recommends (its `//plg:limits`), raising or lowering
+  them; the `limits` row shows those in force and where each comes from.
   The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create`.
 - **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module

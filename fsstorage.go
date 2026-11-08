@@ -13,15 +13,15 @@ import (
 	"path"
 	"strings"
 
-	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/memfs"
 )
 
 // The memory limits a Register, a descriptor or a plugin.yaml may ask for: from one wasm page (64 KiB) to the
-// most a wasm32 instance can address, 65536 pages (4 GiB).
+// most a wasm32 instance can address, 65536 pages (4 GiB); contract directives are held to the same range.
 const (
-	minMemoryLimit = engine.PageSize
-	maxMemoryLimit = 1 << 32
+	minMemoryLimit = directive.MinMemory
+	maxMemoryLimit = directive.MaxMemory
 )
 
 // validMemoryLimit reports whether limit is from [minMemoryLimit] to [maxMemoryLimit], the one rule shared by

@@ -1,171 +1,216 @@
-// Package directive reads what a contract states for its plugins beside its Go declarations, and the limits plugin
-// authors test them under.
 package directive
 
 import (
-	"errors"
 	"fmt"
+	"math/bits"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// ErrDirective reports a malformed directive or limit.
-var ErrDirective = errors.New("invalid plg directive")
-
-// Bounds of the limits, as Register's options bound them.
+// The ranges plg accepts for a limit, here and in its Register options (plg.WithMemoryLimit, plg.WithPool).
 const (
-	minMemory = 64 << 10
-	maxMemory = 4 << 30
-	maxPool   = 4096
+	// MinMemory is the smallest memory limit: one 64 KiB wasm page.
+	MinMemory = 1 << 16
+	// MaxMemory is the largest memory limit: 4 GiB, the whole 32-bit wasm address space.
+	MaxMemory = 1 << 32
+	// MaxPool is the largest pool maximum. Each pool keeps room for that many idle instances, so it is capped.
+	MaxPool = 4096
 )
 
-// Limits are the limits plugins are tested under: a per-instance memory limit, a deadline for each call and for
-// Create, and a pool size. A zero field is unset.
+// memoryUnits are the suffixes a memory value may carry, binary (IEC) units, longest first; none means bytes.
+var memoryUnits = []struct { //nolint:gochecknoglobals // a constant table
+	suffix string
+	shift  uint
+}{{"GiB", 30}, {"MiB", 20}, {"KiB", 10}, {"B", 0}}
+
+// Limits are the resource limits plugins run under. A zero field is unset: whoever applies them falls back to
+// another source (a contract's directive, then plg's defaults).
 type Limits struct {
-	// Memory is the memory limit of an instance, in bytes.
+	// Memory is the memory limit of each instance, in bytes (plg.WithMemoryLimit).
 	Memory uint64
-	// Timeout bounds Create and each call.
+	// Timeout bounds each call, Create included.
 	Timeout time.Duration
-	// PoolMin and PoolMax are the pool's size.
+	// PoolMin and PoolMax are the pool's bounds (plg.WithPool); both are set or neither is.
 	PoolMin, PoolMax int
 }
 
-// Set sets the limit key from its written value: memory (bytes, or a number with a KiB, MiB or GiB suffix, from
-// 64KiB to 4GiB), timeout (a Go duration above zero) or pool (N, or MIN..MAX, from 1 to 4096). It fails with
-// [ErrDirective], leaving the limits as they were.
-func (l *Limits) Set(key, value string) error {
-	next := *l
+// limitKeys parses each limit's value into l, reporting false for a malformed or out-of-range value, and says
+// what it wants.
+//
+//nolint:gochecknoglobals // a constant table
+var limitKeys = map[string]struct {
+	set  func(l *Limits, value string) bool
+	want string
+}{
+	"memory": {
+		set: func(l *Limits, value string) bool {
+			n, ok := parseMemory(value)
+			if ok {
+				l.Memory = n
+			}
 
-	var err error
+			return ok
+		},
+		want: "bytes or a number of B, KiB, MiB or GiB from " + FormatMemory(MinMemory) + " (one wasm page) to " +
+			FormatMemory(MaxMemory) + ", as in 64MiB",
+	},
+	"timeout": {
+		set: func(l *Limits, value string) bool {
+			d, err := time.ParseDuration(value)
+			if err == nil && d > 0 {
+				l.Timeout = d
+			}
 
-	switch key {
-	case "memory":
-		err = next.setMemory(value)
-	case "timeout":
-		err = next.setTimeout(value)
-	case "pool":
-		err = next.setPool(value)
-	default:
-		err = fmt.Errorf("%w: unknown limit %q (memory, timeout, pool)", ErrDirective, key)
-	}
+			return err == nil && d > 0
+		},
+		want: "a positive duration, as in 2s or 500ms",
+	},
+	"pool": {
+		set: func(l *Limits, value string) bool {
+			pool, ok := parsePool(value)
+			if ok {
+				l.PoolMin, l.PoolMax = pool.PoolMin, pool.PoolMax
+			}
 
-	if err == nil {
-		*l = next
-	}
-
-	return err
+			return ok
+		},
+		want: "MIN..MAX or N with 1 <= MIN <= MAX <= " + strconv.Itoa(MaxPool) + ", as in 1..8",
+	},
 }
 
-// Override returns the limits with those o sets in place of l's; the pool's size is one limit.
-func (l *Limits) Override(o Limits) Limits { //nolint:varnamelen // o is the override, as l the limits
+// Set sets the limit key from its textual value, as `//plg:limits` writes it:
+//   - memory: bytes, or a number of B, KiB, MiB or GiB (64MiB), from [MinMemory] to [MaxMemory];
+//   - timeout: a positive Go duration (2s, 1m30s);
+//   - pool: MIN..MAX or N (MIN..MAX = N..N), with 1 <= MIN <= MAX <= [MaxPool].
+//
+// Errors wrap [ErrDirective] and leave l as it was.
+func (l *Limits) Set(key, value string) error {
+	limit, known := limitKeys[key]
+	if !known {
+		return fmt.Errorf("%w: unknown limit %q (want memory, timeout or pool)", ErrDirective, key)
+	}
+
+	if !limit.set(l, value) {
+		return fmt.Errorf("%w: %s=%s: want %s", ErrDirective, key, value, limit.want)
+	}
+
+	return nil
+}
+
+// Override returns l with the limits other sets replacing its own.
+func (l *Limits) Override(other Limits) Limits {
 	limits := *l
 
-	if o.Memory != 0 {
-		limits.Memory = o.Memory
+	if other.Memory != 0 {
+		limits.Memory = other.Memory
 	}
 
-	if o.Timeout != 0 {
-		limits.Timeout = o.Timeout
+	if other.Timeout != 0 {
+		limits.Timeout = other.Timeout
 	}
 
-	if o.PoolMax != 0 {
-		limits.PoolMin, limits.PoolMax = o.PoolMin, o.PoolMax
+	if other.PoolMax != 0 {
+		limits.PoolMin, limits.PoolMax = other.PoolMin, other.PoolMax
 	}
 
 	return limits
 }
 
-// String writes the limits that are set as Set reads them, or "none".
+// String writes the limits l sets as `//plg:limits` does (memory=64MiB timeout=2s pool=1..8), in that order;
+// "none" when it sets none.
 func (l *Limits) String() string {
-	var set []string
+	var parts []string
 
 	if l.Memory != 0 {
-		set = append(set, "memory="+formatMemory(l.Memory))
+		parts = append(parts, "memory="+FormatMemory(l.Memory))
 	}
 
 	if l.Timeout != 0 {
-		set = append(set, "timeout="+l.Timeout.String())
+		parts = append(parts, "timeout="+l.Timeout.String())
 	}
 
 	if l.PoolMax != 0 {
-		set = append(set, fmt.Sprintf("pool=%d..%d", l.PoolMin, l.PoolMax))
+		parts = append(parts, fmt.Sprintf("pool=%d..%d", l.PoolMin, l.PoolMax))
 	}
 
-	if len(set) == 0 {
+	if len(parts) == 0 {
 		return "none"
 	}
 
-	return strings.Join(set, " ")
+	return strings.Join(parts, " ")
 }
 
-// units are the memory suffixes, largest first.
-var units = []struct { //nolint:gochecknoglobals // a constant table
-	suffix string
-	shift  uint
-}{{"GiB", 30}, {"MiB", 20}, {"KiB", 10}}
+// FormatMemory writes a number of bytes in the largest unit that divides it exactly, as [Limits.Set] reads it.
+func FormatMemory(n uint64) string {
+	for _, unit := range memoryUnits {
+		if n != 0 && n%(1<<unit.shift) == 0 {
+			return strconv.FormatUint(n>>unit.shift, 10) + unit.suffix
+		}
+	}
 
-// setMemory sets the memory limit from its written value.
-func (l *Limits) setMemory(value string) error {
-	number, shift := value, uint(0)
+	return "0B"
+}
 
-	for _, unit := range units {
-		if cut, ok := strings.CutSuffix(value, unit.suffix); ok {
-			number, shift = cut, unit.shift
+// parseMemory reads a memory value; it reports false for a malformed one or one out of range.
+func parseMemory(value string) (uint64, bool) {
+	digits, shift := value, uint(0)
+
+	for _, unit := range memoryUnits {
+		if trimmed, ok := strings.CutSuffix(value, unit.suffix); ok {
+			digits, shift = trimmed, unit.shift
 
 			break
 		}
 	}
 
-	n, err := strconv.ParseUint(number, 10, 64)
-	if err != nil || n > maxMemory>>shift || n<<shift < minMemory {
-		return fmt.Errorf("%w: memory must be from 64KiB to 4GiB (bytes, or a number with a KiB, MiB or GiB "+
-			"suffix), not %q", ErrDirective, value)
+	n, ok := parseDigits(digits)
+	if !ok {
+		return 0, false
 	}
 
-	l.Memory = n << shift
+	hi, bytes := bits.Mul64(n, 1<<shift)
 
-	return nil
+	return bytes, hi == 0 && bytes >= MinMemory && bytes <= MaxMemory
 }
 
-// setTimeout sets the timeout from its written value.
-func (l *Limits) setTimeout(value string) error {
-	timeout, err := time.ParseDuration(value)
-	if err != nil || timeout <= 0 {
-		return fmt.Errorf("%w: timeout must be a duration above zero (like 2s), not %q", ErrDirective, value)
+// parsePool reads MIN..MAX or N into the pool bounds of limits, within the range plg accepts.
+func parsePool(value string) (Limits, bool) {
+	lo, hi, isRange := strings.Cut(value, "..")
+	if !isRange {
+		hi = lo
 	}
 
-	l.Timeout = timeout
+	minimum, okMin := parseCount(lo)
+	maximum, okMax := parseCount(hi)
 
-	return nil
+	return Limits{PoolMin: minimum, PoolMax: maximum},
+		okMin && okMax && minimum >= 1 && minimum <= maximum && maximum <= MaxPool
 }
 
-// setPool sets the pool's size from its written value.
-func (l *Limits) setPool(value string) error {
-	lowText, highText, ranged := strings.Cut(value, "..")
-	if !ranged {
-		highText = lowText
+// parseCount reads a count written with decimal digits only (no sign, no underscores).
+func parseCount(value string) (int, bool) {
+	if !digitsOnly(value) {
+		return 0, false
 	}
 
-	low, lowErr := strconv.Atoi(lowText)
-	high, highErr := strconv.Atoi(highText)
+	n, err := strconv.Atoi(value)
 
-	if lowErr != nil || highErr != nil || low < 1 || low > high || high > maxPool {
-		return fmt.Errorf("%w: pool must be N or MIN..MAX with 1 <= MIN <= MAX <= 4096, not %q", ErrDirective, value)
-	}
-
-	l.PoolMin, l.PoolMax = low, high
-
-	return nil
+	return n, err == nil
 }
 
-// formatMemory writes a memory limit in its largest whole unit.
-func formatMemory(memory uint64) string {
-	for _, unit := range units {
-		if memory%(1<<unit.shift) == 0 {
-			return strconv.FormatUint(memory>>unit.shift, 10) + unit.suffix
-		}
+// parseDigits reads a number written with decimal digits only.
+func parseDigits(value string) (uint64, bool) {
+	if !digitsOnly(value) {
+		return 0, false
 	}
 
-	return strconv.FormatUint(memory, 10)
+	n, err := strconv.ParseUint(value, 10, 64)
+
+	return n, err == nil
+}
+
+// digitsOnly reports whether value is decimal digits, at least one.
+func digitsOnly(value string) bool {
+	return value != "" && strings.TrimLeft(value, "0123456789") == ""
 }

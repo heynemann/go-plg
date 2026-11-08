@@ -22,6 +22,7 @@ import (
 
 	"github.com/heynemann/go-plg/guestsrc/golang/symbols"
 	"github.com/heynemann/go-plg/internal/contractsrc"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/gen"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/goguest"
@@ -45,6 +46,8 @@ type Loaded struct {
 	std         types.Importer // the standard library packages the package imports, shared with Go plugins' checks
 	interpreter *interpreter   // the package's interpreter, which interprets the Host's methods too
 	implemented string         // the interface's name
+	// Directives are the plg directives on the interface's doc comment.
+	Directives directive.Directives
 }
 
 // iface is an interface the contract package declares.
@@ -63,14 +66,21 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 	fset := token.NewFileSet()
 	std := importer.ForCompiler(fset, "gc", nil)
 
-	pkg, err := gen.Load(dir, pkgPath, std)
+	checked, err := gen.Load(dir, pkgPath, std)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // gen's errors name the package and the problem
 	}
 
+	pkg := checked.Types
+
 	implemented, err := lookup(pkg, name)
 	if err != nil {
 		return nil, err
+	}
+
+	dirs, err := checked.Directives(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // gen's errors say where the directive is and what is wrong
 	}
 
 	source, err := rootSource(dir)
@@ -86,7 +96,10 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 		return nil, err
 	}
 
-	loaded := &Loaded{Contract: contract, pkg: pkg, fset: fset, std: std, interpreter: interpreter, implemented: name}
+	loaded := &Loaded{
+		Contract: contract, Directives: dirs, pkg: pkg, fset: fset, std: std, interpreter: interpreter,
+		implemented: name,
+	}
 
 	if host != "" {
 		err = loaded.SetHost(host)

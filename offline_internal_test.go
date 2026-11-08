@@ -4,11 +4,14 @@ import (
 	"context"
 	"io/fs"
 	"reflect"
+	"runtime"
 	"testing"
 	"testing/fstest"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/offline"
 )
@@ -73,4 +76,45 @@ func TestCheckOfflineRefusesWhatRegisterRefuses(t *testing.T) {
 	_, err = offline.Check(t.Context(), &hosted, plugin, opts)
 	require.ErrorIs(t, err, ErrInvalidHost)
 	require.ErrorContains(t, err, "must be declared in the contract package")
+}
+
+// TestCheckOfflineRunsUnderTheLimitsAsRegisterOptions: the limits and guest plg validate passes are Register's
+// options, refused as Register refuses them, before any guest runs.
+func TestCheckOfflineRunsUnderTheLimitsAsRegisterOptions(t *testing.T) {
+	t.Parallel()
+
+	spec := offlineSpec(t, reflect.TypeFor[offlineIface](), fstest.MapFS{"c.go": {Data: []byte("package c\n")}})
+	plugin := &offline.Plugin{
+		Key: "p", Files: fstest.MapFS{},
+		Manifest: []byte("implements: github.com/heynemann/go-plg.offlineIface@v1.0.0\n" +
+			"language: lua\nentrypoint: plugin.lua\n"),
+	}
+
+	for _, tc := range []struct {
+		msg  string
+		opts offline.Options
+	}{
+		{msg: "WithPool(3, 2)", opts: offline.Options{Limits: directive.Limits{PoolMin: 3, PoolMax: 2}}},
+		{msg: "WithMemoryLimit", opts: offline.Options{Limits: directive.Limits{Memory: 1}}},
+		{msg: "WithGoGuest: the module is empty", opts: offline.Options{GoGuest: []byte{}}},
+	} {
+		_, err := offline.Check(t.Context(), spec, plugin, &tc.opts)
+		require.ErrorIs(t, err, ErrInvalidOption, tc.msg)
+		require.ErrorContains(t, err, tc.msg)
+	}
+}
+
+// TestOfflineDefaultsAreRegistersDefaults: plg validate prints and runs under the defaults a Register without
+// WithMemoryLimit and WithPool has, per language.
+func TestOfflineDefaultsAreRegistersDefaults(t *testing.T) {
+	t.Parallel()
+
+	pool := min(runtime.GOMAXPROCS(0), maxPoolSize)
+
+	for lang, memory := range map[Language]uint64{
+		LanguageGo: 128 << 20, LanguageLua: 64 << 20, LanguageTypeScript: 64 << 20, "cobol": 0,
+	} {
+		assert.Equal(t, directive.Limits{Memory: memory, PoolMin: 1, PoolMax: pool}, offline.Defaults(string(lang)),
+			lang)
+	}
 }

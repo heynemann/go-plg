@@ -56,8 +56,10 @@ type Options struct {
 	Logger *slog.Logger
 	// CacheDir is the guests' compilation cache directory; empty means plg's default.
 	CacheDir string
-	// Limits are the limits the plugin runs under: its instance's memory limit, as plg.WithMemoryLimit sets it,
-	// the pool's size, as plg.WithPool does, and a deadline for Create; unset ones are plg's defaults.
+	// GoGuest is the custom Go guest (plg.WithGoGuest) a Go plugin runs in; nil runs the linked one.
+	GoGuest []byte
+	// Limits are the limits the plugin runs under: its memory limit (plg.WithMemoryLimit) and pool
+	// (plg.WithPool) when set, and its Timeout bounds Create. Unset ones are plg's defaults ([Defaults]).
 	Limits directive.Limits
 	// RequireOwnership makes missing ownership an error, as plg.WithRequiredOwnership does.
 	RequireOwnership bool
@@ -77,3 +79,9 @@ var Check func(ctx context.Context, contract *Contract, plugin *Plugin, opts *Op
 //
 //nolint:gochecknoglobals // the seam's second entry, set with Check from plg's init
 var CheckHost func(pkgPath string, host *Host) error
+
+// Defaults returns the limits plg runs plugins of language under without options: its memory limit and pool
+// (no timeout: a service bounds calls with their contexts). Package plg sets it.
+//
+//nolint:gochecknoglobals // plg's defaults, which the command cannot import, set from plg's init with Check
+var Defaults func(language string) directive.Limits

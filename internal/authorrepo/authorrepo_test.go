@@ -116,8 +116,8 @@ func TestLoadRejectsBrokenRules(t *testing.T) {
 		{"same key", "plugins: [c, b/c]\n", `plugins: c and b/c have the same key (a plugin's key is its ` +
 			`directory's name): "c"`},
 		{"unknown limit", "plugins: [a]\nlimits: {cpu: 1}\n", `limits: invalid plg directive: unknown limit "cpu"`},
-		{"bad memory", "plugins: [a]\nlimits: {memory: 1KiB}\n", "limits: invalid plg directive: memory must be " +
-			"from 64KiB to 4GiB"},
+		{"bad memory", "plugins: [a]\nlimits: {memory: 1KiB}\n", "limits: invalid plg directive: memory=1KiB: " +
+			"want bytes or a number of B, KiB, MiB or GiB from 64KiB"},
 		{"bad module path", "plugins: [a]\nreplace: {'not a path': x}\n", "replace: malformed module path"},
 		{"replace without a directory", "plugins: [a]\nreplace: {example.com/x: ''}\n", "replace: " +
 			"example.com/x needs a directory"},

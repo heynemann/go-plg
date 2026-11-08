@@ -7,13 +7,21 @@
 // internal/goguest and the default symbol tables) and a package whose init adds the extra symbol tables,
 // extracted with yaegi extract for GOOS=wasip1 as `make symbols` does for the default ones. The module is
 // built like `make guests` builds the default guest: a wasip1 reactor, -trimpath, without VCS stamping.
+//
+// `plg validate` builds the guest of a contract's //plg:guest-packages the same way, from a Go plugin's module,
+// through [Cached]: a cache directory keeps each guest under a key of what it is built from ([Key]), so a later
+// run with the same inputs builds nothing.
 package buildguest
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -87,37 +95,113 @@ import "` + symbolsImport + `"
 var Symbols = symbols.Symbols
 `
 
-// Options configure [Build].
+// Options configure [Build], [Cached] and [Key].
 type Options struct {
-	// Dir is a directory inside the service's Go module.
+	// Dir is a directory inside the Go module the guest is built from: a service's (plg build-guest), or a Go
+	// plugin's (plg validate).
 	Dir string
-	// Output is the path of the guest module to write; relative to Dir unless absolute.
+	// Output is the path of the guest module to write; relative to Dir unless absolute. [Cached] and [Key]
+	// ignore it.
 	Output string
+	// Plg is the plg version to build the guest with, replacing the one the module requires (the version of the
+	// plg command that will run the guest); empty keeps the module's.
+	Plg string
 	// Packages are the import paths of the extra packages: standard library packages outside the default
-	// allowlist, or pure-Go packages of modules the service module requires.
+	// allowlist, or pure-Go packages of modules the module requires.
 	Packages []string
+	// Environ is the go command's environment; nil means the process's.
+	Environ []string
 }
 
 // Build builds the custom guest described by opts and writes it to opts.Output.
-func Build(ctx context.Context, opts Options) error {
-	err := checkPackages(opts.Packages)
-	if err != nil {
-		return err
-	}
-
-	gomod, err := goOutput(ctx, opts.Dir, nil, "env", "GOMOD")
-	if err != nil {
-		return err
-	}
-
-	gomod = strings.TrimSpace(gomod)
-	if gomod == "" || gomod == os.DevNull {
-		return fmt.Errorf("%w: %s is not inside a Go module", ErrModule, opts.Dir)
-	}
-
+func Build(ctx context.Context, opts *Options) error {
 	output, err := filepath.Abs(resolve(opts.Dir, opts.Output))
 	if err != nil {
 		return fmt.Errorf("resolving the output path: %w", err)
+	}
+
+	return withBuilder(ctx, opts, func(bld *builder) error {
+		return bld.build(ctx, opts.Packages, output)
+	})
+}
+
+// Guest is a custom guest [Cached] returns.
+type Guest struct {
+	// Path is the guest's file in the cache.
+	Path string
+	// Hit reports whether the cache held it already; otherwise it was built.
+	Hit bool
+}
+
+// Cached returns the custom guest described by opts in the directory cache, building it there unless cache holds
+// one built from the same inputs ([Key]). A guest is written under a temporary name and renamed into place, so
+// concurrent builds of one key leave one complete file.
+func Cached(ctx context.Context, opts *Options, cache string) (Guest, error) {
+	var guest Guest
+
+	err := withBuilder(ctx, opts, func(bld *builder) error {
+		key, err := bld.key(ctx, opts.Packages)
+		if err != nil {
+			return err
+		}
+
+		guest.Path = filepath.Join(cache, key+".wasm")
+
+		_, err = os.Stat(guest.Path)
+		if err == nil {
+			guest.Hit = true
+
+			return nil
+		}
+
+		return bld.buildInto(ctx, opts.Packages, cache, guest.Path)
+	})
+	if err != nil {
+		return Guest{}, err
+	}
+
+	return guest, nil
+}
+
+// Key returns the key [Cached] files the custom guest described by opts under: a SHA-256, in hex, of what the
+// guest is built from. That is the go command's version, the build module's go.mod (with plg's replacement
+// when opts.Plg is set), the extra packages in order, and each package the guest links outside the standard
+// library: its module's path and version, or for a module replaced by a directory (or the main module) the
+// content of the package's Go, assembly and embedded files.
+func Key(ctx context.Context, opts *Options) (string, error) {
+	var key string
+
+	err := withBuilder(ctx, opts, func(bld *builder) error {
+		var err error
+
+		key, err = bld.key(ctx, opts.Packages)
+
+		return err
+	})
+
+	return key, err
+}
+
+// withBuilder checks opts, sets up the temporary module of a build from the module opts.Dir is in and runs fn
+// with its builder, then removes the module.
+func withBuilder(ctx context.Context, opts *Options, fn func(b *builder) error) error {
+	err := CheckPackages(opts.Packages)
+	if err != nil {
+		return err
+	}
+
+	// One line each: an empty GOMOD outside a module keeps its line.
+	env, err := goOutput(ctx, opts.Dir, opts.Environ, nil, "env", "GOMOD", "GOVERSION", "GOROOT")
+	if err != nil {
+		return err
+	}
+
+	gomod, env, _ := strings.Cut(env, "\n")
+	version, goroot, _ := strings.Cut(env, "\n")
+	gomod = strings.TrimSpace(gomod)
+
+	if gomod == "" || gomod == os.DevNull {
+		return fmt.Errorf("%w: %s is not inside a Go module", ErrModule, opts.Dir)
 	}
 
 	dir, err := os.MkdirTemp("", "plg-build-guest-")
@@ -127,8 +211,22 @@ func Build(ctx context.Context, opts Options) error {
 
 	work, err := os.OpenRoot(dir)
 	if err == nil {
-		b := builder{work: work, service: filepath.Dir(gomod)}
-		err = errors.Join(b.build(ctx, opts.Packages, output), work.Close())
+		bld := builder{
+			work: work, service: filepath.Dir(gomod), plg: opts.Plg, environ: opts.Environ,
+			goVersion: strings.TrimSpace(version),
+			goroot:    strings.TrimSpace(goroot),
+		}
+
+		err = bld.module(ctx)
+		if err == nil {
+			err = bld.checkProvided(ctx, opts.Packages)
+		}
+
+		if err == nil {
+			err = fn(&bld)
+		}
+
+		err = errors.Join(err, work.Close())
 	}
 
 	return errors.Join(err, os.RemoveAll(dir))
@@ -143,10 +241,10 @@ func resolve(dir, name string) string {
 	return filepath.Join(dir, name)
 }
 
-// checkPackages rejects an empty list, repeated packages, packages the default guest already has and packages
-// whose extracted symbols would overwrite another's file: yaegi extract names the file after the import path,
-// mapping both / and - to -, and both . and _ to _.
-func checkPackages(pkgs []string) error {
+// CheckPackages checks a list of extra packages as [Build] does: it rejects an empty list, repeated packages,
+// packages the default guest already has and packages whose extracted symbols would overwrite another's file:
+// yaegi extract names the file after the import path, mapping both / and - to -, and both . and _ to _.
+func CheckPackages(pkgs []string) error {
 	if len(pkgs) == 0 {
 		return fmt.Errorf("%w: name at least one package", ErrPackages)
 	}
@@ -183,30 +281,161 @@ func extractedFile(pkg string) string {
 	return strings.NewReplacer("/", "-", ".", "_", "~", "_").Replace(pkg) + ".go"
 }
 
-// builder builds one guest in the temporary module work, from the service module rooted at service.
+// builder builds one guest in the temporary module work, from the module rooted at service, with plg at the
+// version plg (empty for the module's) and the go command's environment environ (nil for the process's), whose go
+// command is goVersion with its standard library in goroot.
 type builder struct {
-	work    *os.Root
-	service string
+	work      *os.Root
+	service   string
+	plg       string
+	goVersion string // the go command's version (go env GOVERSION)
+	goroot    string // its GOROOT
+	environ   []string
 }
 
+// build builds the guest, the temporary module being set up, and writes it to output.
 func (b *builder) build(ctx context.Context, pkgs []string, output string) error {
-	err := b.module(ctx)
-	if err == nil {
-		err = b.checkProvided(ctx, pkgs)
-	}
-
-	if err == nil {
-		err = b.extract(ctx, pkgs)
-	}
-
+	err := b.extract(ctx, pkgs)
 	if err != nil {
 		return err
 	}
 
-	_, err = goOutput(ctx, b.work.Name(), []string{"GOOS=wasip1", "GOARCH=wasm"},
+	_, err = b.goOutput(ctx, b.work.Name(), wasip1,
 		"build", "-trimpath", "-buildvcs=false", "-buildmode=c-shared", "-o", output, ".")
 
 	return err
+}
+
+// buildInto builds the guest into the directory dir under a temporary name, then renames it to guest.
+func (b *builder) buildInto(ctx context.Context, pkgs []string, dir, guest string) error {
+	err := os.MkdirAll(dir, dirMode)
+	if err != nil {
+		return fmt.Errorf("creating the guest cache: %w", err)
+	}
+
+	tmp := guest + "." + rand.Text() + ".tmp" // the go command creates it
+
+	err = b.build(ctx, pkgs, tmp)
+	if err == nil {
+		err = os.Rename(tmp, guest)
+	}
+
+	if err != nil {
+		return errors.Join(err, os.RemoveAll(tmp)) // nothing to remove when the build failed before writing it
+	}
+
+	return nil
+}
+
+// listedPackage is a package in `go list -json`'s output, with the fields [builder.key] reads.
+type listedPackage struct {
+	Module     *listedModule
+	ImportPath string
+	Dir        string
+	GoFiles    []string
+	SFiles     []string
+	EmbedFiles []string
+	Standard   bool
+}
+
+// listedModule is a package's module in `go list -json`'s output.
+type listedModule struct {
+	Replace *listedModule
+	Path    string
+	Version string
+}
+
+// keyFormat starts every key's input; changing what a key covers changes it.
+const keyFormat = "plg custom go guest key 1\n"
+
+// key computes [Key] in the temporary module, set up.
+func (b *builder) key(ctx context.Context, pkgs []string) (string, error) {
+	gomod, err := b.work.ReadFile("go.mod")
+	if err != nil {
+		return "", fmt.Errorf("reading the guest module's go.mod: %w", err)
+	}
+
+	listed, err := b.goOutput(ctx, b.work.Name(), wasip1, append([]string{
+		"list", "-deps",
+		"-json=ImportPath,Dir,Standard,GoFiles,SFiles,EmbedFiles,Module", reactorImport,
+	}, pkgs...)...)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.New()
+	sum.Write(fmt.Appendf(nil, "%sgo %s\npackages %q\n%s", keyFormat, b.goVersion, pkgs, gomod))
+
+	decoder := sonic.ConfigDefault.NewDecoder(strings.NewReader(listed))
+	for decoder.More() {
+		var pkg listedPackage
+
+		err = decoder.Decode(&pkg)
+		if err != nil {
+			return "", fmt.Errorf("%w: reading go list -json: %w", ErrGo, err)
+		}
+
+		err = hashPackage(sum, &pkg)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+// hashPackage writes what pkg is built from to sum: nothing for a standard library package (the go version
+// stands for it), its module's path and version for a module version (immutable, checked against go.sum), and
+// the content of its files otherwise: a module replaced by a directory, or the main module, has no version
+// that changes with its content.
+func hashPackage(sum hash.Hash, pkg *listedPackage) error {
+	if pkg.Standard {
+		return nil
+	}
+
+	sum.Write(fmt.Appendf(nil, "package %s\n", pkg.ImportPath))
+
+	if version := moduleVersion(pkg.Module); version != "" {
+		sum.Write(fmt.Appendf(nil, "module %s\n", version))
+
+		return nil
+	}
+
+	dir, err := os.OpenRoot(pkg.Dir)
+	if err != nil {
+		return fmt.Errorf("hashing %s: %w", pkg.ImportPath, err)
+	}
+
+	for _, files := range [][]string{pkg.GoFiles, pkg.SFiles, pkg.EmbedFiles} {
+		for _, name := range files {
+			var data []byte
+
+			data, err = dir.ReadFile(name)
+			if err != nil {
+				return errors.Join(fmt.Errorf("hashing %s: %w", pkg.ImportPath, err), dir.Close())
+			}
+
+			sum.Write(fmt.Appendf(nil, "file %q %d\n", name, len(data)))
+			sum.Write(data)
+		}
+	}
+
+	return dir.Close() //nolint:wrapcheck // only read from: closing it cannot fail in a way worth more words
+}
+
+// moduleVersion returns "path version" of the module version providing a package, its replacement's when it is
+// replaced by another module version; empty for a package of no module version (a directory replacement, the
+// main module).
+func moduleVersion(mod *listedModule) string {
+	if mod != nil && mod.Replace != nil && mod.Replace.Version != "" {
+		mod = mod.Replace
+	}
+
+	if mod == nil || mod.Replace != nil || mod.Version == "" {
+		return ""
+	}
+
+	return mod.Path + " " + mod.Version
 }
 
 // modVersion is a module path and version in `go mod edit -json`'s output.
@@ -234,7 +463,7 @@ func (b *builder) module(ctx context.Context) error {
 		return err
 	}
 
-	out, err := goOutput(ctx, b.work.Name(), nil, "mod", "edit", "-json")
+	out, err := b.goOutput(ctx, b.work.Name(), nil, "mod", "edit", "-json")
 	if err != nil {
 		return err
 	}
@@ -249,12 +478,22 @@ func (b *builder) module(ctx context.Context) error {
 	edits := []string{"mod", "edit", "-module=" + guestModule}
 
 	for _, repl := range mod.Replace {
-		if isRelativeDir(repl.New.Path) {
+		switch {
+		case b.plg != "" && repl.Old.Path == plgModule:
+			edits = append(edits, "-dropreplace="+repl.old())
+		case isRelativeDir(repl.New.Path):
 			edits = append(edits, "-replace="+repl.old()+"="+filepath.Join(b.service, repl.New.Path))
+		default: // an absolute directory or another module version: the same from the temporary module
 		}
 	}
 
-	_, err = goOutput(ctx, b.work.Name(), nil, edits...)
+	if b.plg != "" {
+		// Required, so plg is in the build list, and replaced, so no requirement of the module selects another
+		// version.
+		edits = append(edits, "-require="+plgModule+"@"+b.plg, "-replace="+plgModule+"="+plgModule+"@"+b.plg)
+	}
+
+	_, err = b.goOutput(ctx, b.work.Name(), nil, edits...)
 
 	return err
 }
@@ -301,7 +540,7 @@ func isRelativeDir(dir string) bool {
 // checkProvided checks that the service's build list has plg and the module of every extra package outside the
 // standard library, so that nothing resolves to a version the service does not build with.
 func (b *builder) checkProvided(ctx context.Context, pkgs []string) error {
-	out, err := goOutput(ctx, b.work.Name(), nil, "list", "-m", "-f", "{{.Path}}", "all")
+	out, err := b.goOutput(ctx, b.work.Name(), nil, "list", "-m", "-f", "{{.Path}}", "all")
 	if err != nil {
 		return err
 	}
@@ -354,16 +593,19 @@ func (b *builder) extract(ctx context.Context, pkgs []string) error {
 
 	yaegi := filepath.Join(b.work.Name(), "yaegi")
 
-	// For the machine running it, whatever GOOS and GOARCH the environment sets.
-	_, err = goOutput(ctx, b.work.Name(), []string{"GOOS=", "GOARCH="}, "build", "-o", yaegi, yaegiCmd)
+	// For the machine running it, whatever GOOS and GOARCH the environment sets; -trimpath keeps the build's
+	// cache key free of the module cache's location.
+	_, err = b.goOutput(ctx, b.work.Name(), []string{"GOOS=", "GOARCH="}, "build", "-trimpath", "-o", yaegi,
+		yaegiCmd)
 	if err != nil {
 		return err
 	}
 
-	//nolint:gosec // G204: the yaegi command just built, with import paths checkPackages accepted
+	//nolint:gosec // G204: the yaegi command just built, with import paths CheckPackages accepted
 	cmd := exec.CommandContext(ctx, yaegi, append([]string{"extract", "-name", extraPackage}, pkgs...)...)
 	cmd.Dir = filepath.Join(b.work.Name(), extraPackage)
-	cmd.Env = goEnv([]string{"GOOS=wasip1", "GOARCH=wasm"})
+	// A -trimpath binary knows no GOROOT of its own, and yaegi extract finds standard library packages in it.
+	cmd.Env = goEnv(b.environ, append([]string{"GOROOT=" + b.goroot}, wasip1...))
 
 	// yaegi extract reports a package it cannot extract and goes on with the others (exiting 0), so a missing
 	// file is the failure too.
@@ -404,12 +646,22 @@ func (b *builder) firstUnextracted(pkgs []string) string {
 	return ""
 }
 
-// goOutput runs the go command in dir with extra environment variables and returns its standard output; a
-// failure carries the command's output.
-func goOutput(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+// wasip1 is the environment of a go command building for the guest's platform.
+//
+//nolint:gochecknoglobals // a constant list
+var wasip1 = []string{"GOOS=wasip1", "GOARCH=wasm"}
+
+// goOutput runs the go command of the builder's environment in dir (see [goOutput]).
+func (b *builder) goOutput(ctx context.Context, dir string, extra []string, args ...string) (string, error) {
+	return goOutput(ctx, dir, b.environ, extra, args...)
+}
+
+// goOutput runs the go command in dir, in the environment environ (nil for the process's) with extra variables,
+// and returns its standard output; a failure carries the command's output.
+func goOutput(ctx context.Context, dir string, environ, extra []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "go", args...) //nolint:gosec // G204: the go command with plg's own arguments
 	cmd.Dir = dir
-	cmd.Env = goEnv(env)
+	cmd.Env = goEnv(environ, extra)
 
 	var stdout, stderr bytes.Buffer
 
@@ -424,14 +676,26 @@ func goOutput(ctx context.Context, dir string, env []string, args ...string) (st
 	return stdout.String(), nil
 }
 
-// goEnv is the environment of the go commands: the process's, without workspaces (the temporary module is in
-// none), letting the go command record missing go.sum hashes of modules the service builds without (yaegi,
-// for one), plus extra.
-func goEnv(extra []string) []string {
-	return append(os.Environ(), append([]string{"GOWORK=off", "GOFLAGS=" + goflags()}, extra...)...)
+// goEnv is the environment of the go commands: environ (nil for the process's), without workspaces (the
+// temporary module is in none), letting the go command record missing go.sum hashes of modules the build module
+// builds without (yaegi, for one), plus extra.
+func goEnv(environ, extra []string) []string {
+	if environ == nil {
+		environ = os.Environ()
+	}
+
+	return append(slices.Clip(environ), append([]string{"GOWORK=off", "GOFLAGS=" + goflags(environ)}, extra...)...)
 }
 
-// goflags is the environment's GOFLAGS with -mod=mod last, so that it wins.
-func goflags() string {
-	return strings.TrimSpace(os.Getenv("GOFLAGS") + " -mod=mod")
+// goflags is environ's GOFLAGS with -mod=mod last, so that it wins.
+func goflags(environ []string) string {
+	var flags string
+
+	for _, kv := range environ {
+		if value, ok := strings.CutPrefix(kv, "GOFLAGS="); ok {
+			flags = value // the last one wins, as in os/exec
+		}
+	}
+
+	return strings.TrimSpace(flags + " -mod=mod")
 }

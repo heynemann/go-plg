@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg/internal/contractload"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/fastcontract"
 	"github.com/heynemann/go-plg/internal/gen"
 	"github.com/heynemann/go-plg/internal/goabi"
@@ -483,4 +484,25 @@ func TestRejectsWhatTheDispatcherCannotWrite(t *testing.T) {
 		require.ErrorIs(t, err, tc.want, tc.name)
 		require.ErrorContains(t, err, tc.msg, tc.name)
 	}
+}
+
+// TestReadsTheInterfacesDirectives: plg validate gets the directives of the interface the plugin implements (not
+// its Host's), and a malformed one fails the load, as it fails plg gen.
+//
+//nolint:paralleltest // as TestDescribesContractsAsReflectionDoes
+func TestReadsTheInterfacesDirectives(t *testing.T) {
+	dir := contractDir(t, "//plg:guest-packages encoding/xml\ntype H interface{ M(ctx context.Context) error }\n\n"+
+		"// I is implemented by plugins.\n//\n//plg:limits memory=16MiB pool=2\n"+
+		"type I interface{ M(ctx context.Context) error }\n")
+
+	loaded, err := contractload.Load(dir, "example.com/c", "I", "H")
+	require.NoError(t, err)
+	assert.Equal(t, directive.Directives{Limits: directive.Limits{Memory: 16 << 20, PoolMin: 2, PoolMax: 2}},
+		loaded.Directives)
+
+	dir = contractDir(t, "//plg:limits timeout=0s\ntype I interface{ M(ctx context.Context) error }\n")
+
+	_, err = contractload.Load(dir, "example.com/c", "I", "")
+	require.ErrorIs(t, err, directive.ErrDirective)
+	require.ErrorContains(t, err, "c.go:8:6: I: //plg:limits timeout=0s: ")
 }

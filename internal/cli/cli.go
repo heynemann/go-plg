@@ -34,7 +34,8 @@ const usage = `usage: plg <command> [arguments]
 commands:
   gen [-fast=false] <Interface>...
                       generate the plg adapters and contract registration for interfaces declared in the Go
-                      package in the current directory; run it from a go:generate line next to them:
+                      package in the current directory, checking their plg directives (//plg:limits,
+                      //plg:guest-packages, //plg:validation); run it from a go:generate line next to them:
                       //go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
                       -fast=false leaves out the fast paths (typed adapters and codecs generated for the
                       interfaces' types): plg then calls the plugins through its generic, reflective binder
@@ -47,12 +48,16 @@ commands:
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
                       requires); pass it to plg.WithGoGuest
-  validate [-host Interface] [-cache-dir dir] <plugin dir or author repository>
+  validate [-host Interface] [-cache-dir dir] [-guest-cache dir] <plugin dir or author repository>
                       check a plugin before registering it, exiting non-zero on any error: read its plugin.yaml,
                       resolve the contract module it pins with the go command (go mod download: GOPROXY,
                       GOPRIVATE and credentials apply, and a module in the Go module cache needs no network),
-                      type-check the contract, check that a Go plugin's go.mod requires the pinned version, then
-                      load the plugin and run its Create in the real guest, with a Host whose every call fails;
+                      type-check the contract and read its directives, check that a Go plugin's go.mod requires
+                      the pinned version, then load the plugin and run its Create in the real guest, with a Host
+                      whose every call fails, under plg.yaml's limits over the contract's //plg:limits over plg's
+                      defaults (memory, pool; timeout bounds Create); a Go plugin of a contract with
+                      //plg:guest-packages runs in that custom guest, built from the plugin's module as build-guest
+                      builds one and kept in -guest-cache (default: the user cache directory's plg/guests);
                       a directory holding plg.yaml is an author repository: every plugin it lists is validated,
                       then summarised, and its settings (shared directories, limits, requireOwnership, replace)
                       apply, also to one of its plugins validated alone;
@@ -269,7 +274,7 @@ func runBuildGuest(dir string, args []string) outcome {
 		return usageError("build-guest", "name the output file with -o")
 	}
 
-	err := buildguest.Build(context.Background(), buildguest.Options{Dir: dir, Output: *output, Packages: pkgs})
+	err := buildguest.Build(context.Background(), &buildguest.Options{Dir: dir, Output: *output, Packages: pkgs})
 
 	return failure("build-guest", err)
 }

@@ -172,7 +172,8 @@ func TestValidateRepoAppliesItsSettings(t *testing.T) {
 
 	got = validate(environ, lenient)
 	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
-	assert.NotContains(t, got.stdout, "limits ")
+	assert.Contains(t, section(t, got.stdout, "hungry"), "limits     ok      memory=64MiB pool=1..")
+	assert.Contains(t, section(t, got.stdout, "hungry"), ", no timeout (plg's defaults)\n")
 	assert.Contains(t, section(t, got.stdout, "unowned"), "           warning  plg.ownership.missing (owner): ")
 	assert.True(t, strings.HasSuffix(got.stdout, "PLUGIN   RESULT  DETAIL\n"+
 		"hungry   ok      \n"+

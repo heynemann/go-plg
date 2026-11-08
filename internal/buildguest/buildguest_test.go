@@ -111,7 +111,7 @@ func TestBuildRejectsItsArguments(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "guest.wasm")
 			err := buildguest.Build(
 				t.Context(),
-				buildguest.Options{Dir: dirs[tc.dir], Output: output, Packages: tc.pkgs},
+				&buildguest.Options{Dir: dirs[tc.dir], Output: output, Packages: tc.pkgs},
 			)
 			require.ErrorIs(t, err, tc.want)
 			require.ErrorContains(t, err, tc.msg)
@@ -124,9 +124,49 @@ func TestBuildNeedsATemporaryDirectory(t *testing.T) {
 	dir := module(t, map[string]string{"go.mod": "module example.com/plain\n\ngo 1.27\n"})
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 
-	err := buildguest.Build(t.Context(), buildguest.Options{
+	err := buildguest.Build(t.Context(), &buildguest.Options{
 		Dir: dir, Output: "guest.wasm", Packages: []string{"encoding/xml"},
 	})
 	require.ErrorIs(t, err, fs.ErrNotExist)
 	require.ErrorContains(t, err, "creating the build directory")
+}
+
+// TestPlgPinsTheGuestsPlg: with Plg, the guest is built with that plg version whatever the module requires or
+// replaces it by (here a directory that does not exist), so the go command looks for exactly that version.
+func TestPlgPinsTheGuestsPlg(t *testing.T) {
+	t.Parallel()
+
+	dir := module(t, map[string]string{"go.mod": "module example.com/p\n\ngo 1.27\n\n" +
+		"require github.com/heynemann/go-plg v1.0.0\n\nreplace github.com/heynemann/go-plg => ./missing\n"})
+	environ := append(os.Environ(), "GOPROXY=off", "GOFLAGS=-modcacherw", "GOMODCACHE="+t.TempDir())
+
+	_, err := buildguest.Key(t.Context(), &buildguest.Options{
+		Dir: dir, Plg: "v1.9.9", Packages: []string{"encoding/xml"}, Environ: environ,
+	})
+	require.ErrorIs(t, err, buildguest.ErrGo)
+	require.ErrorContains(t, err, "github.com/heynemann/go-plg@v1.9.9")
+	assert.NotContains(t, err.Error(), "missing")
+
+	_, err = buildguest.Cached(t.Context(), &buildguest.Options{
+		Dir: dir, Plg: "v1.9.9", Packages: []string{"encoding/xml"}, Environ: environ,
+	}, t.TempDir())
+	require.ErrorIs(t, err, buildguest.ErrGo)
+
+	_, err = buildguest.Key(t.Context(), &buildguest.Options{
+		Dir: dir, Packages: []string{"encoding/xml"},
+		Environ: environ,
+	})
+	require.ErrorIs(t, err, buildguest.ErrGo, "without Plg, the module's own replacement")
+	require.ErrorContains(t, err, filepath.Join(dir, "missing"))
+}
+
+func TestKeyAndCachedCheckTheirArguments(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildguest.Key(t.Context(), &buildguest.Options{Dir: t.TempDir()})
+	require.ErrorIs(t, err, buildguest.ErrPackages)
+
+	_, err = buildguest.Cached(t.Context(), &buildguest.Options{Dir: t.TempDir(), Packages: []string{"strings"}},
+		t.TempDir())
+	require.ErrorIs(t, err, buildguest.ErrPackages)
 }

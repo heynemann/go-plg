@@ -5,6 +5,7 @@ package testproxy
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -82,4 +83,16 @@ func Environ(proxy, cache string) []string {
 
 	return append(environ, "GOPROXY="+proxy, "GOMODCACHE="+cache, "GOFLAGS=-modcacherw", "GOSUMDB=off",
 		"GOTOOLCHAIN=local", "GONOSUMDB=", "GOPRIVATE=")
+}
+
+// ModuleCache returns the download directory of the go command's module cache as a GOPROXY (file://…/cache/download,
+// which serves every module version the cache holds): after [New]'s proxy, a fallback that resolves this module's
+// own dependencies (which a custom Go guest's build needs) without network.
+func ModuleCache(tb testing.TB) string {
+	tb.Helper()
+
+	out, err := exec.CommandContext(tb.Context(), "go", "env", "GOMODCACHE").Output()
+	require.NoError(tb, err)
+
+	return "file://" + filepath.ToSlash(filepath.Join(strings.TrimSpace(string(out)), "cache", "download"))
 }

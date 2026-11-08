@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/heynemann/go-plg/internal/contractsrc"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goallow"
 )
 
@@ -86,13 +87,18 @@ func Generate(dir string, interfaces []string, opts Options) (File, error) {
 
 	ifaces := make([]*types.Interface, len(interfaces))
 	for i, name := range interfaces {
-		_, ifaces[i], err = Interface(pkg, name)
+		_, ifaces[i], err = Interface(pkg.Types, name)
+		if err != nil {
+			return File{}, err
+		}
+
+		_, err = pkg.Directives(name)
 		if err != nil {
 			return File{}, err
 		}
 	}
 
-	src, err := render(pkg, interfaces, ifaces, opts)
+	src, err := render(pkg.Types, interfaces, ifaces, opts)
 	if err != nil {
 		return File{}, err
 	}
@@ -146,12 +152,20 @@ func checkNames(names []string) error {
 	return nil
 }
 
+// Package is a contract package, type-checked.
+type Package struct {
+	// Types is the package's type information.
+	Types *types.Package
+	fset  *token.FileSet
+	files []*ast.File // the files type-checked
+}
+
 // Load parses the files of the Go package in dir that the guest receives (see [contractsrc.Include]), checks
 // their imports against the guest allowlist and type-checks those that build on this platform: the contract
 // package as plg gen and plg validate see it. The package's path is importPath; empty means its name. The
 // standard library comes from imp (nil means a gc importer of its own), so packages type-checked with the same
 // importer share its packages.
-func Load(dir, importPath string, imp types.Importer) (*types.Package, error) {
+func Load(dir, importPath string, imp types.Importer) (*Package, error) {
 	pkgDir := os.DirFS(dir)
 
 	entries, err := fs.ReadDir(pkgDir, ".")
@@ -192,7 +206,74 @@ func Load(dir, importPath string, imp types.Importer) (*types.Package, error) {
 		return nil, fmt.Errorf("%w: no Go source files in %s", ErrPackage, dir)
 	}
 
-	return check(fset, files, importPath, imp)
+	pkg, err := check(fset, files, importPath, imp)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Package{Types: pkg, fset: fset, files: files}, nil
+}
+
+// Directives returns the plg directives on the doc comment of the type the package declares as name (see package
+// directive): a malformed one fails with [directive.ErrDirective], naming where it is, as does a
+// //plg:validation naming no type of the package. A type without them has none.
+func (p *Package) Directives(name string) (directive.Directives, error) {
+	spec, doc := p.typeSpec(name)
+	if spec == nil {
+		return directive.Directives{}, nil
+	}
+
+	dirs, err := directive.Parse(doc)
+	if err == nil && dirs.Validation != "" {
+		if _, isType := p.Types.Scope().Lookup(dirs.Validation).(*types.TypeName); !isType {
+			err = fmt.Errorf("%w: //plg:validation %s: package %s declares no type %[2]s", directive.ErrDirective,
+				dirs.Validation, p.Types.Name())
+		}
+	}
+
+	if err != nil {
+		return directive.Directives{}, fmt.Errorf("%s: %s: %w", p.fset.Position(spec.Pos()), name, err)
+	}
+
+	return dirs, nil
+}
+
+// typeSpec returns the spec declaring the type name in the package's files, and its doc comment; nil when there
+// is none.
+func (p *Package) typeSpec(name string) (*ast.TypeSpec, *ast.CommentGroup) {
+	for _, file := range p.files {
+		for _, decl := range file.Decls {
+			if spec, doc := typeSpec(decl, name); spec != nil {
+				return spec, doc
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+// typeSpec returns the spec declaring the type name in decl, and its doc comment: the spec's own in a group, the
+// declaration's otherwise; nil when decl does not declare it.
+func typeSpec(decl ast.Decl, name string) (*ast.TypeSpec, *ast.CommentGroup) {
+	gen, ok := decl.(*ast.GenDecl)
+	if !ok || gen.Tok != token.TYPE {
+		return nil, nil
+	}
+
+	for _, spec := range gen.Specs {
+		typeSpec, isType := spec.(*ast.TypeSpec)
+		if !isType || typeSpec.Name.Name != name {
+			continue
+		}
+
+		if typeSpec.Doc == nil && len(gen.Specs) == 1 {
+			return typeSpec, gen.Doc
+		}
+
+		return typeSpec, typeSpec.Doc
+	}
+
+	return nil, nil
 }
 
 // check type-checks the files of a package as Load describes.
@@ -234,7 +315,7 @@ func parseFile(fset *token.FileSet, dir string, pkgDir fs.FS, entry fs.DirEntry)
 		return nil, false, nil
 	}
 
-	file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %w", ErrPackage, err)
 	}

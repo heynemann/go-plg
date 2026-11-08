@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 
 	"github.com/heynemann/go-plg/internal/adminjson"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/offline"
 )
 
@@ -23,6 +25,7 @@ var errStubHost = errors.New("plg validate runs plugins without the service's Ho
 func init() {
 	offline.Check = checkOffline
 	offline.CheckHost = checkOfflineHost
+	offline.Defaults = offlineDefaults
 }
 
 // checkOfflineHost is [offline.CheckHost]: it checks spec as checkOffline checks the Host of a contract of pkgPath.
@@ -32,9 +35,21 @@ func checkOfflineHost(pkgPath string, spec *offline.Host) error {
 	return err
 }
 
+// offlineDefaults is [offline.Defaults]: a Register's defaults without WithMemoryLimit and WithPool.
+func offlineDefaults(language string) directive.Limits {
+	limits := directive.Limits{PoolMin: 1, PoolMax: min(runtime.GOMAXPROCS(0), maxPoolSize)}
+
+	ld, err := loaderFor(Language(language))
+	if err == nil {
+		limits.Memory = ld.memoryLimit()
+	}
+
+	return limits
+}
+
 // checkOffline is [offline.Check]: it prepares spec as Register prepares a registered contract, with a Host whose
 // methods fail every call, and checks the plugin against it in a container of its own, as [Check] checks a
-// candidate (no pool, one throwaway instance running Create).
+// candidate (no pool, one throwaway instance running Create), under the limits opts sets and in its Go guest.
 func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.Plugin, opts *offline.Options,
 ) (_ *adminjson.Report, err error) {
 	desc, err := ParseManifest(plugin.Manifest)
@@ -59,6 +74,8 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 		return nil, err
 	}
 
+	cfg.startTimeout = opts.Limits.Timeout
+
 	//nolint:contextcheck // New takes no context: what the container starts ends with its Close, below
 	ctr := New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir))
 
@@ -73,20 +90,13 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 
 	defer reg.http.Close()
 
-	if opts.Limits.Timeout > 0 {
-		var cancel context.CancelFunc
-
-		ctx, cancel = context.WithTimeout(ctx, opts.Limits.Timeout)
-		defer cancel()
-	}
-
 	report, err := ctr.checkAgainst(ctx, reg, offlineStorage, &desc, plugin.Files)
 
 	return newAdminReport(&report), err
 }
 
 // offlineOptions are the Register options of a plg validate check: its storage, its limits (a pool of one instance
-// by default) and its ownership rule.
+// by default: the check runs one), its ownership rule and its Go guest.
 func offlineOptions(opts *offline.Options) []RegisterOption {
 	low, high := 1, 1
 	if opts.Limits.PoolMax != 0 {
@@ -101,6 +111,10 @@ func offlineOptions(opts *offline.Options) []RegisterOption {
 
 	if opts.RequireOwnership {
 		options = append(options, WithRequiredOwnership())
+	}
+
+	if opts.GoGuest != nil {
+		options = append(options, WithGoGuest(opts.GoGuest))
 	}
 
 	return options

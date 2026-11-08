@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
 )
@@ -88,8 +89,8 @@ func WithPanicHistory(n int) Option {
 type RegisterOption func(*registerConfig)
 
 // maxPoolSize is the largest pool maximum [WithPool] accepts. Each pool keeps room for that many idle
-// instances, so the bound keeps a mistyped maximum from allocating gigabytes.
-const maxPoolSize = 4096
+// instances, so the bound keeps a mistyped maximum from allocating gigabytes. Contract directives are held to it.
+const maxPoolSize = directive.MaxPool
 
 // maxConcurrentCalls bounds [WithConcurrentCalls], and maxLanes the calls a plugin's whole pool may serve at once
 // (pool maximum × concurrent calls): the pool keeps room for that many idle slots, 8 bytes each.
@@ -112,6 +113,7 @@ type registerConfig struct {
 	memoryLimit       uint64             // per-instance limit, whole pages
 	pollInterval      time.Duration      // zero: no polling
 	validationTimeout time.Duration      // WithValidationTimeout
+	startTimeout      time.Duration      // plg validate's: bounds a checked instance's start (its Create); 0 does not
 	poolMin           int
 	poolMax           int
 	concurrent        int // WithConcurrentCalls

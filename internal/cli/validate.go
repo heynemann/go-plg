@@ -21,6 +21,7 @@ import (
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/adminjson"
 	"github.com/heynemann/go-plg/internal/authorrepo"
+	"github.com/heynemann/go-plg/internal/buildguest"
 	"github.com/heynemann/go-plg/internal/contractload"
 	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/directive"
@@ -28,6 +29,9 @@ import (
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
 )
+
+// plgModule is plg's module, whose version as this command was built decides the custom Go guests' plg.
+const plgModule = "github.com/heynemann/go-plg"
 
 // Step results.
 const (
@@ -42,6 +46,8 @@ func runValidate(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
 	host := flags.String("host", "", "the contract's Host interface the plugin's Create takes")
 	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
+	guestCache := flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
+		"//plg:guest-packages (default <user cache>/plg/guests)")
 
 	operands, res, ok := parseMixed("validate", flags, args)
 	if !ok {
@@ -54,6 +60,10 @@ func runValidate(env *Env, args []string) outcome {
 
 	dir := resolve(env.Dir, operands[0])
 	run := validation{env: env, dir: dir, host: *host, cacheDir: resolve(env.Dir, *cacheDir)}
+
+	if *guestCache != "" {
+		run.guestCache = resolve(env.Dir, *guestCache)
+	}
 
 	if authorrepo.Exists(dir) {
 		return validateRepo(&run)
@@ -80,14 +90,15 @@ func runValidate(env *Env, args []string) outcome {
 // author repository listing the plugin, if any, and files the plugin's files, the repository's shared directories
 // copied in.
 type validation struct {
-	env      *Env
-	table    *stepTable
-	repo     *authorrepo.Repo
-	files    fs.FS
-	dir      string
-	host     string
-	cacheDir string
-	hosts    []string // the contract's Host candidates when there are several and none was chosen
+	env        *Env
+	table      *stepTable
+	repo       *authorrepo.Repo
+	files      fs.FS
+	dir        string
+	host       string
+	cacheDir   string
+	guestCache string   // empty means the default, <user cache>/plg/guests
+	hosts      []string // the contract's Host candidates when there are several and none was chosen
 }
 
 // run runs the steps in order, stopping at the first that fails; it reports whether every step passed.
@@ -123,11 +134,137 @@ func (v *validation) run(ctx context.Context) bool {
 		return false
 	}
 
-	if desc.Language == plg.LanguageGo && (!v.goMod(ref, mod) || !v.goTypes(loaded, &desc)) {
+	opts := &offline.Options{
+		Logger: slog.New(slog.NewTextHandler(v.env.Stderr, nil)), CacheDir: v.cacheDir,
+		Limits: v.limits(&desc, loaded.Directives.Limits),
+	}
+
+	if v.repo != nil {
+		opts.RequireOwnership = v.repo.RequireOwnership
+	}
+
+	if desc.Language == plg.LanguageGo && !v.goSteps(ctx, ref, mod, loaded, &desc, opts) {
 		return false
 	}
 
-	return v.load(ctx, loaded, manifest, &desc)
+	return v.load(ctx, loaded.Contract, manifest, &desc, opts)
+}
+
+// goSteps runs a Go plugin's own steps: its go.mod's pin, its type-check and its custom guest, which it sets in
+// opts.
+func (v *validation) goSteps(ctx context.Context, ref contractref.Ref, mod modfetch.Module, loaded *contractload.Loaded,
+	desc *plg.Descriptor, opts *offline.Options,
+) bool {
+	if !v.goMod(ref, mod) || !v.goTypes(loaded, desc) {
+		return false
+	}
+
+	var ok bool
+
+	opts.GoGuest, ok = v.goGuest(ctx, loaded.Directives.GuestPackages)
+
+	return ok
+}
+
+// limits returns the limits the plugin runs under: the author repository's plg.yaml limits over the contract's
+// //plg:limits over plg's defaults for its language. Its row says which came from where.
+func (v *validation) limits(desc *plg.Descriptor, declared directive.Limits) directive.Limits {
+	var repo directive.Limits
+
+	if v.repo != nil {
+		repo = v.repo.Limits
+	}
+
+	defaults := offline.Defaults(string(desc.Language))
+	limits := defaults.Override(declared)
+	limits = limits.Override(repo)
+
+	detail := limits.String()
+	if limits.Timeout == 0 {
+		detail += ", no timeout"
+	}
+
+	v.table.row("limits", stepOK, detail+" ("+limitsOrigin(declared, repo)+")")
+
+	return limits
+}
+
+// limitsOrigin says where limits come from: plg.yaml's (repo) over the contract's (declared), with their values
+// when both set some, then plg's defaults for any neither sets.
+func limitsOrigin(declared, repo directive.Limits) string {
+	var (
+		none    directive.Limits
+		sources []string
+	)
+
+	for _, source := range []struct {
+		name   string
+		limits directive.Limits
+	}{{authorrepo.FileName, repo}, {"//plg:limits", declared}} {
+		switch {
+		case source.limits == none:
+		case declared != none && repo != none:
+			sources = append(sources, source.name+" "+source.limits.String())
+		default:
+			sources = append(sources, source.name)
+		}
+	}
+
+	if len(sources) == 0 {
+		return "plg's defaults"
+	}
+
+	origin := strings.Join(sources, " over ")
+	if set := declared.Override(repo); set.Memory == 0 || set.Timeout == 0 || set.PoolMax == 0 {
+		origin += ", plg's defaults otherwise"
+	}
+
+	return origin
+}
+
+// goGuest returns the custom Go guest of the contract's //plg:guest-packages, built from the plugin's module as
+// plg build-guest builds one from a service's, with the plg this command was built from (unless a local
+// checkout, whose version says nothing: the module's plg then), and kept in the guest cache by what it is built
+// from, so later runs find it there. Without guest packages it returns nil: the linked guest.
+func (v *validation) goGuest(ctx context.Context, pkgs []string) ([]byte, bool) {
+	if len(pkgs) == 0 {
+		return nil, true
+	}
+
+	cache := v.guestCache
+	if cache == "" {
+		userCache, err := os.UserCacheDir()
+		if err != nil {
+			return nil, v.failed("guest", fmt.Errorf("finding the guest cache: %w", err))
+		}
+
+		cache = filepath.Join(userCache, "plg", "guests")
+	}
+
+	opts := buildguest.Options{Dir: v.dir, Packages: pkgs, Environ: v.env.environ()}
+	if built := contractref.Built(plgModule); !built.Devel() {
+		opts.Plg = built.Version
+	}
+
+	guest, err := buildguest.Cached(ctx, &opts, cache)
+	if err != nil {
+		return nil, v.failed("guest", err)
+	}
+
+	wasm, err := os.ReadFile(guest.Path)
+	if err != nil {
+		return nil, v.failed("guest", err)
+	}
+
+	how := "built into"
+	if guest.Hit {
+		how = "found in"
+	}
+
+	v.table.row("guest", stepOK, fmt.Sprintf("a custom Go guest with %s, %s the guest cache (%s)",
+		strings.Join(pkgs, " "), how, guest.Path))
+
+	return wasm, true
 }
 
 // failed adds the failed step's row.
@@ -307,23 +444,14 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 	return true
 }
 
-// load loads the plugin with plg's own loading code and runs its Create in the real guest, under the contract's
-// limits with the author repository's overrides and the repository's ownership rule.
-func (v *validation) load(ctx context.Context, loaded *contractload.Loaded, manifest []byte, desc *plg.Descriptor,
+// load loads the plugin with plg's own loading code and runs its Create in the real guest, with opts: its limits,
+// the author repository's ownership rule and its Go guest.
+func (v *validation) load(ctx context.Context, contract *offline.Contract, manifest []byte, desc *plg.Descriptor,
+	opts *offline.Options,
 ) bool {
-	logger := slog.New(slog.NewTextHandler(v.env.Stderr, nil))
 	plugin := &offline.Plugin{Files: v.files, Key: v.key(), Manifest: manifest}
-	opts := &offline.Options{Logger: logger, CacheDir: v.cacheDir}
 
-	if v.repo != nil {
-		opts.Limits, opts.RequireOwnership = v.repo.Limits, v.repo.RequireOwnership
-	}
-
-	if opts.Limits != (directive.Limits{}) {
-		v.table.row("limits", stepOK, opts.Limits.String()+" ("+authorrepo.FileName+")")
-	}
-
-	report, err := offline.Check(ctx, loaded.Contract, plugin, opts)
+	report, err := offline.Check(ctx, contract, plugin, opts)
 	if err != nil {
 		return v.failed("load", err)
 	}
