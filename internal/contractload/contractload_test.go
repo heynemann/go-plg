@@ -383,6 +383,50 @@ func TestCheckGoChecksVendoredPackages(t *testing.T) {
 	require.ErrorContains(t, err, "it imports example.com/repo/lib")
 }
 
+// TestCheckGoChecksTheFilesTheGuestLoads leaves out the files the Go guest's interpreter skips, in the plugin and
+// its vendored packages: names starting with "_" or ".", names of another GOOS or GOARCH than wasip1/wasm, and
+// files whose `// +build` lines do not hold. It reads no `//go:build` line, so a file only that line excludes is
+// checked, and refused as the guest refuses it.
+//
+//nolint:paralleltest // as TestDescribesContractsAsReflectionDoes
+func TestCheckGoChecksTheFilesTheGuestLoads(t *testing.T) {
+	loaded, err := contractload.Load("../testcontract", reflect.TypeFor[testcontract.Fooer]().PkgPath(), "Fooer", "")
+	require.NoError(t, err)
+
+	file := func(src string) *fstest.MapFile { return &fstest.MapFile{Data: []byte(src)} }
+	redeclared := file("package p\n\nconst Word = 1\n")
+	plugin := fstest.MapFS{
+		"p/plugin.go": file("package p\n\nimport \"example.com/repo/lib\"\n\n" +
+			"func Greet() string { return Word + Arch + Wasm + Built + lib.Word }\n"),
+		"p/word_wasip1.go":       file("package p\n\nconst Word = \"w\"\n"),
+		"p/arch_wasip1_wasm.go":  file("package p\n\nconst Arch = \"a\"\n"),
+		"p/wasm.go":              file("package p\n\nconst Wasm = \"m\"\n"),
+		"p/built.go":             file("// +build wasip1,go1.21\n\npackage p\n\nconst Built = \"b\"\n"),
+		"p/_old.go":              redeclared,
+		"p/.hidden.go":           redeclared,
+		"p/word_windows.go":      redeclared,
+		"p/word_linux_amd64.go":  redeclared,
+		"p/word_wasip1_arm64.go": redeclared,
+		"p/generate.go": file(
+			"//go:build ignore\n// +build ignore\n\npackage main\n\nfunc main() {}\n",
+		),
+		"p/native.go":                                  file("// +build !wasip1\n\npackage p\n\nconst Word = 1\n"),
+		"p/vendor/example.com/repo/lib/lib.go":         file("package lib\n\nconst Word = \"l\"\n"),
+		"p/vendor/example.com/repo/lib/lib_windows.go": file("package lib\n\nconst Word = 1\n"),
+	}
+	require.NoError(t, loaded.CheckGo(plugin, "p"))
+
+	plugin["p/generate.go"] = file("//go:build ignore\n\npackage main\n\nfunc main() {}\n")
+	err = loaded.CheckGo(plugin, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes)
+	require.ErrorContains(t, err, "p/generate.go:3:1: package main; expected package p")
+
+	plugin["p/generate.go"] = file("// +build ignore\n\npackag main\n")
+	err = loaded.CheckGo(plugin, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes, "the guest reads no constraint of a file without a package clause")
+	require.ErrorContains(t, err, "p/generate.go:3:1: expected 'package', found packag")
+}
+
 // contractDir writes a contract package of the given declarations, importing context, to a temporary directory.
 func contractDir(t *testing.T, decls string) string {
 	t.Helper()
