@@ -641,7 +641,8 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 
 // snapshotPlugin copies a plugin's files into the snapshot it returns, under the snapshot limits (see [Storage]), and
 // resolves its version: a content hash of the snapshot when its descriptor gives none. Files opened as an
-// [Artifact] are used as they are, and its provenance recorded.
+// [Artifact] are used as they are, and its provenance recorded; their content hash is its digest, which
+// [OpenArtifact] checked them against.
 func snapshotPlugin(ctx context.Context, src *source, opened fs.FS) (*memfs.FS, error) {
 	src.provenance = nil
 	if art, ok := opened.(*Artifact); ok {
@@ -653,7 +654,11 @@ func snapshotPlugin(ctx context.Context, src *source, opened fs.FS) (*memfs.FS, 
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
-	if src.desc.Version == "" {
+	switch {
+	case src.desc.Version != "":
+	case src.provenance != nil: // OpenArtifact checked these files against its digest
+		src.desc.Version = src.provenance.Digest
+	default:
 		src.desc.Version = artifact.Digest(files)
 	}
 
