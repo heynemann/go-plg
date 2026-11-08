@@ -545,10 +545,11 @@ func parseIssue(file string, node *yaml.Node) (issue, error) {
 
 	var want issue
 
-	for key, field := range map[string]**string{
-		"code": &want.code, "field": &want.field, "message": &want.message, "severity": &want.severity,
-	} {
-		*field, err = optionalText(file, keys[key], key)
+	for _, f := range []struct {
+		field **string
+		key   string
+	}{{&want.code, "code"}, {&want.field, "field"}, {&want.message, "message"}, {&want.severity, "severity"}} {
+		*f.field, err = optionalText(file, keys[f.key], f.key)
 		if err != nil {
 			return issue{}, err
 		}

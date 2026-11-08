@@ -427,6 +427,11 @@ func TestMalformedCasesFailAlone(t *testing.T) {
 			"an issue field not a string", "- {name: x, call: Validate, expect: {issues: [{code: [a]}]}}",
 			"code is a string, not a list",
 		},
+		{
+			"two malformed issue fields, the first key reported",
+			"- {name: x, call: Validate, expect: {issues: [{field: [b], code: [a]}]}}",
+			"tests/t.yaml:2:66: code is a string, not a list",
+		},
 	}
 
 	for _, tc := range tests {
