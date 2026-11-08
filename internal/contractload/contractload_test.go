@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/contractload"
 	"github.com/heynemann/go-plg/internal/directive"
@@ -24,6 +25,10 @@ import (
 	"github.com/heynemann/go-plg/internal/testcontract"
 	"github.com/heynemann/go-plg/internal/wire"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 // TestDescribesContractsAsReflectionDoes loads contracts from their source and holds what plg validate gets to
 // what a service gets from reflection: the same dispatcher, byte for byte, and the same script schema, planned

@@ -7,10 +7,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/testproxy"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 // modules is the testdata's contract modules.
 func modules() string {
