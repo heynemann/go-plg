@@ -36,7 +36,7 @@ const (
 )
 
 // PluginState describes a plugin its registration's storages list, as [Info] and [Plugins] return it. Its reports
-// and LastPanic are the container's own: treat them as read-only.
+// and LastPanic are the container's own and its Provenance the artifact's: treat them as read-only.
 type PluginState struct {
 	// LoadedAt is when the load of the version served ended (Load.At plus Load.Duration); zero when none serves.
 	LoadedAt time.Time
@@ -52,7 +52,8 @@ type PluginState struct {
 	// LastPanic is the newest of the PanicErrors Panics counts; nil when there is none.
 	LastPanic *PanicError
 	// Provenance is the provenance of the artifact the version served was loaded from (its storage's Open
-	// returned an [Artifact]); nil when none serves or it was not loaded from one.
+	// returned an [Artifact]); nil when none serves or it was not loaded from one. It is the artifact's own: treat
+	// it as read-only.
 	Provenance *Provenance
 	// Key is the plugin's key, "<name>/<descriptor key>".
 	Key string
