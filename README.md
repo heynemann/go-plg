@@ -1211,7 +1211,8 @@ an existing registration:
 
 ```go
 report, err := plg.Check(ctx, c, "pricing", &plg.Descriptor{
-	Key: "discounts", Language: plg.LanguageGo, Entrypoint: ".", Owner: &owner,
+	Key: "discounts", Implements: "example.com/shop/pricing.Rule@v1.0.0", Language: plg.LanguageGo,
+	Entrypoint: ".", Owner: &owner,
 }, uploadedFiles) // any fs.FS
 switch {
 case err != nil: // could not check: unknown name (ErrNotFound), ErrClosed, ErrMemoryBudget, ctx ended
