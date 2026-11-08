@@ -87,15 +87,36 @@ func runDev(env *Env, args []string) outcome {
 	return session.loop(ctx)
 }
 
-// devPlugin returns the plugin directory plg dev runs on, as named on the command line: arg, or the only plugin of
-// the author repository arg is.
+// devPlugin returns the plugin directory plg dev runs on, as named on the command line: arg when it holds a
+// plugin.yaml or an author repository lists it, or the only plugin of the author repository arg is. Any other
+// directory is refused, so that plg dev watches no tree that is not a plugin's.
 func devPlugin(env *Env, arg string) (string, outcome, bool) {
 	dir := resolve(env.Dir, arg)
 
-	if exists(filepath.Join(dir, "plugin.yaml")) || !authorrepo.Exists(dir) {
+	switch {
+	case exists(filepath.Join(dir, "plugin.yaml")):
 		return arg, outcome{}, true
+	case authorrepo.Exists(dir):
+		return repositoryPlugin(dir, arg)
 	}
 
+	repo, err := authorrepo.Find(dir)
+	if err != nil {
+		return "", failure("dev", err), false
+	}
+
+	if repo != nil {
+		if _, listed := repo.Lists(dir); listed {
+			return arg, outcome{}, true
+		}
+	}
+
+	return "", usageError("dev", fmt.Sprintf("%s is not a plugin directory: it has no plugin.yaml or %s and no "+
+		"author repository lists it", dir, authorrepo.FileName)), false
+}
+
+// repositoryPlugin returns the only plugin of the author repository in dir, named arg on the command line.
+func repositoryPlugin(dir, arg string) (string, outcome, bool) {
 	repo, err := authorrepo.Load(dir)
 	if err != nil {
 		return "", failure("dev", err), false
@@ -116,7 +137,7 @@ type devSession struct {
 }
 
 // loop validates the plugin, then again on each change and as the commands read from stdin say, until stdin ends,
-// a quit command or ctx ends.
+// a quit command, the watcher stops or ctx ends. A watcher's error fails it.
 func (s *devSession) loop(ctx context.Context) outcome {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -127,7 +148,12 @@ func (s *devSession) loop(ctx context.Context) outcome {
 	}
 
 	paths := s.watched()
-	changes := watch(ctx, paths)
+
+	changes, err := watch(ctx, paths)
+	if err != nil {
+		return failure("dev", err)
+	}
+
 	lines := readLines(ctx, s.env.Stdin)
 
 	s.validate(ctx)
@@ -140,13 +166,10 @@ func (s *devSession) loop(ctx context.Context) outcome {
 		select {
 		case <-ctx.Done():
 			return outcome{code: exitOK}
-		case changed, open := <-changes:
-			if !open {
-				return outcome{code: exitOK}
+		case change, open := <-changes:
+			if res, goOn := s.changed(ctx, change, open); !goOn {
+				return res
 			}
-
-			s.printf("\nchanged: %s\n", strings.Join(changed, ", "))
-			s.validate(ctx)
 		case line, open := <-lines:
 			if !open {
 				s.printf("\n")
@@ -159,6 +182,24 @@ func (s *devSession) loop(ctx context.Context) outcome {
 			}
 		}
 	}
+}
+
+// changed validates the plugin again after the watcher's change, and reports whether plg dev goes on: when the
+// watcher stopped (open is false) or failed, it does not, ending as the outcome says.
+func (s *devSession) changed(ctx context.Context, change Change, open bool) (outcome, bool) {
+	switch {
+	case !open:
+		return outcome{code: exitOK}, false
+	case change.Err != nil:
+		s.printf("\n")
+
+		return failure("dev", change.Err), false
+	}
+
+	s.printf("\nchanged: %s\n", strings.Join(change.Paths, ", "))
+	s.validate(ctx)
+
+	return outcome{}, true
 }
 
 // watched returns the paths plg dev watches: the plugin directory (its tests among its files) and, when an author
@@ -341,7 +382,7 @@ func readLines(ctx context.Context, input io.Reader) <-chan string {
 }
 
 // pollWatch is plg dev's default watcher: it looks at the files under paths every pollInterval.
-func pollWatch(ctx context.Context, paths []string) <-chan []string {
+func pollWatch(ctx context.Context, paths []string) (<-chan Change, error) {
 	ticker := time.NewTicker(pollInterval)
 	context.AfterFunc(ctx, ticker.Stop)
 
@@ -349,39 +390,62 @@ func pollWatch(ctx context.Context, paths []string) <-chan []string {
 }
 
 // watchTicks looks at the files under paths on each tick, sending the paths of those created, changed (in size,
-// mode or modification time) or removed since it last looked, until ctx ends.
-func watchTicks(ctx context.Context, paths []string, ticks <-chan time.Time) <-chan []string {
-	changes := make(chan []string)
-	last := snapshot(paths) // before returning: a change made once it returns is one
+// mode or modification time) or removed since it last looked, until ctx ends. It fails, or sends its error and
+// stops, when the files are more than a plugin can hold (see snapshot).
+func watchTicks(ctx context.Context, paths []string, ticks <-chan time.Time) (<-chan Change, error) {
+	last, err := snapshot(paths) // before returning: a change made once it returns is one
+	if err != nil {
+		return nil, err
+	}
 
-	go func() {
-		defer close(changes)
+	changes := make(chan Change)
+	go watch(ctx, paths, last, ticks, changes)
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticks:
-			}
+	return changes, nil
+}
 
-			now := snapshot(paths)
+// watch sends to changes, on each tick, the paths of the files that changed since last, until ctx ends or a
+// snapshot fails, whose error it sends; it closes changes when it returns.
+func watch(ctx context.Context, paths []string, last map[string]fileStamp, ticks <-chan time.Time,
+	changes chan<- Change,
+) {
+	defer close(changes)
 
-			changed := changedFiles(last, now)
-			if len(changed) == 0 {
-				continue
-			}
-
-			select {
-			case changes <- changed:
-			case <-ctx.Done():
-				return
-			}
-
-			last = now
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
 		}
-	}()
 
-	return changes
+		now, err := snapshot(paths)
+		if err != nil {
+			send(ctx, changes, Change{Err: err})
+
+			return
+		}
+
+		changed := changedFiles(last, now)
+		if len(changed) == 0 {
+			continue
+		}
+
+		if !send(ctx, changes, Change{Paths: changed}) {
+			return
+		}
+
+		last = now
+	}
+}
+
+// send sends change to changes, and reports whether it did before ctx ended.
+func send(ctx context.Context, changes chan<- Change, change Change) bool {
+	select {
+	case changes <- change:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // fileStamp is what tells a file's versions apart.
@@ -391,27 +455,62 @@ type fileStamp struct {
 	mode    fs.FileMode
 }
 
-// snapshot stamps the files under paths; those it cannot read are left out.
-func snapshot(paths []string) map[string]fileStamp {
-	files := map[string]fileStamp{}
+// snapshot stamps the files under paths; those it cannot read are left out. Once the entries under paths (files,
+// directories and others, the directories paths name not counted) are more than a plugin can hold,
+// plg.MaxPluginEntries, it stops looking and fails with plg.ErrPluginTooLarge, naming the entry that went over.
+func snapshot(paths []string) (map[string]fileStamp, error) {
+	stamped := stamps{files: map[string]fileStamp{}}
 
 	for _, root := range paths {
-		//nolint:errcheck,gosec // the walk function never fails
+		var over error
+
+		//nolint:errcheck,gosec // the walk function only returns fs.SkipAll, which WalkDir does not
 		filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil || entry.IsDir() {
+			if err != nil || path == root && entry.IsDir() {
 				return nil //nolint:nilerr // an unreadable file is left out, the walk goes on
 			}
 
-			info, err := entry.Info()
-			if err == nil {
-				files[path] = fileStamp{modTime: info.ModTime(), size: info.Size(), mode: info.Mode()}
+			over = stamped.add(path, entry)
+			if over != nil {
+				return fs.SkipAll
 			}
 
 			return nil
 		})
+
+		if over != nil {
+			return nil, over
+		}
 	}
 
-	return files
+	return stamped.files, nil
+}
+
+// stamps is a snapshot being taken: the files stamped and the entries counted so far.
+type stamps struct {
+	files   map[string]fileStamp
+	entries int
+}
+
+// add counts the entry at path and stamps it if it is a file, failing with plg.ErrPluginTooLarge when it brings the
+// entries over plg.MaxPluginEntries.
+func (s *stamps) add(path string, entry fs.DirEntry) error {
+	s.entries++
+	if s.entries > plg.MaxPluginEntries {
+		return fmt.Errorf("%w: %s brings the files plg dev watches over %d entries", plg.ErrPluginTooLarge, path,
+			plg.MaxPluginEntries)
+	}
+
+	if entry.IsDir() {
+		return nil
+	}
+
+	info, err := entry.Info()
+	if err == nil {
+		s.files[path] = fileStamp{modTime: info.ModTime(), size: info.Size(), mode: info.Mode()}
+	}
+
+	return nil
 }
 
 // changedFiles returns the paths, sorted, whose stamps differ between before and after.

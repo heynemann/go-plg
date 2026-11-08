@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/adminjson"
 	"github.com/heynemann/go-plg/internal/offline"
 )
@@ -61,7 +63,8 @@ func TestWatchTicksReportsChangedFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin]\n"), 0o600))
 
 	ticks := make(chan time.Time)
-	changes := watchTicks(t.Context(), []string{plugin, repo}, ticks)
+	changes, err := watchTicks(t.Context(), []string{plugin, repo}, ticks)
+	require.NoError(t, err)
 
 	tick := func() { ticks <- time.Time{} }
 
@@ -69,16 +72,16 @@ func TestWatchTicksReportsChangedFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(test, []byte("cases: []\n"), 0o600))
 	require.NoError(t, os.WriteFile(outside, []byte("x"), 0o600))
 	tick()
-	assert.Equal(t, []string{test}, <-changes)
+	assert.Equal(t, Change{Paths: []string{test}}, <-changes)
 
 	require.NoError(t, os.WriteFile(filepath.Join(plugin, "plugin.lua"), []byte("ab"), 0o600))
 	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin, other]\n"), 0o600))
 	tick()
-	assert.Equal(t, []string{repo, filepath.Join(plugin, "plugin.lua")}, <-changes) // sorted
+	assert.Equal(t, Change{Paths: []string{repo, filepath.Join(plugin, "plugin.lua")}}, <-changes) // sorted
 
 	require.NoError(t, os.Remove(test))
 	tick()
-	assert.Equal(t, []string{test}, <-changes)
+	assert.Equal(t, Change{Paths: []string{test}}, <-changes)
 
 	for range 2 { // the watcher takes the second tick only if the first one, with nothing changed, sent nothing
 		select {
@@ -89,6 +92,56 @@ func TestWatchTicksReportsChangedFiles(t *testing.T) {
 	}
 }
 
+// TestWatchTicksStopsAtThePluginLimits: plg dev's watcher watches up to as many entries (files and directories,
+// the watched directories not counted) as a plugin can hold, plg.MaxPluginEntries, under the watched paths
+// together. A tick that finds one more sends ErrPluginTooLarge naming it, and the watcher stops; a watcher started
+// on that many fails at once.
+func TestWatchTicksStopsAtThePluginLimits(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	plugin, shared := filepath.Join(dir, "plugin"), filepath.Join(dir, "lib")
+	repo := filepath.Join(dir, "plg.yaml")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(plugin, "tests"), 0o750))
+	require.NoError(t, os.Mkdir(shared, 0o750))
+	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin]\nshared: [lib]\n"), 0o600))
+
+	for i := range plg.MaxPluginEntries - 2 { // with tests and plg.yaml
+		parent := filepath.Join(plugin, "tests")
+		if i%2 == 1 {
+			parent = shared
+		}
+
+		require.NoError(t, os.WriteFile(filepath.Join(parent, fmt.Sprintf("f%05d", i)), nil, 0o600))
+	}
+
+	paths := []string{plugin, repo, shared}
+	ticks := make(chan time.Time)
+
+	changes, err := watchTicks(t.Context(), paths, ticks)
+	require.NoError(t, err, "as many entries as a plugin holds are watched")
+
+	over := filepath.Join(shared, "over")
+	require.NoError(t, os.WriteFile(over, nil, 0o600))
+
+	ticks <- time.Time{}
+
+	want := fmt.Sprintf("plg: plugin files too large: %s brings the files plg dev watches over %d entries", over,
+		plg.MaxPluginEntries)
+	change := <-changes
+	require.ErrorIs(t, change.Err, plg.ErrPluginTooLarge)
+	require.EqualError(t, change.Err, want)
+	assert.Empty(t, change.Paths)
+
+	_, open := <-changes
+	assert.False(t, open, "the watcher stopped")
+
+	changes, err = watchTicks(t.Context(), paths, ticks)
+	require.EqualError(t, err, want)
+	assert.Nil(t, changes)
+}
+
 // TestPollWatchReportsAChange runs plg dev's default watcher, which polls on its own ticker: a file created under the
 // watched directory is reported, and the channel closes once the context ends.
 func TestPollWatchReportsAChange(t *testing.T) {
@@ -96,11 +149,12 @@ func TestPollWatchReportsAChange(t *testing.T) {
 
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
-	changes := pollWatch(ctx, []string{dir})
+	changes, err := pollWatch(ctx, []string{dir})
+	require.NoError(t, err)
 
 	file := filepath.Join(dir, "plugin.lua")
 	require.NoError(t, os.WriteFile(file, []byte("a"), 0o600))
-	assert.Equal(t, []string{file}, <-changes)
+	assert.Equal(t, Change{Paths: []string{file}}, <-changes)
 
 	cancel()
 

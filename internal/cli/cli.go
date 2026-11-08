@@ -113,7 +113,9 @@ commands:
                       compilation cache between runs. Reads commands from stdin: call <Method> [input file]
                       calls one method (or Validate) in a fresh instance with the parameters the YAML input file
                       names (as a test case's input; the Host and HTTP requests fail) and prints its result; run
-                      validates again; quit (or the end of the input) stops
+                      validates again; quit (or the end of the input) stops. The directory needs a plugin.yaml, a
+                      plg.yaml or an author repository listing it, and watching fails once the watched files are
+                      more than a plugin holds (plg.MaxPluginEntries entries)
   status [-profile name] [-format table|json] [-team name] [key]
                       show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
                       detail; -team keeps the plugins whose owner team is name
@@ -144,11 +146,18 @@ type Env struct {
 	// Environ returns the environment (os.Environ): the variables plg reads and those the go command and git run
 	// with; nil means the process's.
 	Environ func() []string
-	// Watch watches the files under paths (directories and files) for plg dev until ctx ends, sending the paths
-	// that changed; nil polls the file system every quarter of a second.
-	Watch func(ctx context.Context, paths []string) <-chan []string
+	// Watch watches the files under paths (directories and files) for plg dev until ctx ends, sending what changed;
+	// an error says it cannot watch them. nil polls the file system every quarter of a second, failing once the
+	// files are more than a plugin can hold.
+	Watch func(ctx context.Context, paths []string) (<-chan Change, error)
 	// Dir is the working directory, against which relative paths resolve.
 	Dir string
+}
+
+// Change is what plg dev's watcher sends: the paths that changed, or, last, the error that stopped it.
+type Change struct {
+	Err   error
+	Paths []string
 }
 
 // environ returns the environment commands run in.

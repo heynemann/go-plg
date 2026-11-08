@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/cli"
 	"github.com/heynemann/go-plg/internal/testproxy"
 )
@@ -59,7 +62,7 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 	environ.Store(&start)
 
 	watched := make(chan []string, 1)
-	changes := make(chan []string)
+	changes := make(chan cli.Change)
 	stdin, typed := io.Pipe()
 	printed, stdout := io.Pipe()
 	done := make(chan int, 1)
@@ -70,10 +73,10 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 		done <- cli.Main([]string{"dev", "pricing"}, &cli.Env{
 			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return *environ.Load() }, Dir: root,
-			Watch: func(_ context.Context, paths []string) <-chan []string {
+			Watch: func(_ context.Context, paths []string) (<-chan cli.Change, error) {
 				watched <- paths
 
-				return changes
+				return changes, nil
 			},
 		})
 	}()
@@ -91,7 +94,7 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 	source := filepath.Join(plugin, "plugin.lua")
 	replaceIn(t, plugin, "plugin.lua", "return { total = 0,", "return { total = 1,")
 
-	changes <- []string{source}
+	changes <- cli.Change{Paths: []string{source}}
 
 	second := untilPrompt(t, out)
 	assert.Contains(t, second, "changed: "+source+"\n")
@@ -138,7 +141,9 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 }
 
 // TestDevUsage checks plg dev's arguments: one plugin directory at most, an author repository listing several
-// plugins needs one named, and an invalid one fails.
+// plugins needs one named, and an invalid one fails. A directory that is no plugin's (no plugin.yaml, no plg.yaml
+// and no author repository listing it: empty, missing, or one a repository does not list) is refused, so that plg
+// dev does not watch its files.
 func TestDevUsage(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +165,27 @@ func TestDevUsage(t *testing.T) {
 	ran = plgInEnv(nil, invalid, "dev")
 	assert.Equal(t, 1, ran.code)
 	assert.Contains(t, ran.stderr, "plg dev: invalid plg.yaml: ")
+
+	require.NoError(t, os.Mkdir(filepath.Join(invalid, "sub"), 0o750))
+
+	ran = plgInEnv(nil, invalid, "dev", "sub")
+	assert.Equal(t, 1, ran.code)
+	assert.Contains(t, ran.stderr, "plg dev: invalid plg.yaml: ")
+
+	repo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "plg.yaml"), []byte("plugins: [a]\n"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "a"), 0o750))
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "unlisted"), 0o750))
+
+	empty := t.TempDir()
+	for _, tc := range []struct{ dir, arg string }{
+		{empty, "."}, {empty, "missing"}, {repo, "unlisted"}, {repo, filepath.Join("unlisted", "deeper")},
+	} {
+		ran = plgInEnv(nil, tc.dir, "dev", tc.arg)
+		assert.Equal(t, 2, ran.code, tc.arg)
+		assert.True(t, strings.HasPrefix(ran.stderr, "plg dev: "+filepath.Join(tc.dir, tc.arg)+" is not a plugin "+
+			"directory: it has no plugin.yaml or plg.yaml and no author repository lists it\n"), ran.stderr)
+	}
 }
 
 // devSession is plg dev running in the background with an injected watcher and stdin.
@@ -167,7 +193,7 @@ type devSession struct {
 	t       *testing.T
 	typed   *io.PipeWriter
 	out     *bufio.Reader
-	changes chan []string
+	changes chan cli.Change
 	watched chan []string
 	done    chan int
 }
@@ -179,7 +205,7 @@ func startDev(t *testing.T, environ []string, dir string, args ...string) *devSe
 	stdin, typed := io.Pipe()
 	printed, stdout := io.Pipe()
 	session := &devSession{
-		t: t, typed: typed, out: bufio.NewReader(printed), changes: make(chan []string),
+		t: t, typed: typed, out: bufio.NewReader(printed), changes: make(chan cli.Change),
 		watched: make(chan []string, 1), done: make(chan int, 1),
 	}
 
@@ -189,10 +215,10 @@ func startDev(t *testing.T, environ []string, dir string, args ...string) *devSe
 		session.done <- cli.Main(append([]string{"dev"}, args...), &cli.Env{
 			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return environ }, Dir: dir,
-			Watch: func(_ context.Context, paths []string) <-chan []string {
+			Watch: func(_ context.Context, paths []string) (<-chan cli.Change, error) {
 				session.watched <- paths
 
-				return session.changes
+				return session.changes, nil
 			},
 		})
 	}()
@@ -279,15 +305,78 @@ func TestDevStopsWhenTheWatcherDoes(t *testing.T) {
 	code := cli.Main([]string{"dev", "rule"}, &cli.Env{
 		Stdout: &stdout, Stderr: io.Discard,
 		Environ: func() []string { return environ }, Dir: root,
-		Watch: func(context.Context, []string) <-chan []string {
-			closed := make(chan []string)
+		Watch: func(context.Context, []string) (<-chan cli.Change, error) {
+			closed := make(chan cli.Change)
 			close(closed)
 
-			return closed
+			return closed, nil
 		},
 	})
 	assert.Equal(t, 0, code)
 	assert.Contains(t, stdout.String(), "plg dev: "+filepath.Join(root, "rule")+" is valid\n")
+}
+
+// errWatch is the error of a watcher that fails.
+var errWatch = errors.New("watching failed")
+
+// TestDevFailsWhenItsWatcherDoes runs plg dev on a plugin directory its author repository lists, before its
+// plugin.yaml is written: it validates it (the manifest fails), then fails with the error its watcher sends. A
+// watcher that cannot start fails it before anything is validated.
+func TestDevFailsWhenItsWatcherDoes(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "plg.yaml"), []byte("plugins: [a, b]\n"), 0o600))
+
+	for _, plugin := range []string{"a", "b"} {
+		require.NoError(t, os.Mkdir(filepath.Join(repo, plugin), 0o750))
+	}
+
+	dev := func(watch func(context.Context, []string) (<-chan cli.Change, error)) validated {
+		var stdout, stderr bytes.Buffer
+
+		code := cli.Main([]string{"dev", "a"}, &cli.Env{
+			Stdout: &stdout, Stderr: &stderr, Environ: func() []string { return nil }, Dir: repo, Watch: watch,
+		})
+
+		return validated{stdout: stdout.String(), stderr: stderr.String(), code: code}
+	}
+
+	ran := dev(func(context.Context, []string) (<-chan cli.Change, error) {
+		failed := make(chan cli.Change, 1)
+		failed <- cli.Change{Err: errWatch}
+
+		return failed, nil
+	})
+	assert.Equal(t, 1, ran.code)
+	assert.Contains(t, ran.stdout, "plg dev: "+filepath.Join(repo, "a")+" is not a valid plugin\n")
+	assert.True(t, strings.HasSuffix(ran.stdout, devPrompt+"\n"), ran.stdout)
+	assert.Equal(t, "plg dev: watching failed\n", ran.stderr)
+
+	ran = dev(func(context.Context, []string) (<-chan cli.Change, error) { return nil, errWatch })
+	assert.Equal(t, 1, ran.code)
+	assert.Empty(t, ran.stdout, "nothing was validated")
+	assert.Equal(t, "plg dev: watching failed\n", ran.stderr)
+}
+
+// TestDevWatchesNoMoreThanAPluginHolds runs plg dev, with its default watcher, on a plugin directory holding more
+// entries than a plugin can (plg.MaxPluginEntries): it fails before validating, naming the entry that brings the
+// files over.
+func TestDevWatchesNoMoreThanAPluginHolds(t *testing.T) {
+	t.Parallel()
+
+	plugin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("language: lua\n"), 0o600))
+
+	for i := range plg.MaxPluginEntries { // before plugin.yaml, in lexical order
+		require.NoError(t, os.WriteFile(filepath.Join(plugin, fmt.Sprintf("f%05d", i)), nil, 0o600))
+	}
+
+	ran := plgInEnv(nil, plugin, "dev")
+	assert.Equal(t, 1, ran.code)
+	assert.Empty(t, ran.stdout, "nothing was validated")
+	assert.Equal(t, fmt.Sprintf("plg dev: plg: plugin files too large: %s brings the files plg dev watches over %d "+
+		"entries\n", filepath.Join(plugin, "plugin.yaml"), plg.MaxPluginEntries), ran.stderr)
 }
 
 // TestDevStopsAtTheEndOfItsInput runs plg dev with its default watcher on a plugin in a repository that does not
@@ -329,7 +418,7 @@ func TestDevReusesTheCompilationCache(t *testing.T) {
 	created := plgInEnv(environ, root, "init", "-implements", pricingRule, "-lang", "lua", "pricing")
 	require.Equal(t, 0, created.code, created.stdout+created.stderr)
 
-	changes := make(chan []string)
+	changes := make(chan cli.Change)
 	stdin, typed := io.Pipe()
 	printed, stdout := io.Pipe()
 	done := make(chan int, 1)
@@ -340,7 +429,7 @@ func TestDevReusesTheCompilationCache(t *testing.T) {
 		done <- cli.Main([]string{"dev", "-cache-dir", cache, "pricing"}, &cli.Env{
 			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return environ }, Dir: root,
-			Watch: func(context.Context, []string) <-chan []string { return changes },
+			Watch: func(context.Context, []string) (<-chan cli.Change, error) { return changes, nil },
 		})
 	}()
 
@@ -354,7 +443,7 @@ func TestDevReusesTheCompilationCache(t *testing.T) {
 
 	replaceIn(t, plugin, "plugin.lua", "return { total = 0,", "return { total = 0 ,")
 
-	changes <- []string{filepath.Join(plugin, "plugin.lua")}
+	changes <- cli.Change{Paths: []string{filepath.Join(plugin, "plugin.lua")}}
 
 	assert.Contains(t, untilPrompt(t, out), "plg dev: "+plugin+" is valid\n")
 	assert.Equal(t, compiled, cacheFiles(t, cache), "the second run compiles nothing new")
