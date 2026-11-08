@@ -15,13 +15,15 @@ BUDGET_OUT := $(BIN)/budgets.txt
 
 # go test's -timeout, per test binary: a hang detector, not a speed limit, at about twice what the slowest binary
 # takes on CI (GitHub's 4-CPU ubuntu-latest), so that a hang fails the run within minutes while a slow runner does
-# not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package: 486-600+ s on CI when three of
-# its tests compiled the custom Go guest cold under the race detector, past go's 10-minute default; 383 s -> 215 s
-# on 4 CPUs here with a cold compilation cache once each guest compiled once (`make warm`, TestMain), so about
-# 350 s on CI, which ran it 1.6 times slower. SHORT_TEST_TIMEOUT is the other runs': `make repeat`'s root package
-# took 124 s on CI, then 283 s (run 42480219888) and past 300 s (run 42481291163, timed out at 5m) as the unit
-# tests grew, so 10m. Benchmarks run outside -timeout.
-TEST_TIMEOUT := 12m
+# not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package, which runs alongside the other
+# packages' tests: 471-545 s on CI on main, then 515-792 s as the other packages' tests grew, killed twice by go
+# test at 13m12s (12m and a tenth; the binary's own alarm, 12m, times its tests but not its TestMain, which built
+# the custom Go guest cold). The same run on 4 CPUs here, with a cold go build cache as CI's: 401 s, and 342 s once
+# `make warm` fills the build cache; CI runs it 1.3-2 times slower, so about 450-690 s, and 25m.
+# SHORT_TEST_TIMEOUT is the other runs': `make repeat`'s root package took 124 s on CI, then 283 s (run
+# 42480219888) and past 300 s (run 42481291163, timed out at 5m) as the unit tests grew, so 10m. Benchmarks run
+# outside -timeout.
+TEST_TIMEOUT := 25m
 SHORT_TEST_TIMEOUT := 10m
 
 # golangci-lint is pinned and built with the repo's toolchain, into bin/, with a cache of its own. A binary built
@@ -134,8 +136,17 @@ $(GOLANGCI_LINT):
 # and a cold cache is what CI gets whenever a guest artifact changes its cache key. The compiled code is the same,
 # so the race-instrumented tests read it from the cache like any other run's. -validate compiles the TypeScript
 # compiler plg validate runs too (about 10 s cold), which internal/cli's tests use.
+# Then fill the go build cache with what every custom Go guest build shares (`plg build-guest`, and plg validate
+# of a plugin naming guest packages: the root package's TestMain, internal/buildguest, internal/cli, cmd/plg),
+# built as internal/buildguest builds it: the yaegi command for this machine (-trimpath) and the default guest's
+# packages for wasip1 (-trimpath -buildvcs=false -buildmode=c-shared). CI's build cache is cold (setup-go's
+# cache is keyed by go.sum and holds the modules), so each of those tests compiled them itself, several at once,
+# while the root package ran: 60 CPU-seconds once here, after which the root package's TestMain takes 5 s
+# instead of 26 s (65 CPU-seconds) and internal/buildguest's tests 8 s instead of 44 s, on 4 CPUs.
 warm:
 	go run ./cmd/plg warm -validate
+	go build -trimpath -o /dev/null github.com/traefik/yaegi/cmd/yaegi
+	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o /dev/null ./guestsrc/golang
 
 # Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
 # caps the parallel subtests (each holding wasm instances under the race detector): the root package's run peaks
