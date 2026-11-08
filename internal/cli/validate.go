@@ -97,7 +97,7 @@ func (f reportFlags) output(env *Env) *output {
 // runValidate runs `plg validate`.
 func runValidate(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
-	loading, report := newValidateFlags(flags), newReportFlags(flags)
+	loading, reporting := newValidateFlags(flags), newReportFlags(flags)
 	nearLimit := flags.Float64("near-limit", defaultNearLimit, "flag test cases whose peak memory or time is at "+
 		"or above this share of its limit")
 
@@ -106,13 +106,13 @@ func runValidate(env *Env, args []string) outcome {
 		return res
 	}
 
-	if msg := validateUsage(operands, *report.format, *report.colour, *nearLimit); msg != "" {
+	if msg := validateUsage(operands, *reporting.format, *reporting.colour, *nearLimit); msg != "" {
 		return usageError("validate", msg)
 	}
 
 	run := loading.validation(env, operands[0], *nearLimit)
 
-	rep, err := validateTarget(&run, report.output(env))
+	rep, err := validateTarget(&run, reporting.output(env))
 	if err != nil {
 		return failure("validate", err)
 	}

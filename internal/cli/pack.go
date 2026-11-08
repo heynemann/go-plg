@@ -60,14 +60,14 @@ type packed struct {
 func runPack(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
 	outDir := flags.String("o", ".", "the directory the artifacts are written to")
-	loading, report := newValidateFlags(flags), newReportFlags(flags)
+	loading, reporting := newValidateFlags(flags), newReportFlags(flags)
 
 	operands, res, ok := parseMixed("pack", flags, args)
 	if !ok {
 		return res
 	}
 
-	if msg := validateUsage(operands, *report.format, *report.colour, defaultNearLimit); msg != "" {
+	if msg := validateUsage(operands, *reporting.format, *reporting.colour, defaultNearLimit); msg != "" {
 		return usageError("pack", msg)
 	}
 
@@ -82,7 +82,7 @@ func runPack(env *Env, args []string) outcome {
 
 	run.packed = func(p *packed) { plugins = append(plugins, p) }
 
-	rep, err := validateTarget(&run, report.output(env))
+	rep, err := validateTarget(&run, reporting.output(env))
 	if err != nil {
 		return failure("pack", err)
 	}
