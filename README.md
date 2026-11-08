@@ -770,7 +770,8 @@ otherwise. `-host` applies to every plugin.
   The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create` and each test case's
   `Create` and call; the pool has no effect
   on `plg validate`, which runs one instance.
-- **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
+- **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner is an error that fails
+  the `manifest` step and stops the run there.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
   cache needed): the contract step and the load warn that the pin is not checked against it, as a service built
   with a directory replace does. `plg pack` refuses to pack while one is set.
