@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/heynemann/go-plg/internal/buildguest"
 	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goallow"
@@ -215,15 +216,16 @@ func Load(dir, importPath string, imp types.Importer) (*Package, error) {
 }
 
 // Directives returns the plg directives on the doc comment of the type the package declares as name (see package
-// directive): a malformed one fails with [directive.ErrDirective], naming where it is, as does a
-// //plg:validation naming no type of the package. A type without them has none.
+// directive), its guest packages checked as plg build-guest checks them: a malformed one fails with
+// [directive.ErrDirective], naming where it is, as does a //plg:validation naming no type of the package. A type
+// without them has none.
 func (p *Package) Directives(name string) (directive.Directives, error) {
 	spec, doc := p.typeSpec(name)
 	if spec == nil {
 		return directive.Directives{}, nil
 	}
 
-	dirs, err := directive.Parse(doc)
+	dirs, err := directive.Parse(doc, buildguest.CheckPackages)
 	if err == nil && dirs.Validation != "" {
 		if _, isType := p.Types.Scope().Lookup(dirs.Validation).(*types.TypeName); !isType {
 			err = fmt.Errorf("%w: //plg:validation %s: package %s declares no type %[2]s", directive.ErrDirective,

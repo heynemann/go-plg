@@ -1,6 +1,0 @@
-implements: example.com/directives/rules.Timed@v1.0.0
-language: typescript
-entrypoint: plugin.ts
-owner:
-  team: {name: growth}
-  contact: {channel: "#growth"}

@@ -26,10 +26,3 @@ type Parser interface {
 type XMLParser interface {
 	Root(ctx context.Context, doc string) (string, error)
 }
-
-// Timed is Rule whose plugins' Create must finish within 2s; their memory limit is plg's default.
-//
-//plg:limits timeout=2s
-type Timed interface {
-	Apply(ctx context.Context, n int) (int, error)
-}

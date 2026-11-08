@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestout"
@@ -92,11 +93,14 @@ type launcher struct {
 	key     string
 	lang    Language
 	payload []byte
+	// createTimeout bounds each instance's Create, and not its instantiation before it; 0 does not.
+	createTimeout time.Duration
 }
 
-// start starts an instance, mounting the plugin's files, and runs the plugin's Create. A guest that panics,
-// traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate]. Until start returns the
-// instance, it is start's to close: a failed Create closes it, and so does a panic on the way to the pool.
+// start starts an instance, mounting the plugin's files, and runs the plugin's Create, within createTimeout when
+// set. A guest that panics, traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate].
+// Until start returns the instance, it is start's to close: a failed Create closes it, and so does a panic on the
+// way to the pool.
 //
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
 func (l *launcher) start(ctx context.Context) (instance, error) {
@@ -121,7 +125,16 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 		}
 	}()
 
-	err = l.create(ctx, inst, out)
+	createCtx := ctx
+
+	if l.createTimeout > 0 {
+		var cancel context.CancelFunc
+
+		createCtx, cancel = context.WithTimeout(ctx, l.createTimeout)
+		defer cancel()
+	}
+
+	err = l.create(createCtx, inst, out)
 	created = true
 
 	if err != nil {

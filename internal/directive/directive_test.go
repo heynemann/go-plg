@@ -2,6 +2,7 @@ package directive_test
 
 import (
 	"go/ast"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +29,30 @@ func doc(lines ...string) *ast.CommentGroup {
 	return group
 }
 
+// parse is directive.Parse with plg build-guest's check of the guest packages, the one plg gen passes.
+func parse(group *ast.CommentGroup) (directive.Directives, error) {
+	return directive.Parse(group, buildguest.CheckPackages) //nolint:wrapcheck // the error under test, as is
+}
+
+// TestPlgLinksNoGuestTooling checks the link graph: plg's library links this package for Limits, and through it
+// none of plg build-guest's tooling, which Parse takes from its caller.
+func TestPlgLinksNoGuestTooling(t *testing.T) {
+	t.Parallel()
+
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", "-f", "{{.ImportPath}}",
+		"github.com/heynemann/go-plg").Output()
+	require.NoError(t, err)
+
+	deps := strings.Fields(string(out))
+	require.Contains(t, deps, "github.com/heynemann/go-plg/internal/directive")
+	assert.NotContains(t, deps, "github.com/heynemann/go-plg/internal/buildguest")
+	assert.NotContains(t, deps, "github.com/heynemann/go-plg/internal/goallow")
+}
+
 func TestParseReadsEveryDirective(t *testing.T) {
 	t.Parallel()
 
-	dirs, err := directive.Parse(doc(
+	dirs, err := parse(doc(
 		"// Rule is implemented by reward rules.",
 		"//",
 		"//plg:limits memory=64MiB timeout=2s pool=1..8",
@@ -55,7 +76,7 @@ func TestParseWithoutDirectives(t *testing.T) {
 		"no doc comment": nil,
 		"prose only":     doc("// Rule is implemented by reward rules."),
 	} {
-		dirs, err := directive.Parse(group)
+		dirs, err := parse(group)
 		require.NoError(t, err, name)
 		assert.Equal(t, directive.Directives{}, dirs, name)
 	}
@@ -85,7 +106,7 @@ func TestParseLimitsOneKeyAtATime(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		dirs, err := directive.Parse(doc("//plg:limits " + tc.directive))
+		dirs, err := parse(doc("//plg:limits " + tc.directive))
 		require.NoError(t, err, tc.directive)
 		assert.Equal(t, tc.want, dirs.Limits, tc.directive)
 	}
@@ -146,13 +167,13 @@ func TestParseRejectsMalformedDirectives(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		_, err := directive.Parse(doc("// Rule is a rule.", tc.line))
+		_, err := parse(doc("// Rule is a rule.", tc.line))
 		require.ErrorIs(t, err, directive.ErrDirective, tc.line)
 		require.ErrorContains(t, err, tc.line+": ", "the error quotes the directive")
 		require.ErrorContains(t, err, tc.msg, tc.line)
 	}
 
-	_, err := directive.Parse(doc("//plg:guest-packages strings"))
+	_, err := parse(doc("//plg:guest-packages strings"))
 	require.ErrorIs(t, err, buildguest.ErrPackages, "build-guest's own error, wrapped")
 }
 
@@ -160,7 +181,7 @@ func TestParseRejectsRepeatedDirectives(t *testing.T) {
 	t.Parallel()
 
 	for _, name := range []string{"limits memory=64MiB", "guest-packages encoding/xml", "validation Input"} {
-		_, err := directive.Parse(doc("//plg:"+name, "// prose between", "//plg:"+name))
+		_, err := parse(doc("//plg:"+name, "// prose between", "//plg:"+name))
 		require.ErrorIs(t, err, directive.ErrDirective, name)
 		assert.ErrorContains(t, err, "//plg:"+name+": invalid plg directive: repeated", name)
 	}
@@ -212,7 +233,7 @@ func TestStringWritesWhatParseReads(t *testing.T) {
 			continue
 		}
 
-		dirs, err := directive.Parse(doc("//plg:limits " + want))
+		dirs, err := parse(doc("//plg:limits " + want))
 		require.NoError(t, err, want)
 		assert.Equal(t, limits, dirs.Limits, want)
 	}
@@ -236,7 +257,7 @@ func FuzzParse(f *testing.F) {
 			t.Skip("a // comment is one line")
 		}
 
-		dirs, err := directive.Parse(doc(line))
+		dirs, err := parse(doc(line))
 		if err != nil {
 			require.ErrorIs(t, err, directive.ErrDirective)
 
@@ -254,7 +275,7 @@ func FuzzParse(f *testing.F) {
 		assert.LessOrEqual(t, limits.Memory, uint64(directive.MaxMemory))
 		assert.GreaterOrEqual(t, limits.Timeout, time.Duration(0))
 
-		again, err := directive.Parse(doc("//plg:limits " + limits.String()))
+		again, err := parse(doc("//plg:limits " + limits.String()))
 		require.NoError(t, err, "String writes what Parse reads")
 		assert.Equal(t, limits, again.Limits)
 	})

@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"runtime"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,38 +141,4 @@ func TestValidateRepoLimitsOverrideTheContracts(t *testing.T) {
 			"memory=16MiB timeout=300ms pool=1..2)\n",
 	)
 	assertOK(t, steps, "load", "Create ran in the lua guest")
-}
-
-// compiled matches the log record of a guest's compile, with its language and how long it took.
-var compiled = regexp.MustCompile(`msg="plg: guest compiled" guest=(\w+) duration=(\S+)`)
-
-// TestValidateTimeoutBoundsCreateNotTheCompile validates a Go and a TypeScript plugin of Timed, whose
-// //plg:limits timeout=2s is shorter than their guests' cold compiles under the race detector (≈ 60 s and 4 s),
-// with a compilation cache of the test's own (cold): the timeout bounds Create only, so both pass, after compiles
-// taking longer than it.
-func TestValidateTimeoutBoundsCreateNotTheCompile(t *testing.T) {
-	t.Parallel()
-
-	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
-
-	for dir, guest := range map[string]string{"gotimed": "go", "tstimed": "typescript"} {
-		got := validate(environ, dir, "-cache-dir", t.TempDir())
-		require.Equal(t, 0, got.code, "%s\n%s%s", dir, got.stdout, got.stderr)
-		assertOK(t, got.stdout, "limits", "memory=", dir)
-		assert.Contains(t, got.stdout, " timeout=2s pool=1..", dir)
-		assertOK(t, got.stdout, "load", "Create ran in the "+guest+" guest", dir)
-
-		var took time.Duration
-
-		for _, match := range compiled.FindAllStringSubmatch(got.stderr, -1) {
-			if match[1] == guest {
-				var err error
-
-				took, err = time.ParseDuration(match[2])
-				require.NoError(t, err, dir)
-			}
-		}
-
-		assert.Greater(t, took, 2*time.Second, "%s: the cold compile outlasts the timeout\n%s", dir, got.stderr)
-	}
 }

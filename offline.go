@@ -74,7 +74,7 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 		return nil, err
 	}
 
-	cfg.startTimeout = opts.Limits.Timeout
+	cfg.createTimeout = opts.Limits.Timeout
 
 	//nolint:contextcheck // New takes no context: what the container starts ends with its Close, below
 	ctr := New(WithLogger(opts.Logger), WithCompilationCacheDir(opts.CacheDir))

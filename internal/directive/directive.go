@@ -8,6 +8,9 @@
 // those), guest-packages the packages beyond the Go guest's allowlist its Go plugins may import (plg validate
 // builds that custom guest, as plg build-guest does), and validation names the data type the registration's
 // validation passes to the plugins' Validate. plg gen checks them: a malformed directive fails generation.
+//
+// plg's library links this package for [Limits], so it imports no guest tooling: [Parse] takes the check of the
+// guest packages from its caller.
 package directive
 
 import (
@@ -16,8 +19,6 @@ import (
 	"go/ast"
 	"go/token"
 	"strings"
-
-	"github.com/heynemann/go-plg/internal/buildguest"
 )
 
 // ErrDirective reports a malformed plg directive.
@@ -37,8 +38,10 @@ type Directives struct {
 }
 
 // Parse reads the plg directives of doc, an interface's doc comment (nil for none): the lines starting with
-// //plg:. Each directive may appear once. Errors wrap [ErrDirective] and quote the directive.
-func Parse(doc *ast.CommentGroup) (Directives, error) {
+// //plg:. Each directive may appear once. checkPackages checks the import paths of //plg:guest-packages as plg
+// build-guest checks its packages (buildguest.CheckPackages). Errors wrap [ErrDirective] (and checkPackages's
+// error) and quote the directive.
+func Parse(doc *ast.CommentGroup, checkPackages func(pkgs []string) error) (Directives, error) {
 	var dirs Directives
 
 	if doc == nil {
@@ -64,7 +67,7 @@ func Parse(doc *ast.CommentGroup) (Directives, error) {
 
 		err := fmt.Errorf("%w: repeated; write each directive once", ErrDirective)
 		if !seen[name] {
-			err = dirs.parse(name, fields)
+			err = dirs.parse(name, fields, checkPackages)
 		}
 
 		if err != nil {
@@ -77,15 +80,15 @@ func Parse(doc *ast.CommentGroup) (Directives, error) {
 	return dirs, nil
 }
 
-// parse reads the directive name with its fields into dirs.
-func (dirs *Directives) parse(name string, fields []string) error {
+// parse reads the directive name with its fields into dirs, checking guest packages with checkPackages.
+func (dirs *Directives) parse(name string, fields []string, checkPackages func(pkgs []string) error) error {
 	var err error
 
 	switch name {
 	case "limits":
 		dirs.Limits, err = parseLimits(fields)
 	case "guest-packages":
-		dirs.GuestPackages, err = parsePackages(fields)
+		dirs.GuestPackages, err = parsePackages(fields, checkPackages)
 	case "validation":
 		dirs.Validation, err = parseValidation(fields)
 	default:
@@ -127,9 +130,9 @@ func parseLimits(fields []string) (Limits, error) {
 	return limits, nil
 }
 
-// parsePackages reads the import paths of //plg:guest-packages, checked as plg build-guest checks its packages.
-func parsePackages(fields []string) ([]string, error) {
-	err := buildguest.CheckPackages(fields)
+// parsePackages reads the import paths of //plg:guest-packages, checked by checkPackages.
+func parsePackages(fields []string, checkPackages func(pkgs []string) error) ([]string, error) {
+	err := checkPackages(fields)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrDirective, err)
 	}

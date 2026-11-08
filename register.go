@@ -749,12 +749,13 @@ func (c *Container) newLauncher(reg *registration, key string, src *source, owne
 	mod *engine.Module, meters *pluginMeters, spans *pluginSpans,
 ) *launcher {
 	return &launcher{
-		mod:     mod,
-		output:  c.panics.pluginLogger(key, src.desc.Language, owner),
-		panics:  c.panics,
-		owner:   owner,
-		spans:   spans,
-		payload: spec.payload,
+		mod:           mod,
+		output:        c.panics.pluginLogger(key, src.desc.Language, owner),
+		panics:        c.panics,
+		owner:         owner,
+		spans:         spans,
+		payload:       spec.payload,
+		createTimeout: reg.cfg.createTimeout,
 		opts: engine.InstanceOptions{
 			Mounts:      spec.mounts,
 			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters, spans),

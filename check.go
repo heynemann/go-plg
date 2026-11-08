@@ -115,15 +115,7 @@ func (c *Container) check(ctx context.Context, reg *registration, key string, sr
 		return err
 	}
 
-	startCtx, cancel := ctx, context.CancelFunc(func() {})
-	if reg.cfg.startTimeout > 0 {
-		startCtx, cancel = context.WithTimeout(ctx, reg.cfg.startTimeout)
-	}
-
-	inst, release, err := c.startCharged(startCtx, launch, src.limit, src.limit)
-
-	cancel()
-
+	inst, release, err := c.startCharged(ctx, launch, src.limit, src.limit)
 	if err != nil {
 		return err
 	}

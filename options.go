@@ -113,7 +113,7 @@ type registerConfig struct {
 	memoryLimit       uint64             // per-instance limit, whole pages
 	pollInterval      time.Duration      // zero: no polling
 	validationTimeout time.Duration      // WithValidationTimeout
-	startTimeout      time.Duration      // plg validate's: bounds a checked instance's start (its Create); 0 does not
+	createTimeout     time.Duration      // plg validate's: bounds each instance's Create, not its start; 0 does not
 	poolMin           int
 	poolMax           int
 	concurrent        int // WithConcurrentCalls
