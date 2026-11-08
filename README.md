@@ -2122,7 +2122,8 @@ allocations (2.5 KB) per call, before any export.
   [`examples/authorguide`](examples/authorguide) its author guide, with the service on the artifacts it packs.
 
 Their tests start MinIO and PostgreSQL with [testcontainers](https://golang.testcontainers.org/), so they need
-Docker, and the author repository's tests run its CI script in a git repository, so they need `git` and `sh` too:
+Docker, and the author repository's tests run its CI script in a git repository and the author guide's commands, so
+they need `git`, `sh` and `curl` too:
 `make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`
 (RULES.md §7), so a run leaves no container behind whether it passes or fails.
 
@@ -2134,7 +2135,7 @@ Docker, and the author repository's tests run its CI script in a git repository,
   has a `-timeout` to catch hangs), the 95% per-package coverage gate (on that run's profile; `scripts/gate-test.sh`
   tests it and checks that every test container is terminated through its test's cleanup), allocation and
   benchmark budgets, a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples
-  module, Docker, `git` and `sh` required).
+  module, Docker, `git`, `sh` and `curl` required).
 - `make guests` rebuilds the guest artifacts with pinned toolchains, and the TypeScript compiler `plg validate`
   runs (`internal/tscheck/tsgo.wasm.gz`: typescript-go's `tsgo`, pinned by the module in `guestsrc/tscheck`, built
   for wasip1); `make verify-guests` checks that the committed ones are reproducible.
