@@ -288,6 +288,21 @@ func TestComposeRefusesWhatItCannotCopy(t *testing.T) {
 	require.ErrorContains(t, err, "cannot copy a shared directory into the plugin: a: the plugin already has lib, "+
 		"where lib is copied")
 
+	escape := repoDir(t, "plugins: [a]\nshared: [ui/kit]\n", map[string]string{"ui/kit/k.ts": "k"})
+	elsewhere := t.TempDir()
+	require.NoError(t, os.Symlink(elsewhere, filepath.Join(escape, "a", "ui")))
+
+	repo, err = authorrepo.Load(escape)
+	require.NoError(t, err)
+
+	_, err = repo.Compose(t.TempDir(), "a", "")
+	require.ErrorIs(t, err, authorrepo.ErrCompose)
+	require.ErrorContains(t, err, "path escapes from parent", "the plugin's link ui -> elsewhere is not followed")
+
+	entries, err := os.ReadDir(elsewhere)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing is written outside the destination")
+
 	noModule := repoDir(t, "plugins: [a]\nshared: [lib]\n", map[string]string{"lib/x.go": "package lib\n"})
 	repo, err = authorrepo.Load(noModule)
 	require.NoError(t, err)
@@ -327,7 +342,7 @@ func TestComposeRefusesWhatItCannotCopy(t *testing.T) {
 	require.ErrorIs(t, err, plg.ErrPluginTooLarge)
 	require.ErrorContains(t, err, "big.bin")
 
-	entries, err := os.ReadDir(dst)
+	entries, err = os.ReadDir(dst)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "nothing is copied before the sizes are checked")
 }

@@ -34,7 +34,7 @@ type Placement struct {
 	At string
 }
 
-// treeCopy is a directory to copy.
+// treeCopy is a directory to copy: from, into the directory into below the destination.
 type treeCopy struct {
 	from, into string
 }
@@ -45,12 +45,14 @@ type treeCopy struct {
 // package is the directory goPackage of its files, under goPackage/vendor at the shared directory's import path
 // (its go.mod's module path and its path below it), as Go vendors packages, and only shared directories holding Go
 // files. Symbolic links are copied as links; other irregular files are left out, as a storage leaves them out.
-// It fails with [ErrCompose] when a shared directory would replace a file of the plugin, when a Go shared
-// directory is in no module, and with [plg.ErrPluginTooLarge] when the files to copy are over the limits of a
-// plugin's files, before copying them.
+// Everything is written through a root opened on dst, so nothing lands outside it, not even through a link of the
+// plugin's on the way to a shared directory's place (ui -> /elsewhere with a shared ui/kit fails).
+// It fails with [ErrCompose] when a shared directory would replace a file of the plugin or leave dst, when a Go
+// shared directory is in no module, and with [plg.ErrPluginTooLarge] when the files to copy are over the limits of
+// a plugin's files, before copying them.
 func (r *Repo) Compose(dst, plugin, goPackage string) ([]Placement, error) {
 	src := filepath.Join(r.Dir, filepath.FromSlash(plugin))
-	copies := []treeCopy{{from: src, into: dst}}
+	copies := []treeCopy{{from: src, into: "."}}
 	placements := make([]Placement, 0, len(r.Shared))
 
 	for _, shared := range r.Shared {
@@ -63,7 +65,7 @@ func (r *Repo) Compose(dst, plugin, goPackage string) ([]Placement, error) {
 			placements = append(placements, *placement)
 			copies = append(copies, treeCopy{
 				from: filepath.Join(r.Dir, filepath.FromSlash(shared)),
-				into: filepath.Join(dst, filepath.FromSlash(placement.At)),
+				into: filepath.FromSlash(placement.At),
 			})
 		}
 	}
@@ -73,11 +75,9 @@ func (r *Repo) Compose(dst, plugin, goPackage string) ([]Placement, error) {
 		return nil, err
 	}
 
-	for _, c := range copies {
-		err = copyTree(c.from, c.into)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrCompose, err)
-		}
+	err = copyInto(dst, copies)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCompose, err)
 	}
 
 	return placements, nil
@@ -168,10 +168,32 @@ func checkSize(name string, size, total int64) error {
 	return nil
 }
 
-// copyTree copies the directory from into the directory into, which it creates: directories, regular files and
-// symbolic links (as links), each opened relative to its root so that no link is followed.
-func copyTree(from, into string) error {
-	err := os.MkdirAll(into, dirMode)
+// copyInto copies every tree into its directory below dst, which it creates, through a root opened on dst.
+func copyInto(dst string, copies []treeCopy) error {
+	err := os.MkdirAll(dst, dirMode)
+	if err != nil {
+		return err //nolint:wrapcheck // the error names the directory
+	}
+
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err //nolint:wrapcheck // the error names the directory
+	}
+
+	for _, c := range copies {
+		err = copyTree(root, c.from, c.into)
+		if err != nil {
+			break
+		}
+	}
+
+	return errors.Join(err, root.Close())
+}
+
+// copyTree copies the directory from into the directory into of the root dst, which it creates: directories,
+// regular files and symbolic links (as links), each opened relative to its root so that no link leads out of it.
+func copyTree(dst *os.Root, from, into string) error {
+	err := dst.MkdirAll(into, dirMode)
 	if err != nil {
 		return err //nolint:wrapcheck // the error names the directory
 	}
@@ -183,7 +205,7 @@ func copyTree(from, into string) error {
 
 	defer src.Close() //nolint:errcheck // read only
 
-	dst, err := os.OpenRoot(into)
+	target, err := dst.OpenRoot(into)
 	if err != nil {
 		return err //nolint:wrapcheck // the error names the directory
 	}
@@ -193,10 +215,10 @@ func copyTree(from, into string) error {
 			return err
 		}
 
-		return copyEntry(src, dst, name, entry.Type())
+		return copyEntry(src, target, name, entry.Type())
 	})
 
-	return errors.Join(err, dst.Close())
+	return errors.Join(err, target.Close())
 }
 
 // copyEntry copies the entry name, of type mode, from the root src to the root dst.

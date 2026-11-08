@@ -58,8 +58,9 @@ type Options struct {
 	CacheDir string
 	// GoGuest is the custom Go guest (plg.WithGoGuest) a Go plugin runs in; nil runs the linked one.
 	GoGuest []byte
-	// Limits are the limits the plugin runs under: its memory limit (plg.WithMemoryLimit) and pool
-	// (plg.WithPool) when set, and its Timeout bounds Create. Unset ones are plg's defaults ([Defaults]).
+	// Limits are the limits the plugin runs under: its memory limit (plg.WithMemoryLimit) when set, and its Timeout
+	// bounds Create. Its pool is checked as plg.WithPool checks one, and changes nothing: the check runs one
+	// instance. Unset ones are plg's defaults ([Defaults]).
 	Limits directive.Limits
 	// RequireOwnership makes missing ownership an error, as plg.WithRequiredOwnership does.
 	RequireOwnership bool

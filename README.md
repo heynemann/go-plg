@@ -525,8 +525,9 @@ output, compiles, issues) also goes.
 - **limits:** the limits the plugin runs under: an [author repository](#author-repositories-plgyaml)'s `limits`
   over the contract's `//plg:limits`, and plg's defaults for what neither sets (the plugin language's memory limit,
   a pool of 1 to GOMAXPROCS instances, no timeout); the row says where they come from (`memory=64MiB timeout=300ms
-  pool=1..2 (plg.yaml memory=64MiB over //plg:limits memory=16MiB timeout=300ms pool=1..2)`). The memory limit and
-  pool are the check's Register options, and the timeout bounds `Create`.
+  pool=1..2 (plg.yaml memory=64MiB over //plg:limits memory=16MiB timeout=300ms pool=1..2)`). The memory limit is
+  the check's `WithMemoryLimit`, and the timeout bounds `Create` (not the guest compile or bundling before it). The
+  pool is checked as `WithPool` checks it and printed, but changes nothing here: the check runs one instance.
 - **go.mod** (Go plugins): the `go.mod` of the plugin's module (its directory's or the nearest above) must require
   the contract module at the pinned version, after its `replace` directives; a `replace` by a local directory is
   a warning, since its version cannot be told. When they differ, the step names the one to change, the older of
@@ -573,7 +574,7 @@ shared:                  # directories copied into every plugin's files
 limits:                  # override the contract's //plg:limits for every plugin
   memory: 64MiB          # bytes, or KiB, MiB, GiB; from 64KiB to 4GiB
   timeout: 2s            # bounds Create (not the guest compile or bundling before it)
-  pool: 1..8             # N or MIN..MAX, from 1 to 4096
+  pool: 1..8             # N or MIN..MAX, from 1 to 4096; plg validate runs one instance, so only printed
 requireOwnership: true   # a plugin without a complete owner fails instead of warning
 replace:                 # contract modules taken from local checkouts, like go.mod's replace
   example.com/rewards: ../rewards
@@ -623,7 +624,8 @@ otherwise. `-host` applies to every plugin.
   directory must be in a Go module.
 - **limits** override, key by key, the limits the contract recommends (its `//plg:limits`), raising or lowering
   them; the `limits` row shows those in force and where each comes from.
-  The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create`.
+  The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create`; the pool has no effect
+  on `plg validate`, which runs one instance.
 - **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
   cache needed): the contract step and the load warn that the pin is not checked against it, as a service built
