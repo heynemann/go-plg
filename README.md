@@ -361,8 +361,12 @@ func Create() (greeter.Greeter, error)                  // without a Host
 func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[greeter.Host]
 ```
 
-- Every `.go` file of the directory (and below) is loaded; `_test.go` files are skipped. Since a Go plugin is
-  plain Go, unit-test it natively (as `examples/plugins/bulk` does).
+- The package's `.go` files are loaded as a build for `wasip1`/`wasm` would select them: `_test.go` files, names
+  starting with `_` or `.`, and names ending in another GOOS or GOARCH (`_windows.go`, `_linux_amd64.go`) are
+  skipped, and so are files whose `// +build` lines do not hold. The guest's interpreter (yaegi) reads no
+  `//go:build` line: a file only `//go:build` excludes (`//go:build ignore`) is loaded, so add `// +build ignore`
+  below it. `plg validate` type-checks the same files. Since a Go plugin is plain Go, unit-test it natively (as
+  `examples/plugins/bulk` does).
 - The package name does not matter (`package main` works too).
 - **Standard library allowlist:** `bufio bytes cmp context encoding/base64 encoding/hex encoding/json errors fmt io
   maps math math/big math/bits math/cmplx math/rand math/rand/v2 net/http (client side, through the host) net/url
