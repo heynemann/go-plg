@@ -83,7 +83,9 @@ type rawEntry struct {
 }
 
 // rawArchive returns a gzip-compressed tar archive of entries, then trailing bytes of zeros after the archive's
-// end; with open set, the archive is cut after the last header, its data missing.
+// end; with open set, the archive is cut after the last header, its data missing. It compresses at BestSpeed:
+// the archives over the limits hold up to 208 MiB of zeros, which the default level took 12 s to compress under
+// the race detector (3.6 times longer, for an archive no smaller).
 //
 //nolint:revive // flag-parameter: open picks the one malformed shape (data missing) the tests need besides whole ones
 func rawArchive(tb testing.TB, trailing int64, open bool, entries ...rawEntry) []byte {
@@ -91,7 +93,9 @@ func rawArchive(tb testing.TB, trailing int64, open bool, entries ...rawEntry) [
 
 	var out bytes.Buffer
 
-	compressed := gzip.NewWriter(&out)
+	compressed, err := gzip.NewWriterLevel(&out, gzip.BestSpeed)
+	require.NoError(tb, err)
+
 	archive := tar.NewWriter(compressed)
 
 	for i, entry := range entries {
@@ -108,13 +112,13 @@ func rawArchive(tb testing.TB, trailing int64, open bool, entries ...rawEntry) [
 			return out.Bytes()
 		}
 
-		_, err := io.WriteString(archive, entry.data)
+		_, err = io.WriteString(archive, entry.data)
 		require.NoError(tb, err)
 	}
 
 	require.NoError(tb, archive.Close())
 
-	_, err := io.CopyN(compressed, zeros{}, trailing)
+	_, err = io.CopyN(compressed, zeros{}, trailing)
 	require.NoError(tb, err)
 	require.NoError(tb, compressed.Close())
 
