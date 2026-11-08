@@ -31,6 +31,7 @@ func validateRepo(base *validation) outcome {
 	for _, plugin := range repo.Plugins {
 		run := *base
 		run.dir, run.repo = filepath.Join(repo.Dir, filepath.FromSlash(plugin)), repo
+		run.arg = filepath.Join(base.arg, filepath.FromSlash(plugin))
 		run.table = newStepTable(base.env.Stdout)
 
 		_, err = fmt.Fprintf(base.env.Stdout, "%s\n", plugin)

@@ -125,8 +125,12 @@ func TestValidateRepoLimitsOverrideTheContracts(t *testing.T) {
 	manifest, err := os.ReadFile(filepath.Join("..", "..", "testdata", "validate", "plugins", "luabig", "plugin.yaml"))
 	require.NoError(t, err)
 
+	typings, err := os.ReadFile(filepath.Join("..", "..", "testdata", "validate", "plugins", "luabig", "plg.d.lua"))
+	require.NoError(t, err)
+
 	repo := copyRepo(t, "plugins: [tightbig]\nlimits: {memory: 64MiB, timeout: 1h}\n", map[string]string{
 		"tightbig/plugin.lua": string(big), "tightbig/plugin.yaml": string(manifest),
+		"tightbig/plg.d.lua": string(typings),
 	})
 
 	got := validate(testproxy.Environ(testproxy.New(t, modules()), t.TempDir()), repo)

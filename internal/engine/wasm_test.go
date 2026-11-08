@@ -37,6 +37,9 @@ func signatureOf(export string) [2][]byte {
 		"http_start":     {{i32, i32, i32}, {i32}},
 		"poll_oneoff":    {{i32, i32, i32, i32}, {i32}},
 		"clock_time_get": {{i32, i64, i32}, {i32}},
+		"_start":         {nil, nil},
+		"proc_exit":      {{i32}, nil},
+		"fd_write":       {{i32, i32, i32, i32}, {i32}},
 	}[export]
 }
 
@@ -60,7 +63,7 @@ func store32() []byte { return []byte{0x36, 0x00, 0x00} }
 
 // importModule is the module a fake guest imports function n from.
 func importModule(n string) string {
-	if n == "poll_oneoff" || n == "clock_time_get" {
+	if n == "poll_oneoff" || n == "clock_time_get" || n == "proc_exit" || n == "fd_write" {
 		return "wasi_snapshot_preview1"
 	}
 

@@ -43,11 +43,14 @@ type Loaded struct {
 	Contract *offline.Contract
 	// ValidationType is the validation input the interface's //plg:validation names; nil without one.
 	ValidationType *types.TypeName
-	pkg            *types.Package // the package, type-checked
-	fset           *token.FileSet // the positions of the standard library packages std imported
-	std            types.Importer // the standard library packages the package imports, shared with Go plugins' checks
-	interpreter    *interpreter   // the package's interpreter, which interprets the Host's methods too
-	implemented    string         // the interface's name
+	// InterfaceType and HostType (nil without a Host) are the interface and the Host as go/types describes them,
+	// which the Lua and TypeScript typings are generated from.
+	InterfaceType, HostType *types.Named
+	pkg                     *types.Package // the package, type-checked
+	fset                    *token.FileSet // the positions of the standard library packages std imported
+	std                     types.Importer // its standard library imports, shared with Go plugins' checks
+	interpreter             *interpreter   // the package's interpreter, which interprets the Host's methods too
+	implemented             string         // the interface's name
 	// Directives are the plg directives on the interface's doc comment.
 	Directives directive.Directives
 }
@@ -106,8 +109,8 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 	contract.Validation = validation
 
 	loaded := &Loaded{
-		Contract: contract, Directives: dirs, pkg: pkg, fset: fset, std: std, interpreter: interpreter,
-		implemented: name, ValidationType: validationType,
+		Contract: contract, InterfaceType: implemented.named, ValidationType: validationType, Directives: dirs,
+		pkg: pkg, fset: fset, std: std, interpreter: interpreter, implemented: name,
 	}
 
 	if host != "" {
@@ -127,12 +130,12 @@ func (l *Loaded) PackageName() string {
 
 // SetHost describes the Host interface name of the contract package as the Contract's Host.
 func (l *Loaded) SetHost(name string) error {
-	host, err := loadHost(l.pkg, l.interpreter, name)
+	host, named, err := loadHost(l.pkg, l.interpreter, name)
 	if err != nil {
 		return fmt.Errorf("host: %w", err)
 	}
 
-	l.Contract.Host = host
+	l.Contract.Host, l.HostType = host, named
 
 	return nil
 }
@@ -150,7 +153,7 @@ func (l *Loaded) Hosts() []*offline.Host {
 			continue
 		}
 
-		host, err := loadHost(l.pkg, l.interpreter, name)
+		host, _, err := loadHost(l.pkg, l.interpreter, name)
 		if err == nil {
 			hosts = append(hosts, host)
 		}
@@ -181,19 +184,19 @@ func validationInput(pkg *types.Package, interpreter *interpreter, name string) 
 	return obj, &offline.Validation{Type: describeNamed(obj), Input: input}, nil
 }
 
-// loadHost describes the Host interface name of pkg.
-func loadHost(pkg *types.Package, interpreter *interpreter, name string) (*offline.Host, error) {
+// loadHost describes the Host interface name of pkg, and returns it as go/types describes it.
+func loadHost(pkg *types.Package, interpreter *interpreter, name string) (*offline.Host, *types.Named, error) {
 	host, err := lookup(pkg, name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	methods, err := interpreter.methods(host)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &offline.Host{Interface: host.described, Methods: methods, Params: params(host)}, nil
+	return &offline.Host{Interface: host.described, Methods: methods, Params: params(host)}, host.named, nil
 }
 
 // params names the parameters after the context of each method of the interface, in method index order (see

@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -25,10 +26,13 @@ import (
 	"github.com/heynemann/go-plg/internal/contractload"
 	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/directive"
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/internal/testcase"
+	"github.com/heynemann/go-plg/internal/tscheck"
+	"github.com/heynemann/go-plg/internal/typings"
 )
 
 // plgModule is plg's module, whose version as this command was built decides the custom Go guests' plg.
@@ -60,7 +64,7 @@ func runValidate(env *Env, args []string) outcome {
 	}
 
 	dir := resolve(env.Dir, operands[0])
-	run := validation{env: env, dir: dir, host: *host, cacheDir: resolve(env.Dir, *cacheDir)}
+	run := validation{env: env, dir: dir, arg: operands[0], host: *host, cacheDir: resolve(env.Dir, *cacheDir)}
 
 	if *guestCache != "" {
 		run.guestCache = resolve(env.Dir, *guestCache)
@@ -87,68 +91,51 @@ func runValidate(env *Env, args []string) outcome {
 	return outcome{code: exitOK}
 }
 
-// validation is one run of plg validate on the plugin directory dir; each step adds its rows to table. repo is the
-// author repository listing the plugin, if any, and files the plugin's files, the repository's shared directories
-// copied in.
+// validation is one run of plg validate (or plg types) on the plugin directory dir, named arg on the command line;
+// each step adds its rows to table. repo is the author repository listing the plugin, if any, and files the
+// plugin's files, the repository's shared directories copied in.
 type validation struct {
 	env        *Env
 	table      *stepTable
 	repo       *authorrepo.Repo
 	files      fs.FS
 	dir        string
+	arg        string
 	host       string
 	cacheDir   string
 	guestCache string   // empty means the default, <user cache>/plg/guests
 	hosts      []string // the contract's Host candidates when there are several and none was chosen
 }
 
+// resolved is what the steps up to the interface found.
+type resolved struct {
+	loaded   *contractload.Loaded
+	mod      modfetch.Module
+	ref      contractref.Ref
+	manifest []byte
+	desc     plg.Descriptor
+}
+
 // run runs the steps in order, stopping at the first that fails; it reports whether every step passed.
 func (v *validation) run(ctx context.Context) bool {
-	if !v.repository() {
-		return false
-	}
-
-	manifest, desc, ok := v.manifest()
-	if !ok {
-		return false
-	}
-
-	cleanup, ok := v.shared(&desc)
+	res, cleanup, ok := v.resolveContract(ctx)
 	if !ok {
 		return false
 	}
 
 	defer cleanup()
 
-	ref, err := contractref.Parse(desc.Implements) // ParseManifest checked it
-	if err != nil {
-		return v.failed("manifest", err)
-	}
+	opts := v.options(&res.desc, res.loaded.Directives.Limits)
 
-	mod, ok := v.resolve(ctx, ref)
-	if !ok {
-		return false
-	}
-
-	loaded, ok := v.contract(ref, mod, &desc)
-	if !ok {
-		return false
-	}
-
-	opts := v.options(&desc, loaded.Directives.Limits)
-	if desc.Language == plg.LanguageGo && !v.goSteps(ctx, ref, mod, loaded, &desc, opts) {
-		return false
-	}
-
-	return v.load(ctx, loaded.Contract, manifest, &desc, opts) && v.tests(ctx, loaded.Contract, manifest, opts)
+	return v.languageChecks(ctx, res, opts) && v.load(ctx, res.loaded.Contract, res.manifest, &res.desc, opts) &&
+		v.tests(ctx, res.loaded.Contract, res.manifest, opts)
 }
 
 // options are the options the plugin loads and its test cases run with: what it writes and what plg logs go to
 // stderr, under its limits (see limits) and the author repository's ownership rule.
 func (v *validation) options(desc *plg.Descriptor, declared directive.Limits) *offline.Options {
 	opts := &offline.Options{
-		Logger: slog.New(slog.NewTextHandler(v.env.Stderr, nil)), CacheDir: v.cacheDir,
-		Limits: v.limits(desc, declared),
+		Logger: v.logger(), CacheDir: v.cacheDir, Limits: v.limits(desc, declared),
 	}
 
 	if v.repo != nil {
@@ -156,6 +143,66 @@ func (v *validation) options(desc *plg.Descriptor, declared directive.Limits) *o
 	}
 
 	return opts
+}
+
+// languageChecks runs the steps of the plugin's language: a Go plugin's go.mod pin, type-check and custom guest,
+// which it sets in opts; a Lua or TypeScript plugin's typings, and a TypeScript plugin's type-check against them.
+func (v *validation) languageChecks(ctx context.Context, res *resolved, opts *offline.Options) bool {
+	if res.desc.Language == plg.LanguageGo {
+		return v.goSteps(ctx, res.ref, res.mod, res.loaded, &res.desc, opts)
+	}
+
+	typ, fresh := v.typings(res)
+
+	return fresh && (res.desc.Language != plg.LanguageTypeScript || v.tsTypes(ctx, typ, res))
+}
+
+// resolveContract runs the steps up to the interface: the author repository, the manifest, the shared
+// directories, the contract module and its interface. When it succeeds the caller runs cleanup once done with
+// the plugin's files.
+func (v *validation) resolveContract(ctx context.Context) (*resolved, func(), bool) {
+	if !v.repository() {
+		return nil, nil, false
+	}
+
+	manifest, desc, ok := v.manifest()
+	if !ok {
+		return nil, nil, false
+	}
+
+	cleanup, ok := v.shared(&desc)
+	if !ok {
+		return nil, nil, false
+	}
+
+	res, ok := v.interfaceSteps(ctx, manifest, &desc)
+	if !ok {
+		cleanup()
+
+		return nil, nil, false
+	}
+
+	return res, cleanup, true
+}
+
+// interfaceSteps resolves the contract module the plugin pins and describes its interface.
+func (v *validation) interfaceSteps(ctx context.Context, manifest []byte, desc *plg.Descriptor) (*resolved, bool) {
+	ref, err := contractref.Parse(desc.Implements) // ParseManifest checked it
+	if err != nil {
+		return nil, v.failed("manifest", err)
+	}
+
+	mod, ok := v.resolve(ctx, ref)
+	if !ok {
+		return nil, false
+	}
+
+	loaded, ok := v.contract(ref, mod, desc)
+	if !ok {
+		return nil, false
+	}
+
+	return &resolved{loaded: loaded, mod: mod, ref: ref, manifest: manifest, desc: *desc}, true
 }
 
 // goSteps runs a Go plugin's own steps: its go.mod's pin, its type-check and its custom guest, which it sets in
@@ -331,8 +378,8 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 }
 
 // contract type-checks the contract package and describes the interface and the Host the plugin's Create takes:
-// -host's, else the one a Go plugin's Create names, else the contract's only interface that passes as a Host for a
-// Lua or TypeScript plugin.
+// -host's, else the one a Go plugin's Create names, else for a Lua or TypeScript plugin the one its committed
+// typings were written for, else the contract's only interface that passes as a Host.
 func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *plg.Descriptor) (
 	*contractload.Loaded, bool,
 ) {
@@ -350,7 +397,10 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	case desc.Language == plg.LanguageGo:
 		host = createHost(v.files, desc.Entrypoint, ref.Package, loaded.PackageName())
 	default:
-		v.defaultHost(loaded, ref.Package)
+		host = typings.HostIn(string(desc.Language), v.files)
+		if host == "" {
+			host = v.defaultHost(loaded, ref.Package)
+		}
 	}
 
 	if host != "" {
@@ -374,26 +424,122 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	return loaded, true
 }
 
-// defaultHost gives a Lua or TypeScript plugin's contract the Host stub of the contract package's only interface
-// that passes plg's Host checks; with several, it keeps their names for the hint after a failed load.
-func (v *validation) defaultHost(loaded *contractload.Loaded, pkgPath string) {
-	var candidates []*offline.Host
+// defaultHost returns the contract package's only interface that passes plg's Host checks, the Host of a Lua or
+// TypeScript plugin; with several, it returns none and keeps their names for the hint after a failed load.
+func (v *validation) defaultHost(loaded *contractload.Loaded, pkgPath string) string {
+	var candidates []string
 
 	for _, host := range loaded.Hosts() {
 		if offline.CheckHost(pkgPath, host) == nil {
-			candidates = append(candidates, host)
+			candidates = append(candidates, host.Interface.Type.Name)
 		}
 	}
 
-	switch len(candidates) {
-	case 0:
-	case 1:
-		loaded.Contract.Host = candidates[0]
-	default:
-		for _, host := range candidates {
-			v.hosts = append(v.hosts, host.Interface.Type.Name)
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	v.hosts = candidates
+
+	return ""
+}
+
+// typings checks that a Lua or TypeScript plugin's committed typings are those plg types generates.
+func (v *validation) typings(res *resolved) (*typings.Typings, bool) {
+	typ, err := generateTypings(res)
+	if err != nil {
+		return nil, v.failed("typings", err)
+	}
+
+	stale := typ.Stale(v.files)
+	if len(stale) > 0 {
+		return nil, v.failed("typings", fmt.Errorf("%w: %s not what plg types writes for %s: run %s",
+			typings.ErrStale, strings.Join(stale, ", "), res.desc.Implements, v.typesCommand(res)))
+	}
+
+	v.table.row("typings", stepOK, strings.Join(typ.Names(), ", ")+" up to date")
+
+	return typ, true
+}
+
+// generateTypings generates the typings of the plugin's language. A contract they cannot describe fails with the
+// error loading a plugin against it would fail with, which names what breaks it.
+func generateTypings(res *resolved) (*typings.Typings, error) {
+	contract := &typings.Contract{
+		Interface: res.loaded.InterfaceType, Host: res.loaded.HostType, Implements: res.desc.Implements,
+	}
+	if res.loaded.ValidationType != nil {
+		if named, ok := types.Unalias(res.loaded.ValidationType.Type()).(*types.Named); ok {
+			contract.Validation = named
 		}
 	}
+
+	typ, err := typings.Generate(string(res.desc.Language), contract)
+	if errors.Is(err, typings.ErrContract) {
+		broken := offline.CheckContract(res.loaded.Contract)
+		if broken != nil {
+			return nil, broken //nolint:wrapcheck // plg's errors name the contract and what breaks it
+		}
+	}
+
+	if err != nil {
+		return nil, err //nolint:wrapcheck // typings' errors say what is wrong
+	}
+
+	return typ, nil
+}
+
+// typesCommand is the plg types command line that writes the plugin's typings.
+func (v *validation) typesCommand(res *resolved) string {
+	cmd := "plg types"
+	if res.loaded.HostType != nil {
+		cmd += " -host " + res.loaded.HostType.Obj().Name()
+	}
+
+	return cmd + " " + v.arg
+}
+
+// tsTypes type-checks a TypeScript plugin against its typings.
+func (v *validation) tsTypes(ctx context.Context, typ *typings.Typings, res *resolved) bool {
+	diags, err := v.typeCheck(ctx, typ, res.desc.Entrypoint)
+	if err != nil {
+		return v.failed("types", err)
+	}
+
+	if len(diags) == 0 {
+		v.table.row("types", stepOK, fmt.Sprintf("the plugin type-checks against %s (%s)",
+			res.loaded.Contract.Interface.Type, typings.TypeScriptFile))
+
+		return true
+	}
+
+	for i := range diags {
+		v.table.row("types", stepFailed, diags[i].String())
+	}
+
+	return false
+}
+
+// typeCheck runs the TypeScript compiler on the plugin, compiled through the compilation cache.
+func (v *validation) typeCheck(ctx context.Context, typ *typings.Typings, entrypoint string) (
+	_ []tscheck.Diagnostic, err error,
+) {
+	eng := engine.New(ctx, engine.Options{Logger: v.logger(), CacheDir: v.cacheDir})
+	rt := eng.NewRuntime(ctx, engine.RuntimeOptions{MemoryLimit: tscheck.MemoryLimit})
+
+	defer func() { err = errors.Join(err, rt.Close(ctx), eng.Close(ctx)) }()
+
+	checker, err := tscheck.Compile(ctx, rt)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // tscheck's errors name it
+	}
+
+	return typ.CheckTypeScript(ctx, checker, v.files, entrypoint) //nolint:wrapcheck // as above
+}
+
+// logger is plg's log during validate: on stderr.
+func (v *validation) logger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(v.env.Stderr, nil))
 }
 
 // goTypes type-checks a Go plugin's package against the contract.

@@ -74,10 +74,13 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 			"manifest   ok      lua plugin luagood implementing example.com/rewards/cohort.Provider@v1.2.0\n",
 			"contract   ok      " + module + "\n",
 			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
+			"typings    ok      plg.d.lua up to date\n",
 			"load       ok      Create ran in the lua guest (version ",
 		}},
 		{"tsgood", []string{
 			"manifest   ok      typescript plugin tsgood implementing example.com/rewards/cohort.Provider@v1.2.0\n",
+			"typings    ok      plg.d.ts, tsconfig.json up to date\n",
+			"types      ok      the plugin type-checks against cohort.Provider (plg.d.ts)\n",
 			"load       ok      Create ran in the typescript guest (version ",
 		}},
 		{"godotimport", []string{ // Create(users Users), the contract dot-imported
@@ -136,7 +139,7 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 	assert.Contains(t, offline.stdout, "contract   ok      "+module+"\n")
 
 	cacheDir := t.TempDir()
-	cached := validate(environ, "tsgood", "-cache-dir", cacheDir)
+	cached := validate(environ, "luagood", "-cache-dir", cacheDir)
 	require.Equal(t, 0, cached.code, "%s%s", cached.stdout, cached.stderr)
 
 	compiled, err := os.ReadDir(cacheDir)
@@ -185,8 +188,15 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 			"load       FAIL    plugin Create failed: ",
 			"           hint    if Create takes a Host, pass -host <Ledger|Users>\n",
 		}},
-		{"Host chosen by -host", []string{"tsv2hosts", "-host", "Users"}, []string{
+		{"Host chosen by -host", []string{"tsv2users", "-host", "Users"}, []string{
 			"interface  ok      rewards.Provider: IsMember; Host rewards.Users: Tier (a stub: every call fails)\n",
+			"load       FAIL    plugin Create failed: plg validate runs plugins without the service's Host: " +
+				"rewards.Users.Tier was called\n",
+		}},
+		{"Host the plugin's typings were written for", []string{"tsv2users"}, []string{
+			"interface  ok      rewards.Provider: IsMember; Host rewards.Users: Tier (a stub: every call fails)\n",
+			"typings    ok      plg.d.ts, tsconfig.json up to date\n",
+			"types      ok      the plugin type-checks against rewards.Provider (plg.d.ts)\n",
 			"load       FAIL    plugin Create failed: plg validate runs plugins without the service's Host: " +
 				"rewards.Users.Tier was called\n",
 		}},
@@ -214,11 +224,11 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 		}},
 		{"interface breaking the contract", []string{"brokencontract"}, []string{
 			"interface  ok      cohort.Broken: Do\n",
-			"load       FAIL    plg: invalid interface cohort.Broken: method Do: first parameter must be " +
+			"typings    FAIL    plg: invalid interface cohort.Broken: method Do: first parameter must be " +
 				"context.Context\n",
 		}},
 		{"Host breaking the contract", []string{"luagood", "-host", "Broken"}, []string{
-			"load       FAIL    plg: invalid host: plg: invalid interface cohort.Broken: method Do: first parameter " +
+			"typings    FAIL    plg: invalid host: plg: invalid interface cohort.Broken: method Do: first parameter " +
 				"must be context.Context\n",
 		}},
 		{

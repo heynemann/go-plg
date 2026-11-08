@@ -1,26 +1,14 @@
-// A pricing rule, like gopricing and luapricing: the three run the same test cases.
-declare const host: { Tier(customer: string): Promise<string> };
-
-interface Line {
-  sku: string;
-  qty: number;
-  cents: number;
-}
-
-interface Order {
-  customer: string;
-  lines: Line[];
-  gift: { message: string } | null;
-}
+// A pricing rule, like gopricing and luapricing: the three run the same test cases. Its types are plg.d.ts's.
 
 const hoard: string[] = [];
 
-class Rule {
-  async Quote(order: Order) {
-    if (order.lines.length === 0) {
+class Rule implements pricing.Rule {
+  async Quote(order: pricing.Order) {
+    const lines = order.lines ?? [];
+    if (lines.length === 0) {
       throw new Error("empty order");
     }
-    const total = order.lines.reduce((sum, line) => sum + line.qty * line.cents, 0);
+    const total = lines.reduce((sum, line) => sum + line.qty * line.cents, 0);
     const quote = { total, discount: 0, reasons: [] as string[] };
     if ((await host.Tier(order.customer)) === "gold") {
       quote.discount = Math.floor(total / 10);
@@ -33,7 +21,7 @@ class Rule {
     return quote;
   }
 
-  Split(cents: number, parts: number) {
+  Split(cents: number, parts: number): [number[], number] {
     if (parts <= 0) {
       throw new Error("no parts");
     }
@@ -62,7 +50,7 @@ class Rule {
     }
   }
 
-  Validate(limits: { maxPercent: number }) {
+  Validate(limits: pricing.Limits): plg.Issue[] {
     if (limits.maxPercent < 10) {
       return [{
         severity: "error", code: "gold.percent", field: "maxPercent",
@@ -73,6 +61,6 @@ class Rule {
   }
 }
 
-export function Create() {
+export function Create(): pricing.Rule {
   return new Rule();
 }

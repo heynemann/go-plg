@@ -104,9 +104,15 @@ TS_SRC := guestsrc/typescript
 # committed gzip-compressed (the module is about 14 MB).
 TS_BUNDLER := guest/typescript/bundler.wasm.gz
 TS_BUNDLER_RAW := $(BIN)/bundler.wasm
+# The TypeScript checker plg validate runs on TypeScript plugins (internal/tscheck): Microsoft's TypeScript compiler
+# written in Go (typescript-go's tsgo command, pinned by the module guestsrc/tscheck, which keeps it out of plg's
+# go.mod) compiled to a wasip1 command with the pinned Go, committed gzip-compressed (the module is about 50 MB).
+# Only the plg command links it.
+TS_CHECKER := internal/tscheck/tsgo.wasm.gz
+TS_CHECKER_RAW := $(BIN)/tsgo.wasm
 
 .PHONY: check fmt-check lint warm test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest \
-	lua-guest ts-guest ts-bundler verify-guests clean
+	lua-guest ts-guest ts-bundler ts-checker verify-guests clean
 
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
@@ -125,9 +131,10 @@ $(GOLANGCI_LINT):
 # Compile the linked guests into the default compilation cache (`plg warm`), without the race detector: under it
 # wazero's compiler runs about ten times slower (the Go guest: 4 s cold natively, 40-65 s under -race on 4 CPUs),
 # and a cold cache is what CI gets whenever a guest artifact changes its cache key. The compiled code is the same,
-# so the race-instrumented tests read it from the cache like any other run's.
+# so the race-instrumented tests read it from the cache like any other run's. -validate compiles the TypeScript
+# compiler plg validate runs too (about 10 s cold), which internal/cli's tests use.
 warm:
-	go run ./cmd/plg warm
+	go run ./cmd/plg warm -validate
 
 # Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
 # caps the parallel subtests (each holding wasm instances under the race detector): the root package's run peaks
@@ -195,7 +202,7 @@ symbols: $(BIN)/yaegi
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
-guests: go-guest lua-guest ts-guest ts-bundler
+guests: go-guest lua-guest ts-guest ts-bundler ts-checker
 
 # Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
 go-guest:
@@ -235,10 +242,18 @@ ts-bundler:
 	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(TS_BUNDLER_RAW) ./guestsrc/tsbundle
 	go run scripts/gzipwasm.go $(TS_BUNDLER_RAW) $(TS_BUNDLER)
 
+# Build the TypeScript checker (typescript-go's tsgo compiled to a wasip1 command), then compress it.
+ts-checker:
+	mkdir -p $(BIN)
+	cd guestsrc/tscheck && GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -o $(TS_CHECKER_RAW) \
+		github.com/microsoft/typescript-go/cmd/tsgo
+	go run scripts/gzipwasm.go $(TS_CHECKER_RAW) $(TS_CHECKER)
+
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests
-	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER)
-	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER))"
+	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER) $(TS_CHECKER)
+	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER) \
+		$(TS_CHECKER))"
 
 clean:
 	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT) examples/$(COVERAGE)

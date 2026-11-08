@@ -27,6 +27,19 @@ func init() {
 	offline.CheckHost = checkOfflineHost
 	offline.Defaults = offlineDefaults
 	offline.Open = openOffline
+	offline.CheckContract = checkOfflineContract
+}
+
+// checkOfflineContract is [offline.CheckContract]: it checks spec's interface and Host as checkOffline does.
+func checkOfflineContract(spec *offline.Contract) error {
+	contr, err := offlineContract(spec)
+	if err != nil {
+		return err
+	}
+
+	_, err = stubHost(contr.pkgPath, contr.described.Type, spec.Host)
+
+	return err
 }
 
 // checkOfflineHost is [offline.CheckHost]: it checks spec as checkOffline checks the Host of a contract of pkgPath.

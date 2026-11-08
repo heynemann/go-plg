@@ -27,7 +27,8 @@ HTTP allowlist).
 - [Guests and blank imports](#guests-and-blank-imports)
 - [Declaring the interface: `implements`](#declaring-the-interface-implements) and
   [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate),
-  also of [author repositories (`plg.yaml`)](#author-repositories-plgyaml)
+  also of [author repositories (`plg.yaml`)](#author-repositories-plgyaml),
+  with [typings for Lua and TypeScript: `plg types`](#typings-plg-types)
 - [Storages](#storages)
 - [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
@@ -417,8 +418,9 @@ export function Create() {
 ```
 
 - esbuild bundles the entrypoint and what it imports by relative path (`.ts`, `.js`, JSON and text files) from
-  the plugin's own files; package, URL and absolute imports fail Register naming `file:line:col`. TypeScript is
-  transpiled, not type-checked.
+  the plugin's own files; package, URL and absolute imports fail Register naming `file:line:col`. At load,
+  TypeScript is transpiled, not type-checked; `plg validate` type-checks it against the plugin's
+  [typings](#typings-plg-types).
 - Bundling runs in a WebAssembly sandbox of its own (esbuild compiled to wasm, shipped in the TypeScript guest),
   never on the host: a plugin can make esbuild work exponentially long with a few hundred bytes (nested
   `export *` layers, deeply nested arrow functions), so a bundling stops when the load's context ends and fails
@@ -539,6 +541,17 @@ output, compiles, issues) also goes.
   a method of the wrong signature fails with its file:line:column (the Go interpreter would accept the plugin and
   fail only once the method is called). Its vendored packages are type-checked with it; a plugin importing a
   package beyond the contract, its vendored packages and the standard library is not type-checked (a warning).
+- **typings** (Lua and TypeScript plugins): the plugin's committed [typings](#typings-plg-types) must be exactly
+  what `plg types` writes for the pinned contract: missing, edited or written for another version, the step fails
+  naming the stale files and the command to run (`run plg types -host Users plugins/gold`).
+- **types** (TypeScript plugins): the plugin is type-checked against its typings, with their `tsconfig.json`, by
+  Microsoft's TypeScript compiler (typescript-go, compiled to WebAssembly and run in plg's engine, so validating
+  needs neither Node.js nor npm): one row per error, at its file:line:column, e.g.
+  `plugin.ts:4:51: Property 'Rank' does not exist on type 'Users'. (TS2339)`. What `Create` returns is checked
+  against the interface even when nothing in the plugin says so: a method returning a string where the contract
+  wants a bool fails with `plugin.ts:13:17: Create: Argument of type '() => Tiers' is not assignable to …` at the
+  export of `Create` (annotating `Create(): cohort.Provider`, or a class with `implements cohort.Provider`, puts
+  the error on the method itself).
 - **guest** (Go plugins of a contract with `//plg:guest-packages`): the custom Go guest with those packages, built
   as `plg build-guest` builds one, from the plugin's module (its `go.mod` and `go.sum`, local `replace`s made
   absolute; the module must provide the non-standard packages). The guest's plg is the version the `plg` command was
@@ -552,12 +565,15 @@ output, compiles, issues) also goes.
   rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
   guest's own checks, then `Create` in one throwaway instance of the real guest. The plugins get a stub Host whose
   every method fails with `plg validate runs plugins without the service's Host: <Host>.<Method> was called`.
-  A Go plugin's `Create` names its Host. Lua and TypeScript plugins name none: when the contract package declares
-  exactly one other interface that passes plg's Host checks, it is their Host; with several, a failed `load` row is
+  A Go plugin's `Create` names its Host. Lua and TypeScript plugins name none: their Host is the one their typings
+  were written for (the `Host:` line of their header); without typings, when the contract package declares exactly
+  one other interface that passes plg's Host checks, it is their Host; with several, a failed `load` row is
   followed by the hint `pass -host <A|B>`, and `-host <Interface>` (an interface of the contract package) picks one.
   Issues follow the `load` row, one row each.
 
-`-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest);
+`-cache-dir` sets the guests' (and the TypeScript compiler's) compilation cache, as for
+[`plg warm`](#deployment-plg-warm-and-plg-build-guest); `plg warm -validate` compiles the TypeScript compiler
+into it ahead of time (about 10 s cold, under a second from the cache).
 `-guest-cache` the directory of the custom Go guests.
 
 ### Test cases: `tests/*.yaml`
@@ -686,6 +702,42 @@ otherwise. `-host` applies to every plugin.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
   cache needed): the contract step and the load warn that the pin is not checked against it, as a service built
   with a directory replace does.
+
+### Typings: `plg types`
+
+Lua and TypeScript authors get editor support from the contract. `plg types <plugin dir>` resolves the contract
+`plugin.yaml` pins (as `plg validate` does) and writes the plugin's typings, which are committed with it:
+
+- **TypeScript:** `plg.d.ts`, declarations of the interface (what `Create` returns; each method may return its
+  result or a Promise of it, several results as an array, plus the optional `Validate` and `Close` plg looks up by
+  name), every type its methods take and return (struct fields under their `json` names; nil-able values, that is
+  slices, maps, pointers and `[]byte`, may be `null`; `time.Time` as `plg.Time`, `{seconds, nanos}`, and a `Date`
+  wherever the plugin hands a time back), the Host as the `host` global (its methods return Promises), the
+  validation input, `plg.Issue`, and the guest's other globals (`console`, `fetch`, `Headers`, `Response`, text
+  imports). Types live in a namespace per Go package (`cohort.Provider`, `cohort.Page`; a package named like a
+  global gets a `_`), so plugins use them without importing anything:
+
+  ```ts
+  export function Create(): cohort.Provider {
+    return {
+      IsMember: async (user) => (await host.Tier(user)) === "gold",
+      List: (cursor) => ({ users: [], next: "" }),
+    };
+  }
+  ```
+
+  And `tsconfig.json`, the compiler options `plg validate` type-checks with (ECMAScript 2023 and plg's globals,
+  no DOM or Node.js, strict), which editors then share.
+- **Lua:** `plg.d.lua`, [Lua Language Server](https://luals.github.io) annotations of the same (a `---@meta` file,
+  never run): classes for the interface, the Host (`host`), the types and plg's `Issue`, `Time`, `http` and
+  `json`. Annotate the plugin's table with `---@class Gold: cohort.Provider` to have its methods checked.
+
+`plg types` never overwrites a file it did not write (its first lines carry
+`Code generated by plg types. DO NOT EDIT.`) and leaves an up-to-date file untouched. `-host <Interface>` names
+the Host the plugin uses, recorded in the files' header; without it, `plg types` keeps the one the existing
+typings name, else takes the contract's only possible Host, as `plg validate` does. Run it again whenever
+`implements` changes: `plg validate` fails until the typings match the pinned contract. Go plugins get none: they
+import the contract package itself.
 
 ## Storages
 
@@ -1494,6 +1546,9 @@ RUN go run github.com/heynemann/go-plg/cmd/plg warm
 
 `plg warm` (or `plg.Warm(ctx)` from your own binary) compiles every linked guest into that directory. The cache
 is keyed by the guest, the wazero version and the CPU, so a mismatch is just a cold compile, never an error.
+`plg warm -validate` also compiles the TypeScript compiler
+[`plg validate`](#checking-a-plugin-before-registering-it-plg-validate) runs, for CI images that validate plugins;
+services never need it.
 
 To let Go plugins import more packages than the allowlist, build a custom Go guest from your service module and
 pass it per Register:
@@ -1607,7 +1662,8 @@ Docker: `make examples`. Each top-level test starts its own server and terminate
   tests it and checks that every test container is terminated through its test's cleanup), allocation and
   benchmark budgets, a `-count=10` repeat of the unit tests, and `make examples` (lint and tests of the examples
   module, Docker required).
-- `make guests` rebuilds the guest artifacts with pinned toolchains; `make verify-guests` checks that the
-  committed ones are reproducible.
+- `make guests` rebuilds the guest artifacts with pinned toolchains, and the TypeScript compiler `plg validate`
+  runs (`internal/tscheck/tsgo.wasm.gz`: typescript-go's `tsgo`, pinned by the module in `guestsrc/tscheck`, built
+  for wasip1); `make verify-guests` checks that the committed ones are reproducible.
 - [`RULES.md`](RULES.md) holds the engineering rules every change follows; [`PLAN.md`](PLAN.md) the design and
   the log of decisions and measurements.

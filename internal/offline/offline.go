@@ -170,3 +170,10 @@ type Outcome struct {
 	// Issues are the issues Validate returned, when it succeeded.
 	Issues []adminjson.Issue
 }
+
+// CheckContract checks contract's interface and Host as [Check] checks them before loading a plugin, failing with
+// the error Check would fail with: plg validate names what breaks a contract it cannot describe for the Lua and
+// TypeScript typings. Package plg sets it.
+//
+//nolint:gochecknoglobals // the seam's third entry, set with Check from plg's init
+var CheckContract func(contract *Contract) error

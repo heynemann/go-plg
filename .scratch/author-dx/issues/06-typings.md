@@ -4,8 +4,8 @@
 
 **Blocked by:** 02 (plg validate: resolve the contract and load the plugin offline)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests: generated declarations for a contract covering every data type (golden files are acceptable here because the output IS the product), staleness detection, a TS type error (wrong result type, unknown Host method) failing validate with position, LuaLS annotations parsing
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Tests: generated declarations for a contract covering every data type (golden files are acceptable here because the output IS the product), staleness detection, a TS type error (wrong result type, unknown Host method) failing validate with position, LuaLS annotations parsing
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)

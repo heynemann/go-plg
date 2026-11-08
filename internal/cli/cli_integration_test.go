@@ -23,7 +23,7 @@ import (
 
 // TestWarmLogsEachCompile warms the default compilation cache (which the other tests share, so this is a cache
 // hit except on a machine's first run), resolved as a container resolves it. cmd/plg's integration test proves
-// what warming spares a fresh process.
+// what warming spares a fresh process. -validate also compiles the TypeScript compiler plg validate runs.
 func TestWarmLogsEachCompile(t *testing.T) {
 	t.Parallel()
 
@@ -36,6 +36,13 @@ func TestWarmLogsEachCompile(t *testing.T) {
 		stderr.String())
 	assert.Contains(t, stderr.String(), `level=INFO msg="plg: guest compiled" guest=go duration=`,
 		"the Go guest plg ships is compiled, and the compile logged")
+	assert.NotContains(t, stderr.String(), "guest=tsgo", "the TypeScript compiler is for validate only")
+
+	stderr.Reset()
+
+	require.Equal(t, 0, plgIn([]string{"warm", "-validate", "-cache-dir", def}, t.TempDir(), io.Discard, &stderr),
+		stderr.String())
+	assert.Contains(t, stderr.String(), `level=INFO msg="plg: guest compiled" guest=tsgo duration=`)
 }
 
 // warningPlugin is a Lua plugin implementing testcontract.Fooer whose Validate finds a warning.

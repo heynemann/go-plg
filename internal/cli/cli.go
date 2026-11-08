@@ -19,7 +19,9 @@ import (
 	_ "github.com/heynemann/go-plg/guest/lua"
 	_ "github.com/heynemann/go-plg/guest/typescript"
 	"github.com/heynemann/go-plg/internal/buildguest"
+	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/gen"
+	"github.com/heynemann/go-plg/internal/tscheck"
 )
 
 // Exit codes.
@@ -39,11 +41,12 @@ commands:
                       //go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
                       -fast=false leaves out the fast paths (typed adapters and codecs generated for the
                       interfaces' types): plg then calls the plugins through its generic, reflective binder
-  warm [-cache-dir dir]
+  warm [-cache-dir dir] [-validate]
                       compile every guest plg ships into the compilation cache (default: $PLG_CACHE_DIR, else
                       the user cache directory's plg/<wazero version>), e.g. in a Docker build, so services
                       using that cache start without compiling them:
                       go run github.com/heynemann/go-plg/cmd/plg warm -cache-dir /var/cache/plg
+                      -validate also compiles what validate runs besides the guests: the TypeScript compiler
   build-guest -pkg <import path> [-pkg ...] -o <file>
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
@@ -53,17 +56,24 @@ commands:
                       resolve the contract module it pins with the go command (go mod download: GOPROXY,
                       GOPRIVATE and credentials apply, and a module in the Go module cache needs no network),
                       type-check the contract and read its directives, check that a Go plugin's go.mod requires
-                      the pinned version, then load the plugin and run its Create in the real guest, with a Host
-                      whose every call fails, under plg.yaml's limits over the contract's //plg:limits over plg's
-                      defaults (memory, pool; timeout bounds Create); a Go plugin of a contract with
-                      //plg:guest-packages runs in that custom guest, built from the plugin's module as build-guest
-                      builds one and kept in -guest-cache (default: the user cache directory's plg/guests);
-                      a directory holding plg.yaml is an author repository: every plugin it lists is validated,
-                      then summarised, and its settings (shared directories, limits, requireOwnership, replace)
-                      apply, also to one of its plugins validated alone;
+                      the pinned version and that a Lua or TypeScript plugin's typings are what types writes,
+                      type-check a Go or TypeScript plugin, then load the plugin and run its Create in the real
+                      guest, with a Host whose every call fails, under plg.yaml's limits over the contract's
+                      //plg:limits over plg's defaults (memory, pool; timeout bounds Create); a Go plugin of a
+                      contract with //plg:guest-packages runs in that custom guest, built from the plugin's module
+                      as build-guest builds one and kept in -guest-cache (default: the user cache directory's
+                      plg/guests); a directory holding plg.yaml is an author repository: every plugin it lists is
+                      validated, then summarised, and its settings (shared directories, limits, requireOwnership,
+                      replace) apply, also to one of its plugins validated alone;
                       -host names the contract's Host interface a Lua or TypeScript plugin uses (a Go plugin's
-                      Create names it; by default the contract's only interface that can be a Host),
+                      Create names it; by default the one the plugin's typings were written for, else the
+                      contract's only interface that can be a Host),
                       -cache-dir is the compilation cache directory, as for warm
+  types [-host Interface] <plugin dir>
+                      write a Lua or TypeScript plugin's typings, to commit with it, from the contract its
+                      plugin.yaml pins (resolved as validate resolves it): TypeScript declarations (plg.d.ts) and
+                      the compiler options validate type-checks with (tsconfig.json), or Lua Language Server
+                      annotations (plg.d.lua); files it did not write are never overwritten; -host as for validate
   status [-profile name] [-format table|json] [-team name] [key]
                       show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
                       detail; -team keeps the plugins whose owner team is name
@@ -149,6 +159,8 @@ func run(args []string, env *Env) outcome {
 		return runEvents(env, args)
 	case "validate":
 		return runValidate(env, args)
+	case "types":
+		return runTypes(env, args)
 	default:
 		return outcome{code: exitUsage, msg: fmt.Sprintf("plg: unknown command %q\n\n%s", cmd, usage)}
 	}
@@ -228,20 +240,45 @@ func resolve(dir, path string) string {
 func runWarm(dir string, args []string, stderr io.Writer) outcome {
 	flags := flag.NewFlagSet("warm", flag.ContinueOnError)
 	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
+	validate := flags.Bool("validate", false, "also compile the TypeScript compiler plg validate runs")
 
 	if res, ok := parse("warm", flags, args); !ok {
 		return res
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	ctx := context.Background()
 
-	err := plg.Warm(context.Background(), plg.WithLogger(logger),
-		plg.WithCompilationCacheDir(resolve(dir, *cacheDir)))
+	err := plg.Warm(ctx, plg.WithLogger(logger), plg.WithCompilationCacheDir(resolve(dir, *cacheDir)))
+	if err == nil && *validate {
+		err = warmChecker(ctx, logger, resolve(dir, *cacheDir))
+	}
+
 	if err != nil {
 		return outcome{code: exitFailure, msg: err.Error() + "\n"} // "plg: warm: ..." names the command already
 	}
 
 	return outcome{code: exitOK}
+}
+
+// warmChecker compiles the TypeScript compiler into the on-disk compilation cache in cacheDir (the default one
+// when empty), as plg.Warm compiles the guests.
+func warmChecker(ctx context.Context, logger *slog.Logger, cacheDir string) (err error) {
+	eng, err := engine.NewOnDisk(engine.Options{Logger: logger, CacheDir: cacheDir})
+	if err != nil {
+		return fmt.Errorf("plg: warm: %w", err)
+	}
+
+	rt := eng.NewRuntime(ctx, engine.RuntimeOptions{MemoryLimit: tscheck.MemoryLimit})
+
+	defer func() { err = errors.Join(err, rt.Close(ctx), eng.Close(ctx)) }()
+
+	_, err = tscheck.Compile(ctx, rt)
+	if err != nil {
+		return fmt.Errorf("plg: warm: %w", err)
+	}
+
+	return nil
 }
 
 // packages is a repeatable flag.
