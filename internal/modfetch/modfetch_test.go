@@ -218,3 +218,16 @@ func TestImportPathJoinsTheModulePath(t *testing.T) {
 	require.ErrorIs(t, err, modfetch.ErrGoMod)
 	require.ErrorContains(t, err, "no go.mod in ")
 }
+
+// TestGetenvTakesTheLastValue reads a key as os/exec passes it on: the last of repeated entries wins, a key is
+// matched whole (not as a prefix of another), and an unset key is empty.
+func TestGetenvTakesTheLastValue(t *testing.T) {
+	t.Parallel()
+
+	environ := []string{"GOFLAGS=-v", "GOFLAGSX=x", "GOFLAGS=-mod=vendor -x", "BROKEN"}
+
+	assert.Equal(t, "-mod=vendor -x", modfetch.Getenv(environ, "GOFLAGS"))
+	assert.Equal(t, "x", modfetch.Getenv(environ, "GOFLAGSX"))
+	assert.Empty(t, modfetch.Getenv(environ, "BROKEN"))
+	assert.Empty(t, modfetch.Getenv(nil, "PATH"))
+}

@@ -33,6 +33,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/heynemann/go-plg/internal/goallow"
+	"github.com/heynemann/go-plg/internal/modfetch"
 )
 
 // Errors returned by [Build], wrapped with details.
@@ -689,13 +690,5 @@ func goEnv(environ, extra []string) []string {
 
 // goflags is environ's GOFLAGS with -mod=mod last, so that it wins.
 func goflags(environ []string) string {
-	var flags string
-
-	for _, kv := range environ {
-		if value, ok := strings.CutPrefix(kv, "GOFLAGS="); ok {
-			flags = value // the last one wins, as in os/exec
-		}
-	}
-
-	return strings.TrimSpace(flags + " -mod=mod")
+	return strings.TrimSpace(modfetch.Getenv(environ, "GOFLAGS") + " -mod=mod")
 }

@@ -161,7 +161,7 @@ func (f *Fetcher) lookGo() (string, error) {
 		name += ".exe"
 	}
 
-	for _, dir := range filepath.SplitList(getenv(f.Environ, "PATH")) {
+	for _, dir := range filepath.SplitList(Getenv(f.Environ, "PATH")) {
 		if candidate := filepath.Join(dir, name); dir != "" && executable(candidate) {
 			return candidate, nil
 		}
@@ -177,8 +177,8 @@ func executable(name string) bool {
 	return err == nil && info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm()&0o111 != 0)
 }
 
-// getenv returns the last value of key in environ, as the go command reads it.
-func getenv(environ []string, key string) string {
+// Getenv returns the last value of key in environ, as os/exec and the go command read it ("" when it is unset).
+func Getenv(environ []string, key string) string {
 	value := ""
 
 	for _, kv := range environ {
