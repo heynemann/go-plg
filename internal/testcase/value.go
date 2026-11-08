@@ -16,10 +16,19 @@ import (
 // refKey is the key of a mapping that takes its value from a fixture: {$ref: <path>}.
 const refKey = "$ref"
 
-// decoder decodes the values of a plugin's test cases into the contract's types, following fixtures.
+// decoder decodes the values of one test case (or one input) into the contract's types, following fixtures. It
+// reads each fixture once, and counts its bytes towards maxFixtureBytes each time a $ref takes it.
 type decoder struct {
-	files fs.FS
-	refs  []string // the fixtures being decoded, outermost first
+	files    fs.FS
+	fixtures map[string]fixture // the fixtures read, by path
+	refs     []string           // the fixtures being decoded, outermost first
+	taken    int                // the bytes of the fixtures the $refs took
+}
+
+// fixture is a fixture file read: its root node and its size in bytes.
+type fixture struct {
+	root *yaml.Node
+	size int
 }
 
 // decode decodes node, in file, into a new value of typ; path names the value in errors.
@@ -89,7 +98,7 @@ func (d *decoder) fixture(file string, ref *yaml.Node, out reflect.Value, path s
 		return failAt(file, ref, path, "%s refers to itself (through %s)", cleaned, strings.Join(d.refs, " -> "))
 	}
 
-	root, err := readYAML(d.files, cleaned)
+	root, err := d.take(cleaned)
 	if err != nil {
 		return failAt(file, ref, path, "$ref: %w", err)
 	}
@@ -98,6 +107,50 @@ func (d *decoder) fixture(file string, ref *yaml.Node, out reflect.Value, path s
 	defer func() { d.refs = d.refs[:len(d.refs)-1] }()
 
 	return d.into(cleaned, root, out, path)
+}
+
+// take returns the root node of the fixture name, reading it the first time, and counts its bytes again.
+func (d *decoder) take(name string) (*yaml.Node, error) {
+	if taken, read := d.fixtures[name]; read {
+		err := d.count(name, taken.size)
+		if err != nil {
+			return nil, err
+		}
+
+		return taken.root, nil
+	}
+
+	data, err := readFile(d.files, name)
+	if err == nil {
+		err = d.count(name, len(data))
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	root, err := parseYAML(data, name)
+	if err != nil {
+		return nil, err
+	}
+
+	if d.fixtures == nil {
+		d.fixtures = map[string]fixture{}
+	}
+
+	d.fixtures[name] = fixture{root: root, size: len(data)}
+
+	return root, nil
+}
+
+// count adds the size of the fixture name, which a $ref takes, to the bytes taken, failing past maxFixtureBytes.
+func (d *decoder) count(name string, size int) error {
+	d.taken += size
+	if d.taken > maxFixtureBytes {
+		return fmt.Errorf("%s %w", name, errFixturesTooLarge)
+	}
+
+	return nil
 }
 
 // failAt returns the error of the value at path, written at node in file.

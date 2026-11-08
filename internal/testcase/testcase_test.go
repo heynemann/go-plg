@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -629,6 +631,87 @@ func TestFixturesFailTheirCaseWhenTheyCannotBeRead(t *testing.T) {
 		got, _ := reflect.TypeAssert[order](plugin.calls[0].Args[0])
 		assert.Equal(t, []line{{SKU: "a"}, {SKU: "a"}}, got.Lines)
 	})
+}
+
+// opening is a plugin's files, counting how often each is opened.
+type opening struct {
+	fstest.MapFS
+
+	opens map[string]int
+}
+
+func (o *opening) Open(name string) (fs.File, error) {
+	o.opens[name]++
+
+	return o.MapFS.Open(name) //nolint:wrapcheck // the plugin's files' own error
+}
+
+// TestFixturesTakenAddUpToABound: the $refs of a case take at most 16 MiB of fixtures, a fixture counting each time
+// one takes it, from the case or from another fixture; past that the case fails at the $ref that goes over, naming
+// it, and the plugin is not called. A fixture is read once however often it is taken, so 60,000 $refs to one of
+// 1 MiB, which would take 60,000 MiB, read 1 MiB and fail at the 17th.
+func TestFixturesTakenAddUpToABound(t *testing.T) {
+	t.Parallel()
+
+	const size = 1 << 20 // the largest fixture
+
+	sku := strings.Repeat("a", size-len("{sku: }\n"))
+	refs := func(n int) string { return strings.Repeat("{$ref: b.yaml}, ", n) }
+
+	tests := []struct {
+		name, lines, file, want string
+		extra                   []string
+	}{
+		{name: "exactly 16 MiB", lines: "[" + refs(16) + "]"},
+		{
+			name:  "two bytes more",
+			lines: "[" + refs(16) + "{$ref: c.yaml}]",
+			extra: []string{"c.yaml", "{}"},
+			file:  "tests/t.yaml:2:",
+			want:  "input.order.lines[16]: $ref: c.yaml brings the fixtures the $refs take over",
+		},
+		{
+			name: "the bytes of a fixture taking others", lines: "{$ref: l.yaml}",
+			extra: []string{"l.yaml", "[" + refs(16) + "]"},
+			file:  "l.yaml:1:", want: "input.order.lines[15]: $ref: b.yaml brings the fixtures the $refs take over",
+		},
+		{
+			name:  "60,000 $refs",
+			lines: "[" + refs(60000) + "]",
+			file:  "tests/t.yaml:2:",
+			want:  "input.order.lines[16]: $ref: b.yaml brings the fixtures the $refs take over",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			files := cases("- {name: x, call: Quote, input: {order: {lines: "+tc.lines+"}}}\n",
+				append([]string{"b.yaml", "{sku: " + sku + "}\n"}, tc.extra...)...)
+			loaded := testcase.Load(files)
+			require.NoError(t, loaded[0].Err)
+
+			plugin := &runner{}
+			counted := &opening{MapFS: files, opens: map[string]int{}}
+			results := testcase.Run(t.Context(), newContract(), counted, plugin, loaded[0])
+
+			assert.Equal(t, 1, counted.opens["b.yaml"], "b.yaml is read once")
+
+			if tc.want == "" {
+				require.True(t, results[0].Passed(), results[0].Failure)
+
+				got, _ := reflect.TypeAssert[order](plugin.calls[0].Args[0])
+				assert.Equal(t, slices.Repeat([]line{{SKU: sku}}, 16), got.Lines)
+
+				return
+			}
+
+			assert.True(t, strings.HasPrefix(results[0].Failure, tc.file), results[0].Failure)
+			assert.Contains(t, results[0].Failure, tc.want)
+			assert.Empty(t, plugin.calls)
+		})
+	}
 }
 
 func TestCallsAndInputsMustMatchTheContract(t *testing.T) {

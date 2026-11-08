@@ -5,7 +5,8 @@
 // Values are the contract's data types written as YAML, struct fields by the names other guest languages see
 // (their json tag, else their Go name), and decoded strictly: a field the type does not have, a value of another
 // kind or out of the type's range is an error of the case, never a silent zero. Anywhere a value goes, a mapping
-// {$ref: <path>} takes it from another YAML file of the plugin (a fixture), relative to the plugin's directory.
+// {$ref: <path>} takes it from another YAML file of the plugin (a fixture), relative to the plugin's directory; the
+// fixtures a case takes add up to at most 16 MiB, a fixture counting each time a $ref takes it.
 //
 // A file:
 //
@@ -71,6 +72,10 @@ const ValidateCall = "Validate"
 
 // maxFileSize bounds a test case file and a fixture.
 const maxFileSize = 1 << 20
+
+// maxFixtureBytes bounds the fixtures the $refs of a case (or an input) take together, a fixture counting each time
+// one takes it: a file of 60,000 $refs to a 1 MiB fixture would otherwise decode into 60,000 MiB.
+const maxFixtureBytes = 16 * maxFileSize
 
 // File is one test case file.
 type File struct {
@@ -177,6 +182,16 @@ func loadFile(files fs.FS, name string) *File {
 
 // readYAML reads the YAML file name of files, at most maxFileSize bytes, and returns its root node.
 func readYAML(files fs.FS, name string) (*yaml.Node, error) {
+	data, err := readFile(files, name)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseYAML(data, name)
+}
+
+// readFile reads the file name of files, at most maxFileSize bytes.
+func readFile(files fs.FS, name string) ([]byte, error) {
 	opened, err := files.Open(name)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // fs errors name the file
@@ -193,6 +208,11 @@ func readYAML(files fs.FS, name string) (*yaml.Node, error) {
 		return nil, fmt.Errorf("%s: %w", name, errTooLarge)
 	}
 
+	return data, nil
+}
+
+// parseYAML parses data, the YAML file name, and returns its root node.
+func parseYAML(data []byte, name string) (*yaml.Node, error) {
 	root, err := strictyaml.Parse(data, name)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
@@ -202,6 +222,9 @@ func readYAML(files fs.FS, name string) (*yaml.Node, error) {
 }
 
 var errTooLarge = fmt.Errorf("larger than %d bytes", maxFileSize)
+
+var errFixturesTooLarge = fmt.Errorf("brings the fixtures the $refs take over %d bytes, a fixture counting each "+
+	"time a $ref takes it", maxFixtureBytes)
 
 // parse parses the file's root mapping.
 func (f *File) parse(root *yaml.Node) error {
