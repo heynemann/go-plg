@@ -12,6 +12,7 @@ import (
 	"github.com/heynemann/go-plg/internal/artifact"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
+	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/plgimpl"
 )
 
@@ -353,4 +354,10 @@ func GenericResults(call plgimpl.Call) []reflect.Value {
 // DecodeAnswer decodes the results of a plugin's successful answer body into call, as every binder does.
 func DecodeAnswer(body []byte, call plgimpl.Call) error {
 	return decodeResults(body, call)
+}
+
+// LuaSyntaxErrors compiles the .lua files among files in the Lua guest, as plg validate does, and returns the
+// errors of those that do not compile.
+func LuaSyntaxErrors(ctx context.Context, files fs.FS, opts *offline.Options) ([]string, error) {
+	return checkLuaSyntax(ctx, files, opts)
 }

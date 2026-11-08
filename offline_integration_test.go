@@ -1,6 +1,6 @@
 //go:build integration
 
-package plg
+package plg_test
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/offline"
@@ -62,7 +63,7 @@ func TestCheckOfflineTimeoutBoundsCreateOnly(t *testing.T) {
 		Key: "p",
 		Files: fstest.MapFS{"plugin.ts": {Data: []byte(
 			"export function Create() {\n  console.log(\"creating\");\n  return { Do: (s: string) => s };\n}\n")}},
-		Manifest: []byte("implements: github.com/heynemann/go-plg.offlineIface@v1.0.0\n" +
+		Manifest: []byte("implements: github.com/heynemann/go-plg_test.offlineIface@v1.0.0\n" +
 			"language: typescript\nentrypoint: plugin.ts\n"),
 	}
 
@@ -102,4 +103,36 @@ func TestCheckOfflineTimeoutBoundsCreateOnly(t *testing.T) {
 			assert.Contains(t, *report.Error, tc.failure, tc.msg)
 		})
 	}
+}
+
+// TestCheckLuaSyntaxCompilesEveryLuaFile compiles a plugin's .lua files in the real Lua guest: each that does not
+// compile is named with its line, in name order, whatever brackets the files hold; none runs (a file raising an
+// error when run is fine), files of other kinds are not compiled, and a plugin without .lua files has nothing to
+// check.
+func TestCheckLuaSyntaxCompilesEveryLuaFile(t *testing.T) {
+	t.Parallel()
+
+	opts := &offline.Options{Logger: slog.New(slog.DiscardHandler)}
+
+	errs, err := plg.LuaSyntaxErrors(t.Context(), fstest.MapFS{
+		"plugin.lua":     {Data: []byte("error('runs never')\nlocal s = [==[ ]] ]=] ]==]\nfunction Create() end\n")},
+		"b/broken.lua":   {Data: []byte("local t = {\n  1,\n  2 ]]\n")},
+		"a.lua":          {Data: []byte("\nlocal = 1\n")},
+		"ends.lua":       {Data: []byte("return ']]' -- ]=]")},
+		"notes.txt":      {Data: []byte("local = not lua")},
+		"empty/init.lua": {Data: []byte("")},
+	}, opts)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"a.lua:2: <name> expected near '='",
+		"b/broken.lua:3: '}' expected (to close '{' at line 1) near ']'",
+	}, errs)
+
+	errs, err = plg.LuaSyntaxErrors(t.Context(), fstest.MapFS{"plugin.lua": {Data: []byte("return {}\n")}}, opts)
+	require.NoError(t, err)
+	assert.Empty(t, errs)
+
+	errs, err = plg.LuaSyntaxErrors(t.Context(), fstest.MapFS{"plugin.ts": {Data: []byte("export {}")}}, opts)
+	require.NoError(t, err)
+	assert.Empty(t, errs, "no .lua file")
 }
