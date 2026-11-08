@@ -102,7 +102,9 @@ func TestValidateRunsTestCasesInEveryLanguage(t *testing.T) {
 				"result.total: expected 1000, got 900", "result.discount: expected 0, got 100",
 				`result.reasons: expected ["gold", "gift"], got ["gold"]`,
 			}},
-			{"an unexpected error", "Quote failed: the directory is down", nil},
+			{"an unexpected error", "Quote failed: the directory is down", []string{
+				`expected result {total: 900, discount: 100, reasons: ["gold"]}`, `got error "the directory is down"`,
+			}},
 			{"another error", "Coupon returned another error than expect.error", []string{
 				`expected an error containing "expired"`, `got "unknown coupon NOPE"`,
 			}},

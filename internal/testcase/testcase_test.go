@@ -766,6 +766,21 @@ func TestExpectationsCompareWhatTheCallReturned(t *testing.T) {
 			yaml:    "- {name: x, call: Split, input: {cents: 3, parts: 2}, expect: {result: [[1], 1]}}",
 			play:    failing(offline.Outcome{Err: errNoParts, Returned: "no parts"}),
 			failure: "Split failed: no parts",
+			details: []string{"expected results [[1], 1]", `got error "no parts"`},
+		},
+		{
+			name:    "an unexpected error of Validate",
+			yaml:    "- {name: x, call: Validate, input: {in: {}}, expect: {issues: [{code: slow}]}}",
+			play:    failing(offline.Outcome{Err: errNotFound, Returned: "user not found"}),
+			failure: "Validate failed: plg: Spin: user not found",
+			details: []string{`expected issues [{code: "slow"}]`, `got error "user not found"`},
+		},
+		{
+			name:    "a panic where a result is expected",
+			yaml:    "- {name: x, call: Quote, input: {order: {}}, expect: {result: {total: 1}}}",
+			play:    failing(offline.Outcome{Err: errPanicked}),
+			failure: "Quote failed: it panicked or trapped: not found",
+			details: []string{"expected result {reasons: null, total: 1, discount: 0}"},
 		},
 		{
 			name: "no error", yaml: "- {name: x, call: Split, input: {cents: 3, parts: 2}, expect: {error: no parts}}",

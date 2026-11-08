@@ -379,7 +379,7 @@ func (p *prepared) check(outcome *offline.Outcome) verdict {
 func (p *prepared) checkError(outcome *offline.Outcome, want *expect) verdict {
 	switch {
 	case want.err == nil || outcome.Returned == "":
-		return verdict{failure: p.call + " failed: " + outcome.Err.Error()}
+		return verdict{p.call + " failed: " + outcome.Err.Error(), p.unexpectedError(outcome, want)}
 	case strings.Contains(outcome.Returned, *want.err):
 		return verdict{}
 	default:
@@ -389,14 +389,40 @@ func (p *prepared) checkError(outcome *offline.Outcome, want *expect) verdict {
 	}
 }
 
+// unexpectedError shows a call that failed where the case expects results or issues: what it expects, and the
+// error the plugin returned, if it returned one (the failure says why the call failed otherwise).
+func (p *prepared) unexpectedError(outcome *offline.Outcome, want *expect) []string {
+	var details []string
+
+	switch {
+	case want.issues != nil:
+		details = append(details, "expected issues "+formatExpectedIssues(want.issues))
+	case len(p.want) > 0:
+		details = append(details, "expected "+describeResults(p.want))
+	default:
+		return nil // the case expects nothing the error could be compared with
+	}
+
+	if outcome.Returned != "" {
+		details = append(details, "got error "+strconv.Quote(outcome.Returned))
+	}
+
+	return details
+}
+
 // describeOutcome writes what a successful call returned.
 func (p *prepared) describeOutcome(outcome *offline.Outcome) string {
 	if p.validate {
 		return "issues " + formatIssues(outcome.Issues)
 	}
 
-	written := make([]string, len(outcome.Results))
-	for k, value := range outcome.Results {
+	return describeResults(outcome.Results)
+}
+
+// describeResults writes a method's results, as describeOutcome does.
+func describeResults(results []reflect.Value) string {
+	written := make([]string, len(results))
+	for k, value := range results {
 		written[k] = Format(value)
 	}
 
@@ -450,18 +476,26 @@ func checkIssues(want []issue, got []adminjson.Issue) verdict {
 	return verdict{"Validate returned other issues than expect.issues", details}
 }
 
-// diff appends a line per field the expected issue gives that got differs in.
-func (i *issue) diff(path string, got *adminjson.Issue, out []string) []string {
-	for _, compared := range []struct {
-		want *string
-		name string
-		got  string
-	}{
+// issueField is a field of an expected issue (nil: not given) and of the issue got.
+type issueField struct {
+	want *string
+	name string
+	got  string
+}
+
+// fields pairs the expected issue's fields with got's, in a case's order.
+func (i *issue) fields(got *adminjson.Issue) [4]issueField {
+	return [4]issueField{
 		{i.severity, "severity", got.Severity},
 		{i.code, "code", got.Code},
 		{i.message, "message", got.Message},
 		{i.field, "field", got.Field},
-	} {
+	}
+}
+
+// diff appends a line per field the expected issue gives that got differs in.
+func (i *issue) diff(path string, got *adminjson.Issue, out []string) []string {
+	for _, compared := range i.fields(got) {
 		if compared.want != nil && *compared.want != compared.got {
 			out = append(out, path+"."+compared.name+": expected "+strconv.Quote(*compared.want)+", got "+
 				strconv.Quote(compared.got))
@@ -469,6 +503,25 @@ func (i *issue) diff(path string, got *adminjson.Issue, out []string) []string {
 	}
 
 	return out
+}
+
+// formatExpectedIssues writes expected issues as a case gives them: only their fields given.
+func formatExpectedIssues(issues []issue) string {
+	written := make([]string, len(issues))
+
+	for k, issue := range issues {
+		var parts []string
+
+		for _, field := range issue.fields(&adminjson.Issue{}) {
+			if field.want != nil {
+				parts = append(parts, field.name+": "+strconv.Quote(*field.want))
+			}
+		}
+
+		written[k] = "{" + strings.Join(parts, ", ") + "}"
+	}
+
+	return "[" + strings.Join(written, ", ") + "]"
 }
 
 // formatIssues writes issues as a case would.

@@ -506,6 +506,9 @@ go.mod     ok      /home/ana/plugins/gold/go.mod requires example.com/rewards v1
 types      ok      the plugin's package type-checks against cohort.Provider
 guest      ok      a custom Go guest with encoding/xml, found in the guest cache (/home/ana/.cache/plg/guests/3f9c….wasm)
 load       ok      Create ran in the go guest (version sha256:a753…)
+test       ok      tests/members.yaml: gold members are in the cohort
+test       ok      tests/members.yaml: the directory's error is the call's
+tests      ok      2 passed
 ```
 
 The steps run in order and stop at the first that fails; the command then exits 1 (2 for a usage error), the
