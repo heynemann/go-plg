@@ -5,9 +5,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/plugin"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestSecretOutsidePlgFailsWithErrNoGuest(t *testing.T) {
 	t.Parallel()
