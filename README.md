@@ -1305,9 +1305,10 @@ that hop and every later one go without the headers carrying credentials (`Autho
 entries of `AllowedHosts` included. This is stricter than Go's `http.Client`, which keeps them for the same host
 on any port or scheme and for its subdomains; Go plugins get the stricter rule too. The plugin's own headers (the
 Go request's `Header`, `fetch`'s `headers`, `http.request`'s `headers` table) are left as they were, except
-`traceparent` and `tracestate`: when the call is traced, plg sets them to the request's span (see
-[Logs, metrics and traces](#logs-metrics-and-traces)), replacing the plugin's. Each request is a client span
-`plg.http <method>`, a child of the call's span.
+`traceparent` and `tracestate`: whenever the call's context holds a span, plg sets them to the request's span, or
+with tracing off to the caller's (see [Logs, metrics and traces](#logs-metrics-and-traces)), replacing the
+plugin's (its `tracestate` is dropped even when plg's is empty); only a call whose context holds no span keeps the
+plugin's own. Each request is a client span `plg.http <method>`, a child of the call's span.
 
 A Go plugin's request whose own context (`http.NewRequestWithContext`) has already ended is not sent: it fails with
 the context's error (`context.Canceled`, `context.DeadlineExceeded`) and its body is closed. Once sent, a request
@@ -1488,7 +1489,8 @@ if errors.As(err, &pe) {
 
 - **Logs:** `plg.New(plg.WithLogger(logger))` (a `*slog.Logger`; discarded by default) gets loads, reloads,
   skips, failures, panics, pool backoffs, HTTP requests and the plugins' own output (stdout at Info, stderr at
-  Warn, with the plugin key, and `trace_id`/`span_id` when the call is traced).
+  Warn, with the plugin key, and `trace_id`/`span_id` whenever the call's context holds a span: the call's span,
+  or with tracing off the caller's).
 - **Metrics:** OpenTelemetry, through `plg.WithMeterProvider(mp)` (default: the global provider): calls, latency
   and errors by key, method and outcome; panics by phase; pool instances, instances in use (serving at least one
   call), calls in flight (more than instances in use only with `WithConcurrentCalls`), waits and refills; instance
