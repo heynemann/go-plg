@@ -129,6 +129,25 @@ func TestNamespacesAvoidTheGlobals(t *testing.T) {
 	assert.NotContains(t, annotations, "\nhost = {}")
 }
 
+// TestRecursiveTypesReachTheirTimes hands back a type that refers to itself before its time.Time, by value and
+// through a pointer, in both method orders: the plugin may return a Date in either, so both take plg.Out.
+func TestRecursiveTypesReachTheirTimes(t *testing.T) {
+	t.Parallel()
+
+	pkg := load(t, "recursive", "example.com/recursive")
+
+	for _, name := range []string{"ValueFirst", "PointerFirst"} {
+		contract := &typings.Contract{Interface: named(t, pkg, name), Implements: "example.com/recursive." + name}
+
+		typ, err := typings.Generate(typings.LanguageTypeScript, contract, nil)
+		require.NoError(t, err)
+
+		declarations := string(typ.Files[0].Data)
+		assert.Contains(t, declarations, "): plg.Result<plg.Out<recursive.A>>;\n", name)
+		assert.Contains(t, declarations, "): plg.Result<plg.Out<recursive.A | null>>;\n", name)
+	}
+}
+
 // TestGenerateRefusesWhatTypingsCannotDescribe generates typings for Go, for a Host that is no interface, an
 // interface whose method takes no context, and one carrying a channel.
 func TestGenerateRefusesWhatTypingsCannotDescribe(t *testing.T) {

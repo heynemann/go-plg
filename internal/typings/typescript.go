@@ -364,7 +364,7 @@ func (iface *ifaceModel) has(name string) bool {
 
 // tsValue returns the type of a value crossing the given way.
 func (m *model) tsValue(n *node, way flow) string {
-	if way == handedBack && m.reachesTime(n) {
+	if way == handedBack && reachesTime(n) {
 		return "plg.Out<" + m.ts(n) + ">"
 	}
 

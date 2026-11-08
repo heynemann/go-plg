@@ -22,7 +22,6 @@ type model struct {
 	visited    map[*node]bool
 	nodes      map[*types.TypeName]*node // the planned type of each declared named type
 	spaces     map[string]string         // namespace by package path
-	times      map[*node]bool            // whether a type reaches a time.Time
 	decls      []*types.TypeName         // the named types the methods reach (time.Time aside), in declaration order
 }
 
@@ -49,7 +48,7 @@ type param struct {
 func newModel(contract *Contract) (*model, error) {
 	planned := &model{
 		contract: contract, visited: map[*node]bool{}, nodes: map[*types.TypeName]*node{},
-		spaces: map[string]string{}, times: map[*node]bool{},
+		spaces: map[string]string{},
 	}
 
 	iface, ifaceSigs, err := signatures(contract.Interface)
@@ -251,21 +250,27 @@ func typeName(name string) string {
 }
 
 // reachesTime reports whether a value of type n may hold a time.Time.
-func (m *model) reachesTime(n *node) bool {
-	if reaches, ok := m.times[n]; ok {
-		return reaches
+func reachesTime(n *node) bool {
+	return walksToTime(n, map[*node]bool{})
+}
+
+// walksToTime reports whether a value of type n may hold a time.Time through nodes not yet visited: a revisited
+// node, part of a recursive type, reaches a time through the type's other parts or not at all. A node's answer
+// depends on what the walk visited before it, so none is kept beyond its walk.
+func walksToTime(n *node, visited map[*node]bool) bool {
+	if visited[n] {
+		return false
 	}
 
-	m.times[n] = false // a recursive type reaches a time through its other parts or not at all
+	visited[n] = true
 
-	reaches := n.Kind == layout.Time || (n.Elem != nil && m.reachesTime(n.Elem))
-	for _, field := range n.Fields {
-		reaches = reaches || m.reachesTime(field.Node)
+	if n.Kind == layout.Time || (n.Elem != nil && walksToTime(n.Elem, visited)) {
+		return true
 	}
 
-	m.times[n] = reaches
-
-	return reaches
+	return slices.ContainsFunc(n.Fields, func(field layout.Field[types.Type]) bool {
+		return walksToTime(field.Node, visited)
+	})
 }
 
 // paramNames returns the names the parameters have in the declarations: their Go names, p1, p2, ... for
