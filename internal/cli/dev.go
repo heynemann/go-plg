@@ -57,10 +57,7 @@ func (m *modules) keep(ref contractref.Ref, mod modfetch.Module) {
 // runDev runs `plg dev`.
 func runDev(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("dev", flag.ContinueOnError)
-	host := flags.String("host", "", "the contract's Host interface the plugin's Create takes")
-	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
-	guestCache := flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
-		"//plg:guest-packages (default <user cache>/plg/guests)")
+	loading := newValidateFlags(flags)
 
 	operands, res, ok := parseMixed("dev", flags, args)
 	if !ok {
@@ -84,17 +81,8 @@ func runDev(env *Env, args []string) outcome {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	session := &devSession{
-		env: env, base: validation{
-			env: env, dir: resolve(env.Dir, arg), arg: arg, host: *host, cacheDir: resolve(env.Dir, *cacheDir),
-			modules: &modules{resolved: map[contractref.Ref]modfetch.Module{}}, nearLimit: defaultNearLimit,
-			ownership: true,
-		},
-	}
-
-	if *guestCache != "" {
-		session.base.guestCache = resolve(env.Dir, *guestCache)
-	}
+	session := &devSession{env: env, base: loading.validation(env, arg, defaultNearLimit)}
+	session.base.modules = &modules{resolved: map[contractref.Ref]modfetch.Module{}}
 
 	return session.loop(ctx)
 }

@@ -60,41 +60,29 @@ type packed struct {
 func runPack(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
 	outDir := flags.String("o", ".", "the directory the artifacts are written to")
-	host := flags.String("host", "", "the contract's Host interface the plugin's Create takes")
-	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
-	guestCache := flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
-		"//plg:guest-packages (default <user cache>/plg/guests)")
-	format := flags.String("format", formatTable, "table or json")
-	junit := flags.String("junit", "", "also write the report as JUnit XML to this file")
-	colour := flags.String("color", colourAuto, "colour the table: auto (on a terminal), always or never")
+	loading, report := newValidateFlags(flags), newReportFlags(flags)
 
 	operands, res, ok := parseMixed("pack", flags, args)
 	if !ok {
 		return res
 	}
 
-	if msg := validateUsage(operands, *format, *colour, defaultNearLimit); msg != "" {
+	if msg := validateUsage(operands, *report.format, *report.colour, defaultNearLimit); msg != "" {
 		return usageError("pack", msg)
 	}
 
-	dir, out := resolve(env.Dir, operands[0]), resolve(env.Dir, *outDir)
+	run, out := loading.validation(env, operands[0], defaultNearLimit), resolve(env.Dir, *outDir)
 
-	err := checkOutput(dir, out)
+	err := checkOutput(run.dir, out)
 	if err != nil {
 		return failure("pack", err)
 	}
 
 	var plugins []*packed
 
-	run := validation{
-		env: env, dir: dir, arg: operands[0], host: *host, cacheDir: resolve(env.Dir, *cacheDir),
-		guestCache: resolve(env.Dir, *guestCache), nearLimit: defaultNearLimit, ownership: true,
-		packed: func(p *packed) { plugins = append(plugins, p) },
-	}
+	run.packed = func(p *packed) { plugins = append(plugins, p) }
 
-	shown := &output{format: *format, colour: wantsColour(env, *colour), junit: resolve(env.Dir, *junit)}
-
-	rep, err := validateTarget(&run, shown)
+	rep, err := validateTarget(&run, report.output(env))
 	if err != nil {
 		return failure("pack", err)
 	}

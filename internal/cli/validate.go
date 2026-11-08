@@ -53,16 +53,51 @@ const (
 // defaultNearLimit is -near-limit's default: a call is near a limit at 80% of it.
 const defaultNearLimit = 0.8
 
+// validateFlags are the flags validate, pack and dev share: how the plugins load.
+type validateFlags struct {
+	host, cacheDir, guestCache *string
+}
+
+func newValidateFlags(flags *flag.FlagSet) validateFlags {
+	return validateFlags{
+		host:     flags.String("host", "", "the contract's Host interface the plugin's Create takes"),
+		cacheDir: flags.String("cache-dir", "", "compilation cache directory"),
+		guestCache: flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
+			"//plg:guest-packages (default <user cache>/plg/guests)"),
+	}
+}
+
+// validation returns the validation of the plugin directory or author repository arg, flagging test cases at or
+// above nearLimit of a limit, with the flags' paths resolved against the working directory.
+func (f validateFlags) validation(env *Env, arg string, nearLimit float64) validation {
+	return validation{
+		env: env, dir: resolve(env.Dir, arg), arg: arg, host: *f.host, cacheDir: resolve(env.Dir, *f.cacheDir),
+		guestCache: resolve(env.Dir, *f.guestCache), nearLimit: nearLimit, ownership: true,
+	}
+}
+
+// reportFlags are the flags validate and pack share: how the report is shown.
+type reportFlags struct {
+	format, junit, colour *string
+}
+
+func newReportFlags(flags *flag.FlagSet) reportFlags {
+	return reportFlags{
+		format: flags.String("format", formatTable, "table or json"),
+		junit:  flags.String("junit", "", "also write the report as JUnit XML to this file"),
+		colour: flags.String("color", colourAuto, "colour the table: auto (on a terminal), always or never"),
+	}
+}
+
+// output returns where and how the report is shown, the JUnit file resolved against the working directory.
+func (f reportFlags) output(env *Env) *output {
+	return &output{format: *f.format, colour: wantsColour(env, *f.colour), junit: resolve(env.Dir, *f.junit)}
+}
+
 // runValidate runs `plg validate`.
 func runValidate(env *Env, args []string) outcome {
 	flags := flag.NewFlagSet("validate", flag.ContinueOnError)
-	host := flags.String("host", "", "the contract's Host interface the plugin's Create takes")
-	cacheDir := flags.String("cache-dir", "", "compilation cache directory")
-	guestCache := flags.String("guest-cache", "", "directory of the custom Go guests built for contracts' "+
-		"//plg:guest-packages (default <user cache>/plg/guests)")
-	format := flags.String("format", formatTable, "table or json")
-	junit := flags.String("junit", "", "also write the report as JUnit XML to this file")
-	colour := flags.String("color", colourAuto, "colour the table: auto (on a terminal), always or never")
+	loading, report := newValidateFlags(flags), newReportFlags(flags)
 	nearLimit := flags.Float64("near-limit", defaultNearLimit, "flag test cases whose peak memory or time is at "+
 		"or above this share of its limit")
 
@@ -71,26 +106,13 @@ func runValidate(env *Env, args []string) outcome {
 		return res
 	}
 
-	if msg := validateUsage(operands, *format, *colour, *nearLimit); msg != "" {
+	if msg := validateUsage(operands, *report.format, *report.colour, *nearLimit); msg != "" {
 		return usageError("validate", msg)
 	}
 
-	dir := resolve(env.Dir, operands[0])
-	run := validation{
-		env: env, dir: dir, arg: operands[0], host: *host, cacheDir: resolve(env.Dir, *cacheDir),
-		nearLimit: *nearLimit, ownership: true,
-	}
+	run := loading.validation(env, operands[0], *nearLimit)
 
-	if *guestCache != "" {
-		run.guestCache = resolve(env.Dir, *guestCache)
-	}
-
-	out := &output{format: *format, colour: wantsColour(env, *colour)}
-	if *junit != "" {
-		out.junit = resolve(env.Dir, *junit)
-	}
-
-	rep, err := validateTarget(&run, out)
+	rep, err := validateTarget(&run, report.output(env))
 	if err != nil {
 		return failure("validate", err)
 	}
