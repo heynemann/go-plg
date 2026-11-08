@@ -76,6 +76,11 @@ type (
 	}
 )
 
+// level is a number with a String method, which a case writes as the number all the same.
+type level int
+
+func (level) String() string { return "high" }
+
 // Method indexes.
 const (
 	quoteMethod = iota
@@ -747,6 +752,11 @@ func TestExpectationsCompareWhatTheCallReturned(t *testing.T) {
 			details: []string{"result[0]: expected [], got null"},
 		},
 		{
+			name: "null is nil",
+			yaml: "- {name: x, call: Split, input: {cents: 3, parts: 2}, expect: {result: [null, 1]}}",
+			play: returning([]int(nil), 1),
+		},
+		{
 			name:    "a struct's fields",
 			yaml:    "- {name: x, call: Quote, input: {order: {}}, expect: {result: {total: 9, discount: 1, reasons: [a, b]}}}",
 			play:    returning(quote{Total: 8, Discount: 1, Reasons: []string{"a", "c"}}),
@@ -1304,6 +1314,7 @@ func TestFormatWritesValuesAsCasesDo(t *testing.T) {
 		{[]float64{1.5, 2}, "[1.5, 2]"},
 		{"quote\"d", `"quote\"d"`},
 		{line{SKU: "a", Qty: 1}, `{sku: "a", qty: 1, cents: 0}`},
+		{[]level{2}, "[2]"},
 	}
 
 	for _, tc := range tests {
