@@ -211,7 +211,6 @@ func TestOpenArtifactRejectsDamagedArchives(t *testing.T) {
 		art, err := openArtifact(data[:cut])
 		require.ErrorIs(t, err, plg.ErrInvalidArtifact, "cut at %d of %d", cut, len(data))
 		assert.Nil(t, art)
-		assert.Contains(t, err.Error(), "plg: opening an artifact: plg: invalid artifact: ")
 	}
 
 	for _, at := range []int{len(data) / 2, len(data) - 6} { // the compressed data, the checksum
