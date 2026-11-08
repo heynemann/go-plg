@@ -4795,9 +4795,21 @@ func TestUndeclaredSecretNamesAreRefusedBriefly(t *testing.T) {
 	}
 
 	secrets, _ := testSecrets(t, unexpected, secretTTL, "a", "b")
-	long := strings.Repeat("n", 1<<20)
+	longest := strings.Repeat("n", MaxSecretName)
 
-	_, err := read(t, secrets, long)
+	_, err := read(t, secrets, longest)
+	require.EqualError(
+		t,
+		err,
+		`plg: secret "`+longest+`" is not declared in the plugin's plugin.yaml (it declares a, b)`,
+		"a name of MaxSecretName bytes, longer than any declared one, is quoted",
+	)
+
+	_, err = read(t, secrets, longest+"n")
+	require.EqualError(t, err, "plg: a secret name of 65 bytes is not declared in the plugin's plugin.yaml "+
+		"(it declares a, b)", "a name over MaxSecretName bytes is not")
+
+	_, err = read(t, secrets, strings.Repeat("n", 1<<20))
 	require.EqualError(t, err, "plg: a secret name of 1048576 bytes is not declared in the plugin's plugin.yaml "+
 		"(it declares a, b)", "a huge name is not echoed")
 

@@ -276,7 +276,7 @@ func (s *pluginSecrets) call(ctx context.Context, name string) (string, error) {
 }
 
 // undeclared returns the error refusing a read of the secret name, which the plugin does not declare. A name
-// longer than any declared one is not quoted, so that a plugin cannot make the host format a huge message.
+// over [MaxSecretName] bytes is not quoted, so that a plugin cannot make the host format a huge message.
 func (s *pluginSecrets) undeclared(name []byte) error {
 	declared := "it declares none"
 	if len(s.names) > 0 {
