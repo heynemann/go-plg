@@ -152,7 +152,7 @@ func wantsColour(env *Env, mode string) bool {
 	}
 
 	file, ok := env.Stdout.(*os.File)
-	if !ok || env.Getenv("NO_COLOR") != "" || env.Getenv("TERM") == "dumb" {
+	if !ok || env.getenv("NO_COLOR") != "" || env.getenv("TERM") == "dumb" {
 		return false
 	}
 

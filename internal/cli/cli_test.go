@@ -38,7 +38,7 @@ func contractDir(t *testing.T, files map[string]string) string {
 // plgIn runs plg with args in dir, its output to stdout and stderr, in an environment without variables.
 func plgIn(args []string, dir string, stdout, stderr io.Writer) int {
 	return cli.Main(args, &cli.Env{
-		Stdout: stdout, Stderr: stderr, Getenv: func(string) string { return "" }, Dir: dir,
+		Stdout: stdout, Stderr: stderr, Environ: func() []string { return nil }, Dir: dir,
 	})
 }
 

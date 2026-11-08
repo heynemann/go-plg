@@ -23,7 +23,7 @@ func plgTypes(environ []string, args ...string) validated {
 	var stdout, stderr bytes.Buffer
 
 	code := cli.Main(append([]string{"types"}, args...), &cli.Env{
-		Stdout: &stdout, Stderr: &stderr, Getenv: func(string) string { return "" },
+		Stdout: &stdout, Stderr: &stderr,
 		Environ: func() []string { return environ }, Dir: filepath.Join("..", "..", "testdata", "validate", "plugins"),
 	})
 

@@ -34,6 +34,6 @@ func main() {
 	}
 
 	os.Exit(cli.Main(os.Args[1:], &cli.Env{
-		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, Environ: os.Environ, Dir: dir,
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Environ: os.Environ, Dir: dir,
 	}))
 }

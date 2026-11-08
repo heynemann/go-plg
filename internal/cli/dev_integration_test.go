@@ -68,7 +68,7 @@ func TestDevRevalidatesOnChangesAndCallsMethods(t *testing.T) {
 		defer func() { assert.NoError(t, stdout.Close()) }()
 
 		done <- cli.Main([]string{"dev", "pricing"}, &cli.Env{
-			Stdin: stdin, Stdout: stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return *environ.Load() }, Dir: root,
 			Watch: func(_ context.Context, paths []string) <-chan []string {
 				watched <- paths
@@ -177,7 +177,7 @@ func startDev(t *testing.T, environ []string, dir string, args ...string) *devSe
 		defer func() { assert.NoError(t, stdout.Close()) }()
 
 		session.done <- cli.Main(append([]string{"dev"}, args...), &cli.Env{
-			Stdin: stdin, Stdout: stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return environ }, Dir: dir,
 			Watch: func(_ context.Context, paths []string) <-chan []string {
 				session.watched <- paths
@@ -267,7 +267,7 @@ func TestDevStopsWhenTheWatcherDoes(t *testing.T) {
 	var stdout bytes.Buffer
 
 	code := cli.Main([]string{"dev", "rule"}, &cli.Env{
-		Stdout: &stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+		Stdout: &stdout, Stderr: io.Discard,
 		Environ: func() []string { return environ }, Dir: root,
 		Watch: func(context.Context, []string) <-chan []string {
 			closed := make(chan []string)
@@ -297,7 +297,7 @@ func TestDevStopsAtTheEndOfItsInput(t *testing.T) {
 	var stdout bytes.Buffer
 
 	code := cli.Main([]string{"dev", "-guest-cache", t.TempDir(), "rule"}, &cli.Env{
-		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: io.Discard,
 		Environ: func() []string { return environ }, Dir: root,
 	})
 	assert.Equal(t, 0, code)
@@ -328,7 +328,7 @@ func TestDevReusesTheCompilationCache(t *testing.T) {
 		defer func() { assert.NoError(t, stdout.Close()) }()
 
 		done <- cli.Main([]string{"dev", "-cache-dir", cache, "pricing"}, &cli.Env{
-			Stdin: stdin, Stdout: stdout, Stderr: io.Discard, Getenv: func(string) string { return "" },
+			Stdin: stdin, Stdout: stdout, Stderr: io.Discard,
 			Environ: func() []string { return environ }, Dir: root,
 			Watch: func(context.Context, []string) <-chan []string { return changes },
 		})

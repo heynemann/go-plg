@@ -354,8 +354,8 @@ func TestWantsColour(t *testing.T) {
 
 	t.Cleanup(func() { assert.NoError(t, devNull.Close()) })
 
-	env := func(out any, vars map[string]string) *Env {
-		e := &Env{Getenv: func(key string) string { return vars[key] }}
+	env := func(out any, environ ...string) *Env {
+		e := &Env{Environ: func() []string { return environ }}
 		if file, ok := out.(*os.File); ok {
 			e.Stdout = file
 		} else {
@@ -365,17 +365,19 @@ func TestWantsColour(t *testing.T) {
 		return e
 	}
 
-	assert.True(t, wantsColour(env(nil, nil), colourAlways))
-	assert.False(t, wantsColour(env(devNull, nil), colourNever))
-	assert.False(t, wantsColour(env(nil, nil), colourAuto), "a buffer is no terminal")
-	assert.True(t, wantsColour(env(devNull, nil), colourAuto), "a character device")
-	assert.False(t, wantsColour(env(devNull, map[string]string{"NO_COLOR": "1"}), colourAuto))
-	assert.False(t, wantsColour(env(devNull, map[string]string{"TERM": "dumb"}), colourAuto))
+	assert.True(t, wantsColour(env(nil), colourAlways))
+	assert.False(t, wantsColour(env(devNull), colourNever))
+	assert.False(t, wantsColour(env(nil), colourAuto), "a buffer is no terminal")
+	assert.True(t, wantsColour(env(devNull), colourAuto), "a character device")
+	assert.False(t, wantsColour(env(devNull, "NO_COLOR=1"), colourAuto))
+	assert.False(t, wantsColour(env(devNull, "TERM=dumb"), colourAuto))
+	assert.True(t, wantsColour(env(devNull, "NO_COLOR=1", "TERM=dumb", "NO_COLOR=", "TERM=xterm"), colourAuto),
+		"a variable's last value is the one")
 
 	closed, err := os.CreateTemp(t.TempDir(), "closed")
 	require.NoError(t, err)
 	require.NoError(t, closed.Close())
-	assert.False(t, wantsColour(env(closed, nil), colourAuto), "a file that cannot be read")
+	assert.False(t, wantsColour(env(closed), colourAuto), "a file that cannot be read")
 }
 
 func TestShareOfALimit(t *testing.T) {

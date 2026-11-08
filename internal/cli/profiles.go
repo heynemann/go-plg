@@ -64,11 +64,11 @@ type tokenSource struct {
 // profilesPath returns where the profiles file is: under $XDG_CONFIG_HOME when it is absolute (the XDG rule),
 // else under ~/.config.
 func profilesPath(env *Env) (string, error) {
-	if dir := env.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
+	if dir := env.getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
 		return filepath.Join(dir, profilesName), nil
 	}
 
-	if home := env.Getenv("HOME"); home != "" {
+	if home := env.getenv("HOME"); home != "" {
 		return filepath.Join(home, ".config", profilesName), nil
 	}
 
@@ -207,7 +207,7 @@ func (p *profile) token(ctx context.Context, env *Env, timeout time.Duration) (s
 	case p.Token == nil:
 		return "", nil
 	case p.Token.Env != "":
-		token := env.Getenv(p.Token.Env)
+		token := env.getenv(p.Token.Env)
 		if token == "" {
 			return "", fmt.Errorf("profile %s: the token's variable %s %w", p.Name, p.Token.Env, errTokenUnset)
 		}

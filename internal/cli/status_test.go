@@ -160,15 +160,21 @@ type ran struct {
 	code           int
 }
 
-// run runs plg with args in the environment's home, with HOME and PLG_STAGING_TOKEN set as well as vars.
+// run runs plg with args in the environment's home, with HOME and PLG_STAGING_TOKEN set as well as vars, and no
+// other variable.
 func (e *environment) run(args []string, vars map[string]string) ran {
 	all := map[string]string{"HOME": e.home, "PLG_STAGING_TOKEN": stagingToken}
 	maps.Copy(all, vars)
 
+	environ := make([]string, 0, len(all))
+	for name, value := range all {
+		environ = append(environ, name+"="+value)
+	}
+
 	var stdout, stderr bytes.Buffer
 
 	code := cli.Main(args, &cli.Env{
-		Stdout: &stdout, Stderr: &stderr, Getenv: func(name string) string { return all[name] }, Dir: e.home,
+		Stdout: &stdout, Stderr: &stderr, Environ: func() []string { return environ }, Dir: e.home,
 	})
 
 	return ran{stdout: stdout.String(), stderr: stderr.String(), code: code}

@@ -21,6 +21,7 @@ import (
 	"github.com/heynemann/go-plg/internal/buildguest"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/gen"
+	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/tscheck"
 )
 
@@ -140,10 +141,8 @@ type Env struct {
 	Stdout io.Writer
 	// Stderr gets errors, usage and warm's compile log.
 	Stderr io.Writer
-	// Getenv reads the environment variables (os.Getenv).
-	Getenv func(key string) string
-	// Environ returns the environment (os.Environ), which validate runs the go command in; nil means the
-	// process's.
+	// Environ returns the environment (os.Environ): the variables plg reads and those the go command and git run
+	// with; nil means the process's.
 	Environ func() []string
 	// Watch watches the files under paths (directories and files) for plg dev until ctx ends, sending the paths
 	// that changed; nil polls the file system every quarter of a second.
@@ -159,6 +158,11 @@ func (e *Env) environ() []string {
 	}
 
 	return e.Environ()
+}
+
+// getenv returns the value of the environment variable key ("" when it is unset).
+func (e *Env) getenv(key string) string {
+	return modfetch.Getenv(e.environ(), key)
 }
 
 // Main runs plg with args (the command line without the program name) in env, and returns the process exit
