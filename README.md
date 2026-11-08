@@ -679,7 +679,9 @@ cases:
 - **input** values are YAML, decoded strictly against the contract's types: an unknown field, a value of the wrong
   kind, an overflowing number, bad base64 (`[]byte`) or a timestamp that is not RFC 3339 fails the case with its
   `file:line:col`, rather than becoming a silent zero. `{$ref: <path>}` reads a value from a fixture file, relative
-  to the plugin's directory; fixtures may hold `$ref`s too (cycles and paths out of the directory are errors).
+  to the plugin's directory; fixtures may hold `$ref`s too (cycles and paths out of the directory are errors); the
+  fixtures a case's `$ref`s take add up to at most 16 MiB, a fixture counting each time one takes it (each file at
+  most 1 MiB).
 - **host:** a Host call no stub matches fails the case (and returns an error to the plugin); `times` counts the
   calls a stub must answer (`times: 0`: never). **http:** a request no stub matches fails the case; the policy is
   enforced first, so a host it refuses never reaches a stub. Stubs never dial, so the private-network protection
@@ -687,7 +689,8 @@ cases:
 - **secrets:** each secret the call (or `Create`) reads must be faked; a read the case does not fake, or a fake of
   a name `plugin.yaml` does not declare, fails the case. Every read gets the case's value (no cache across cases).
 - **expect:** `result` (a list when the method has several results), `error` (panics, traps and timeouts never
-  match it), or `issues` (Validate's; fields left out match anything).
+  match it), or `issues` (Validate's; fields left out match anything). Floats may be written `.nan`, `.inf` and
+  `-.inf`; an expected `.nan` matches NaN.
 
 Each case gets a row; a failed one is followed by what was expected and what came back, a line per differing field
 of structs, lists and maps, and a `tests` row sums up, followed by the [`resources`](#checking-a-plugin-before-registering-it-plg-validate)
