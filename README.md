@@ -1007,6 +1007,9 @@ func (s *blobStorage) List(ctx context.Context) ([]plg.Descriptor, error) {
 			return nil, err
 		}
 		desc.Key = key
+		if desc.Version == "" { // the digest Register would give it, so a poll skips an unchanged artifact
+			desc.Version = art.Provenance().Digest
+		}
 		descs = append(descs, desc)
 	}
 	return descs, nil
