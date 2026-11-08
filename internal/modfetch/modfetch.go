@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -256,10 +257,28 @@ func (r *Requirement) replaced(by module.Version) {
 	}
 }
 
+// ImportPath returns the import path of the package in the directory dir: the module path of the go.mod in dir or
+// the nearest directory above it, joined with dir's path below that go.mod's directory. It fails with [ErrGoMod]
+// when there is no go.mod or it declares no module path.
+func ImportPath(dir string) (string, error) {
+	found, err := findGoMod(dir)
+	if err != nil {
+		return "", err
+	}
+
+	modPath := modfile.ModulePath(found.data)
+	if modPath == "" {
+		return "", fmt.Errorf("%w: %s declares no module path", ErrGoMod, found.path)
+	}
+
+	return path.Join(modPath, found.below), nil
+}
+
 // goModFile is a go.mod file read.
 type goModFile struct {
-	path string
-	data []byte
+	path  string
+	below string // the directory findGoMod started from, below the go.mod's (slash-separated, "" for the same)
+	data  []byte
 }
 
 // findGoMod reads the go.mod in dir or the nearest directory above it.
@@ -269,11 +288,15 @@ func findGoMod(dir string) (goModFile, error) {
 		return goModFile{}, fmt.Errorf("modfetch: %w", err)
 	}
 
+	start := dir
+
 	for {
 		found := goModFile{path: filepath.Join(dir, "go.mod")}
 
 		found.data, err = os.ReadFile(found.path)
 		if err == nil {
+			found.below = filepath.ToSlash(strings.TrimLeft(strings.TrimPrefix(start, dir), string(filepath.Separator)))
+
 			return found, nil
 		}
 

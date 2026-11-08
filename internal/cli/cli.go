@@ -47,12 +47,15 @@ commands:
                       build a custom Go guest whose plugins may also import the given packages (standard library
                       packages, or pure-Go packages of modules the service module in the current directory
                       requires); pass it to plg.WithGoGuest
-  validate [-host Interface] [-cache-dir dir] <plugin dir>
+  validate [-host Interface] [-cache-dir dir] <plugin dir or author repository>
                       check a plugin before registering it, exiting non-zero on any error: read its plugin.yaml,
                       resolve the contract module it pins with the go command (go mod download: GOPROXY,
                       GOPRIVATE and credentials apply, and a module in the Go module cache needs no network),
                       type-check the contract, check that a Go plugin's go.mod requires the pinned version, then
                       load the plugin and run its Create in the real guest, with a Host whose every call fails;
+                      a directory holding plg.yaml is an author repository: every plugin it lists is validated,
+                      then summarised, and its settings (shared directories, limits, requireOwnership, replace)
+                      apply, also to one of its plugins validated alone;
                       -host names the contract's Host interface a Lua or TypeScript plugin uses (a Go plugin's
                       Create names it; by default the contract's only interface that can be a Host),
                       -cache-dir is the compilation cache directory, as for warm

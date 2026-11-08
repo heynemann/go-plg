@@ -1,0 +1,8 @@
+# An author repository: three plugins (Go, Lua, TypeScript) importing the shared directory lib. The tests list
+# the other plugins here in plg.yaml files of their own.
+plugins:
+  - gold
+  - rules/silver
+  - coupon
+shared:
+  - lib

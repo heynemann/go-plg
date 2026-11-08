@@ -11,6 +11,7 @@ import (
 
 	"github.com/heynemann/go-plg/internal/adminjson"
 	"github.com/heynemann/go-plg/internal/contractref"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goabi"
 )
 
@@ -55,6 +56,11 @@ type Options struct {
 	Logger *slog.Logger
 	// CacheDir is the guests' compilation cache directory; empty means plg's default.
 	CacheDir string
+	// Limits are the limits the plugin runs under: its instance's memory limit, as plg.WithMemoryLimit sets it,
+	// the pool's size, as plg.WithPool does, and a deadline for Create; unset ones are plg's defaults.
+	Limits directive.Limits
+	// RequireOwnership makes missing ownership an error, as plg.WithRequiredOwnership does.
+	RequireOwnership bool
 }
 
 // Check loads plugin against contract and runs its Create, with the stub Host when contract has one, in a throwaway

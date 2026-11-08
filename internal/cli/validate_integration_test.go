@@ -203,7 +203,9 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 		{"go.mod pinning another version", []string{"gomodmismatch"}, []string{
 			"go.mod     FAIL    the plugin's go.mod does not require the pinned contract version: " +
 				filepath.Join(abs(t, "gomodmismatch"), "go.mod") +
-				" requires example.com/rewards v1.1.0, plugin.yaml pins v1.2.0\n",
+				" requires example.com/rewards v1.1.0, plugin.yaml pins v1.2.0: raise the requirement in " +
+				filepath.Join(abs(t, "gomodmismatch"), "go.mod") + " to example.com/rewards v1.2.0 (go get " +
+				"example.com/rewards@v1.2.0)\n",
 		}},
 		{"no plugin.yaml", []string{"nosuchdir"}, []string{
 			"manifest  FAIL    open " + filepath.Join("..", "..", "testdata", "validate", "plugins", "nosuchdir",
@@ -223,7 +225,7 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 			[]string{"goimportsother"},
 			[]string{
 				"types      warning  the plugin was not type-checked: it imports example.com/other, and only the contract " +
-					"package and the standard library are type-checked\n",
+					"package, vendored packages and the standard library are type-checked\n",
 				"load       FAIL     plugin source failed to load: loading plugin: ",
 				`import "example.com/other" error: unable to find source related to: "example.com/other"`,
 			},

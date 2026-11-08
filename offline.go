@@ -54,9 +54,7 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 		return nil, err
 	}
 
-	cfg, err := registerOptions(offlineName, []RegisterOption{
-		WithStorage(NewMemoryStorage(offlineStorage)), WithPool(1, 1),
-	})
+	cfg, err := registerOptions(offlineName, offlineOptions(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -75,9 +73,37 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 
 	defer reg.http.Close()
 
+	if opts.Limits.Timeout > 0 {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, opts.Limits.Timeout)
+		defer cancel()
+	}
+
 	report, err := ctr.checkAgainst(ctx, reg, offlineStorage, &desc, plugin.Files)
 
 	return newAdminReport(&report), err
+}
+
+// offlineOptions are the Register options of a plg validate check: its storage, its limits (a pool of one instance
+// by default) and its ownership rule.
+func offlineOptions(opts *offline.Options) []RegisterOption {
+	low, high := 1, 1
+	if opts.Limits.PoolMax != 0 {
+		low, high = opts.Limits.PoolMin, opts.Limits.PoolMax
+	}
+
+	options := []RegisterOption{WithStorage(NewMemoryStorage(offlineStorage)), WithPool(low, high)}
+
+	if opts.Limits.Memory != 0 {
+		options = append(options, WithMemoryLimit(opts.Limits.Memory))
+	}
+
+	if opts.RequireOwnership {
+		options = append(options, WithRequiredOwnership())
+	}
+
+	return options
 }
 
 // offlineContract prepares the contract plg validate described, checking its methods as Register checks an

@@ -16,10 +16,14 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/adminjson"
+	"github.com/heynemann/go-plg/internal/authorrepo"
 	"github.com/heynemann/go-plg/internal/contractload"
 	"github.com/heynemann/go-plg/internal/contractref"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
@@ -45,16 +49,17 @@ func runValidate(env *Env, args []string) outcome {
 	}
 
 	if len(operands) != 1 {
-		return usageError("validate", "name one plugin directory")
+		return usageError("validate", "name one plugin directory or author repository")
 	}
 
 	dir := resolve(env.Dir, operands[0])
-	run := &validation{env: env, dir: dir, host: *host, table: newTable(env.Stdout)}
+	run := validation{env: env, dir: dir, host: *host, cacheDir: resolve(env.Dir, *cacheDir)}
 
-	if *cacheDir != "" {
-		run.cacheDir = resolve(env.Dir, *cacheDir)
+	if authorrepo.Exists(dir) {
+		return validateRepo(&run)
 	}
 
+	run.table = newStepTable(env.Stdout)
 	run.table.row("STEP", "RESULT", "DETAIL")
 
 	valid := run.run(context.Background())
@@ -71,10 +76,14 @@ func runValidate(env *Env, args []string) outcome {
 	return outcome{code: exitOK}
 }
 
-// validation is one run of plg validate on the plugin directory dir; each step adds its rows to table.
+// validation is one run of plg validate on the plugin directory dir; each step adds its rows to table. repo is the
+// author repository listing the plugin, if any, and files the plugin's files, the repository's shared directories
+// copied in.
 type validation struct {
 	env      *Env
-	table    *table
+	table    *stepTable
+	repo     *authorrepo.Repo
+	files    fs.FS
 	dir      string
 	host     string
 	cacheDir string
@@ -83,10 +92,21 @@ type validation struct {
 
 // run runs the steps in order, stopping at the first that fails; it reports whether every step passed.
 func (v *validation) run(ctx context.Context) bool {
+	if !v.repository() {
+		return false
+	}
+
 	manifest, desc, ok := v.manifest()
 	if !ok {
 		return false
 	}
+
+	cleanup, ok := v.shared(&desc)
+	if !ok {
+		return false
+	}
+
+	defer cleanup()
 
 	ref, err := contractref.Parse(desc.Implements) // ParseManifest checked it
 	if err != nil {
@@ -107,7 +127,7 @@ func (v *validation) run(ctx context.Context) bool {
 		return false
 	}
 
-	return v.load(ctx, loaded.Contract, manifest, &desc)
+	return v.load(ctx, loaded, manifest, &desc)
 }
 
 // failed adds the failed step's row.
@@ -140,8 +160,19 @@ func (v *validation) key() string {
 	return filepath.Base(v.dir)
 }
 
-// resolve fetches the contract module the plugin pins through the go command, or finds it in the module cache.
+// resolve fetches the contract module the plugin pins through the go command, or finds it in the module cache; a
+// module the author repository replaces is its local checkout.
 func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch.Module, bool) {
+	replaced, err := v.replaced(ref)
+
+	switch {
+	case err != nil:
+		return modfetch.Module{}, v.failed("contract", err)
+	case replaced != nil:
+		return *replaced, true
+	default:
+	}
+
 	fetcher := modfetch.Fetcher{Environ: v.env.environ()}
 
 	mod, err := fetcher.Fetch(ctx, ref.Package, ref.Version)
@@ -172,7 +203,7 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	switch {
 	case host != "":
 	case desc.Language == plg.LanguageGo:
-		host = createHost(os.DirFS(v.dir), desc.Entrypoint, ref.Package, loaded.PackageName())
+		host = createHost(v.files, desc.Entrypoint, ref.Package, loaded.PackageName())
 	default:
 		v.defaultHost(loaded, ref.Package)
 	}
@@ -222,7 +253,7 @@ func (v *validation) defaultHost(loaded *contractload.Loaded, pkgPath string) {
 
 // goTypes type-checks a Go plugin's package against the contract.
 func (v *validation) goTypes(loaded *contractload.Loaded, desc *plg.Descriptor) bool {
-	err := loaded.CheckGo(os.DirFS(v.dir), goPackageDir(desc.Entrypoint))
+	err := loaded.CheckGo(v.files, goPackageDir(desc.Entrypoint))
 
 	switch {
 	case errors.Is(err, contractload.ErrGoUnchecked):
@@ -246,7 +277,9 @@ func goPackageDir(entrypoint string) string {
 	return entrypoint
 }
 
-// goMod checks that a Go plugin's module requires the contract module at the version plugin.yaml pins.
+// goMod checks that a Go plugin's module requires the contract module at the version plugin.yaml pins. When they
+// differ, it names the one to change: the older of the two, since the plugin's code may use what the newer
+// version adds and its pin is the oldest contract a service may serve it with.
 func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 	req, err := modfetch.Required(v.dir, mod.Path)
 	if err != nil {
@@ -258,8 +291,15 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 		v.table.row("go.mod", stepWarning, fmt.Sprintf("%s replaces %s by the directory %s: the pin %s is not "+
 			"checked against it", req.GoMod, mod.Path, req.Dir, ref.Version))
 	case req.Version != ref.Version:
-		return v.failed("go.mod", fmt.Errorf("%w: %s requires %s %s, plugin.yaml pins %s", modfetch.ErrGoMod,
-			req.GoMod, mod.Path, req.Version, ref.Version))
+		change := fmt.Sprintf("raise the pin in %s to %s@%s", filepath.Join(v.dir, "plugin.yaml"), ref.Name(),
+			req.Version)
+		if semver.Compare(ref.Version, req.Version) > 0 {
+			change = fmt.Sprintf("raise the requirement in %s to %s %s (go get %s@%s)", req.GoMod, mod.Path,
+				ref.Version, mod.Path, ref.Version)
+		}
+
+		return v.failed("go.mod", fmt.Errorf("%w: %s requires %s %s, plugin.yaml pins %s: %s", modfetch.ErrGoMod,
+			req.GoMod, mod.Path, req.Version, ref.Version, change))
 	default:
 		v.table.row("go.mod", stepOK, fmt.Sprintf("%s requires %s %s", req.GoMod, mod.Path, req.Version))
 	}
@@ -267,13 +307,23 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 	return true
 }
 
-// load loads the plugin with plg's own loading code and runs its Create in the real guest.
-func (v *validation) load(ctx context.Context, contract *offline.Contract, manifest []byte, desc *plg.Descriptor,
+// load loads the plugin with plg's own loading code and runs its Create in the real guest, under the contract's
+// limits with the author repository's overrides and the repository's ownership rule.
+func (v *validation) load(ctx context.Context, loaded *contractload.Loaded, manifest []byte, desc *plg.Descriptor,
 ) bool {
 	logger := slog.New(slog.NewTextHandler(v.env.Stderr, nil))
-	plugin := &offline.Plugin{Files: os.DirFS(v.dir), Key: v.key(), Manifest: manifest}
+	plugin := &offline.Plugin{Files: v.files, Key: v.key(), Manifest: manifest}
+	opts := &offline.Options{Logger: logger, CacheDir: v.cacheDir}
 
-	report, err := offline.Check(ctx, contract, plugin, &offline.Options{Logger: logger, CacheDir: v.cacheDir})
+	if v.repo != nil {
+		opts.Limits, opts.RequireOwnership = v.repo.Limits, v.repo.RequireOwnership
+	}
+
+	if opts.Limits != (directive.Limits{}) {
+		v.table.row("limits", stepOK, opts.Limits.String()+" ("+authorrepo.FileName+")")
+	}
+
+	report, err := offline.Check(ctx, loaded.Contract, plugin, opts)
 	if err != nil {
 		return v.failed("load", err)
 	}
@@ -297,7 +347,7 @@ func (v *validation) load(ctx context.Context, contract *offline.Contract, manif
 }
 
 // issues adds a row per issue of report.
-func issues(table *table, report *adminjson.Report) {
+func issues(table *stepTable, report *adminjson.Report) {
 	for _, issue := range report.Issues {
 		at := ""
 		if issue.Field != "" {

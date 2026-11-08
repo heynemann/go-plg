@@ -26,7 +26,8 @@ HTTP allowlist).
 - [Writing plugins](#writing-plugins) ([Go](#go-plugins), [Lua](#lua-plugins), [TypeScript](#typescript-plugins))
 - [Guests and blank imports](#guests-and-blank-imports)
 - [Declaring the interface: `implements`](#declaring-the-interface-implements) and
-  [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate)
+  [checking a plugin before registering it: `plg validate`](#checking-a-plugin-before-registering-it-plg-validate),
+  also of [author repositories (`plg.yaml`)](#author-repositories-plgyaml)
 - [Storages](#storages)
 - [Ownership](#ownership) and [Validation](#validation)
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
@@ -330,6 +331,10 @@ func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[gre
 - **No goroutines:** a `go` statement fails Register with `plg.ErrGoStatement` (file:line:col). A WebAssembly
   instance has a single thread, and guest goroutines would be paused between calls; parallelism comes from the
   instance pool.
+- **Vendored packages:** the packages of a `vendor/` directory in the package's directory are importable by
+  their import paths, as Go vendors packages (`vendor/example.com/team/lib` is `import "example.com/team/lib"`),
+  under the same allowlist; they may not take the contract package's import path. `plg validate` puts an author
+  repository's [shared directories](#author-repositories-plgyaml) there.
 
 ### Lua plugins
 
@@ -449,7 +454,8 @@ pseudo-version and changes with `+dirty`) or is missing from the build info, the
 ## Checking a plugin before registering it: `plg validate`
 
 `plg validate <plugin dir>` checks a plugin on the author's machine, before any service sees it, with plg's own
-loading code and the real guests (the command links all three):
+loading code and the real guests (the command links all three); `plg validate <repository>` checks every plugin of
+an [author repository](#author-repositories-plgyaml):
 
 ```sh
 go run github.com/heynemann/go-plg/cmd/plg validate plugins/gold
@@ -482,11 +488,14 @@ output, compiles, issues) also goes.
   contract whose types the interpreter cannot build fails here, as a Go plugin of it would fail to load.
 - **go.mod** (Go plugins): the `go.mod` of the plugin's module (its directory's or the nearest above) must require
   the contract module at the pinned version, after its `replace` directives; a `replace` by a local directory is
-  a warning, since its version cannot be told.
+  a warning, since its version cannot be told. When they differ, the step names the one to change, the older of
+  the two (the code may use what the newer version adds, and the pin is the oldest contract a service may serve
+  the plugin with): `raise the pin in …/plugin.yaml to …@v1.3.0` or `raise the requirement in …/go.mod to
+  example.com/rewards v1.3.0 (go get example.com/rewards@v1.3.0)`.
 - **types** (Go plugins): the plugin's package is type-checked against the contract, as the Go compiler would, so
   a method of the wrong signature fails with its file:line:column (the Go interpreter would accept the plugin and
-  fail only once the method is called). A plugin importing a package beyond the contract and the standard library
-  is not type-checked (a warning).
+  fail only once the method is called). Its vendored packages are type-checked with it; a plugin importing a
+  package beyond the contract, its vendored packages and the standard library is not type-checked (a warning).
 - **load:** the plugin is checked as [`plg.Check`](#checking-a-candidate-plgcheck) checks a candidate, against a
   registration of the resolved contract (its module's version is the one the pin is checked against, by the same
   rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
@@ -498,6 +507,76 @@ output, compiles, issues) also goes.
   Issues follow the `load` row, one row each.
 
 `-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest).
+
+### Author repositories: `plg.yaml`
+
+Teams keep several plugins in one repository. A `plg.yaml` at its root lists them and what `plg validate` (and,
+later, `plg pack`) applies to them all:
+
+```yaml
+plugins:                 # the plugins' directories (at least one); a plugin's key is its directory's name
+  - gold
+  - rules/silver
+  - coupon
+shared:                  # directories copied into every plugin's files
+  - lib
+limits:                  # override the contract's //plg:limits for every plugin
+  memory: 64MiB          # bytes, or KiB, MiB, GiB; from 64KiB to 4GiB
+  timeout: 2s            # a deadline for Create
+  pool: 1..8             # N or MIN..MAX, from 1 to 4096
+requireOwnership: true   # a plugin without a complete owner fails instead of warning
+replace:                 # contract modules taken from local checkouts, like go.mod's replace
+  example.com/rewards: ../rewards
+```
+
+It is read in plugin.yaml's strict YAML subset (unknown or duplicate keys, anchors, aliases and tags are errors).
+Every directory must exist inside the repository, none listed twice nor inside another, and plugins' keys must
+differ; a replace's directory must hold a go.mod declaring that module. An invalid plg.yaml fails before any
+plugin is validated.
+
+```sh
+go run github.com/heynemann/go-plg/cmd/plg validate .
+```
+
+```
+gold
+STEP       RESULT  DETAIL
+plg.yaml   ok      /home/ana/plugins/plg.yaml; shared lib
+manifest   ok      go plugin gold implementing example.com/rewards/cohort.Provider@v1.2.0
+shared     ok      copied lib at vendor/example.com/plugins/lib
+…
+
+rules/silver
+STEP       RESULT  DETAIL
+…
+
+PLUGIN        RESULT  DETAIL
+gold          ok
+rules/silver  ok      1 warning
+coupon        FAIL    failed at load
+```
+
+Each listed plugin gets its section, in plg.yaml's order, then a summary with the step each failed at or its
+warnings; the command exits 1 when any plugin fails (`plg validate: 1 of the 3 plugins …/plg.yaml lists is not
+valid: coupon`). Validating one plugin directory of a repository (`plg validate rules/silver`) applies the
+settings of the nearest plg.yaml above it (up to the directory holding `.git`) when that file lists it, and warns
+otherwise. `-host` applies to every plugin.
+
+- **Shared directories** keep the runtime's rule that a plugin is one directory: validate copies the plugin and
+  each shared directory into a temporary directory and validates that copy (a plugin holding a file where a
+  shared directory goes fails the `shared` step). Lua and TypeScript plugins find a shared directory at its path
+  in the repository, from the plugin's root: `require("lib.tiers")`, `import { tier } from "./lib/tiers"` (in the
+  repository, TypeScript's `rootDirs` and the Lua Language Server's workspace root resolve the same names). Go
+  plugins import shared packages by their real import path (the module path of the go.mod above the shared
+  directory, then its path below it), so `go build ./...` and editors work in the repository; validate copies the
+  shared directories holding Go files into the plugin's [`vendor/`](#go-plugins) at that path. A shared Go
+  directory must be in a Go module.
+- **limits** override, key by key, the limits the contract recommends; the `limits` row shows those in force.
+  The memory limit is each instance's (`plg.WithMemoryLimit`), the timeout bounds `Create`.
+- **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
+- **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
+  cache needed): the contract step and the load warn that the pin is not checked against it, as a service built
+  with a directory replace does.
 
 ## Storages
 

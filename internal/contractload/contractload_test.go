@@ -315,6 +315,68 @@ func Create() (testcontract.Fooer, error) { return half{}, nil }
 	require.ErrorContains(t, err, "reading the plugin: ")
 }
 
+// TestCheckGoChecksVendoredPackages type-checks the packages a Go plugin vendors as it imports them: vendored
+// packages importing each other and the contract check with the plugin, a type error in it fails naming its file, line and column, a
+// vendored import cycle fails, and a package neither vendored nor in the standard library is left unchecked.
+//
+//nolint:paralleltest // as TestDescribesContractsAsReflectionDoes
+func TestCheckGoChecksVendoredPackages(t *testing.T) {
+	loaded, err := contractload.Load("../testcontract", reflect.TypeFor[testcontract.Fooer]().PkgPath(), "Fooer", "")
+	require.NoError(t, err)
+
+	const plugin = "package p\n\nimport \"example.com/repo/lib\"\n\nfunc Greet(name string) string { return lib.Greet(name) }\n"
+
+	file := func(src string) *fstest.MapFile { return &fstest.MapFile{Data: []byte(src)} }
+	vendored := "p/vendor/example.com/repo/lib/lib.go"
+
+	require.NoError(t, loaded.CheckGo(fstest.MapFS{
+		"p/plugin.go": file(
+			"package p\n\nimport (\n\t\"example.com/repo/lib\"\n\t\"example.com/repo/lib/words\"\n)\n\n" +
+				"func Greet(name string) string { return lib.Greet(name) + words.Hello }\n",
+		),
+		vendored: file(
+			"package lib\n\nimport (\n\t\"example.com/repo/lib/words\"\n\t\"github.com/heynemann/go-plg/internal/testcontract\"\n)\n\n" +
+				"func Greet(name string) string { return words.Hello + name + testcontract.Greeting(\"\") }\n",
+		),
+		"p/vendor/example.com/repo/lib/words/words.go": file("package words\n\nconst Hello = \"hello \"\n"),
+	}, "p"))
+
+	err = loaded.CheckGo(fstest.MapFS{
+		"p/plugin.go": file(plugin),
+		vendored:      file("package lib\n\nfunc Greet(name string) int { return len(name) }\n"),
+	}, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes)
+	require.ErrorContains(t, err, "p/plugin.go:5:41: cannot use lib.Greet(name) (value of type int) as string "+
+		"value in return statement")
+
+	err = loaded.CheckGo(fstest.MapFS{
+		"p/plugin.go": file(plugin),
+		vendored:      file("package lib\n\nfunc Greet(name string) string { return name + 1 }\n"),
+	}, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes)
+	require.ErrorContains(t, err, "p/vendor/example.com/repo/lib/lib.go:3:")
+
+	err = loaded.CheckGo(fstest.MapFS{
+		"p/plugin.go": file(plugin),
+		vendored: file(
+			"package lib\n\nimport \"example.com/repo/lib\"\n\nfunc Greet(name string) string { return lib.Greet(name) }\n",
+		),
+	}, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes)
+	require.ErrorContains(t, err, "import cycle: example.com/repo/lib")
+
+	err = loaded.CheckGo(fstest.MapFS{
+		"p/plugin.go": file(plugin),
+		vendored:      file("package lib\n\nfunc Greet(name string) string {\n"),
+	}, "p")
+	require.ErrorIs(t, err, contractload.ErrGoTypes)
+	require.ErrorContains(t, err, "p/vendor/example.com/repo/lib/lib.go:3:34: expected '}', found 'EOF'")
+
+	err = loaded.CheckGo(fstest.MapFS{"p/plugin.go": file(plugin)}, "p")
+	require.ErrorIs(t, err, contractload.ErrGoUnchecked, "lib is vendored by no plugin here")
+	require.ErrorContains(t, err, "it imports example.com/repo/lib")
+}
+
 // contractDir writes a contract package of the given declarations, importing context, to a temporary directory.
 func contractDir(t *testing.T, decls string) string {
 	t.Helper()

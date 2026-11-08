@@ -36,6 +36,7 @@ import (
 	"github.com/heynemann/go-plg/internal/guestout"
 	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/memfs"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -2123,6 +2124,51 @@ func TestCheckNoGoStatements(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 			assert.Contains(t, err.Error(), tc.msg)
 		})
+	}
+}
+
+// TestGoSourceTreeMountsVendoredPackages mounts a Go plugin's vendor directory at its packages' import paths, beside
+// the plugin and the contract, and refuses vendored packages taking the contract's import path or plg's own.
+func TestGoSourceTreeMountsVendoredPackages(t *testing.T) {
+	t.Parallel()
+
+	var source memfs.Builder
+
+	require.NoError(t, source.Add("c.go", []byte("package c\n")))
+
+	contractSource, err := source.Build()
+	require.NoError(t, err)
+
+	contr := &contract{pkgPath: "example.com/c", source: contractSource}
+	file := &fstest.MapFile{Data: []byte("package x\n")}
+
+	tree, err := goSourceTree(contr, []byte("package dispatch\n"), fstest.MapFS{
+		"p/plugin.go":                             file,
+		"p/vendor/example.com/repo/lib/lib.go":    file,
+		"p/vendor/example.com/repo/lib/x/x.go":    file,
+		"p/vendor/example.com/c/sub/sub.go":       file,
+		"other/vendor/example.com/elsewhere/e.go": file,
+	}, "p/plugin.go")
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"src/example.com/c/c.go", "src/plg.local/plugin/plugin.go", "src/plg.local/dispatch/dispatch.go",
+		"src/example.com/repo/lib/lib.go", "src/example.com/repo/lib/x/x.go", "src/example.com/c/sub/sub.go",
+	} {
+		_, err = fs.Stat(tree, name)
+		require.NoError(t, err, name)
+	}
+
+	_, err = fs.Stat(tree, "src/example.com/elsewhere")
+	require.ErrorIs(t, err, fs.ErrNotExist, "only the package directory's vendor directory is mounted")
+
+	_, err = goSourceTree(contr, nil, fstest.MapFS{"plugin.go": file, "vendor": file}, ".")
+	require.NoError(t, err, "a file named vendor is the plugin's own")
+
+	for _, vendored := range []string{"example.com/c/v.go", "plg.local/v.go", "plg.local/dispatch/v.go"} {
+		_, err = goSourceTree(contr, nil, fstest.MapFS{"plugin.go": file, "vendor/" + vendored: file}, ".")
+		require.ErrorIs(t, err, errVendored, vendored)
+		assert.ErrorContains(t, err, "vendor/"+vendored, vendored)
 	}
 }
 

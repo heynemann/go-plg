@@ -18,7 +18,8 @@ import (
 
 // TestValidateFromTheCommand builds the plg command and validates the testdata's plugins with it, the contract
 // module served by a file-based GOPROXY: a good TypeScript plugin passes with exit code 0, and one whose Create
-// fails exits 1, the failed step on stdout and the verdict on stderr.
+// fails exits 1, the failed step on stdout and the verdict on stderr; the testdata's author repository, whose
+// plugins of the three languages import its shared directory, passes with a summary.
 func TestValidateFromTheCommand(t *testing.T) {
 	t.Parallel()
 
@@ -68,4 +69,11 @@ func TestValidateFromTheCommand(t *testing.T) {
 	assert.Contains(t, stdout, "load       FAIL    plugin Create failed: no cohort configured\n")
 	assert.Contains(t, stderr, "plg validate: "+filepath.Join(testdata, "plugins", "createfails")+
 		" is not a valid plugin\n")
+
+	stdout, stderr, code = plgValidate(filepath.Join("..", "repo"))
+	require.Equal(t, 0, code, stdout+stderr)
+	assert.Contains(t, stdout, "\nrules/silver\nSTEP ")
+	assert.Contains(t, stdout, "shared     ok      copied lib at vendor/example.com/rewardsrepo/lib\n")
+	assert.Contains(t, stdout, "\n\nPLUGIN        RESULT  DETAIL\ngold          ok      \nrules/silver  ok      \n"+
+		"coupon        ok      \n")
 }

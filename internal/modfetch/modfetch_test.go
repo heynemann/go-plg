@@ -185,3 +185,31 @@ func TestRequiredReadsTheContractRequirement(t *testing.T) {
 	_, err = modfetch.Required(unreadable, "example.com/rewards")
 	require.ErrorContains(t, err, "is a directory", "a go.mod that is a directory cannot be read")
 }
+
+// TestImportPathJoinsTheModulePath returns a directory's import path from the nearest go.mod at or above it, and
+// fails without a go.mod or a module path.
+func TestImportPathJoinsTheModulePath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "lib", "deep"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/repo\n"), 0o600))
+
+	for sub, want := range map[string]string{
+		".": "example.com/repo", "lib": "example.com/repo/lib", filepath.Join("lib", "deep"): "example.com/repo/lib/deep",
+	} {
+		got, err := modfetch.ImportPath(filepath.Join(dir, sub))
+		require.NoError(t, err, sub)
+		assert.Equal(t, want, got, sub)
+	}
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("go 1.27\n"), 0o600))
+
+	_, err := modfetch.ImportPath(filepath.Join(dir, "lib"))
+	require.ErrorIs(t, err, modfetch.ErrGoMod)
+	require.ErrorContains(t, err, filepath.Join(dir, "go.mod")+" declares no module path")
+
+	_, err = modfetch.ImportPath(t.TempDir())
+	require.ErrorIs(t, err, modfetch.ErrGoMod)
+	require.ErrorContains(t, err, "no go.mod in ")
+}
