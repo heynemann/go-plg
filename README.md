@@ -492,8 +492,10 @@ output, compiles, issues) also goes.
   rule as at Register): the snapshot limits, the ownership check (missing ownership is a warning issue), the
   guest's own checks, then `Create` in one throwaway instance of the real guest. The plugins get a stub Host whose
   every method fails with `plg validate runs plugins without the service's Host: <Host>.<Method> was called`.
-  A Go plugin's `Create` names its Host; Lua and TypeScript plugins name none, so pass `-host <Interface>` (an
-  interface of the contract package) when they use one. Issues follow the `load` row, one row each.
+  A Go plugin's `Create` names its Host. Lua and TypeScript plugins name none: when the contract package declares
+  exactly one other interface that passes plg's Host checks, it is their Host; with several, a failed `load` row is
+  followed by the hint `pass -host <A|B>`, and `-host <Interface>` (an interface of the contract package) picks one.
+  Issues follow the `load` row, one row each.
 
 `-cache-dir` sets the guests' compilation cache, as for [`plg warm`](#deployment-plg-warm-and-plg-build-guest).
 

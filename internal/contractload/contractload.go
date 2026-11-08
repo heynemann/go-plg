@@ -39,10 +39,12 @@ var (
 // Loaded is a contract package plg validate loaded.
 type Loaded struct {
 	// Contract is the contract as plg loads plugins against it. It has no Module: the caller resolved it.
-	Contract *offline.Contract
-	pkg      *types.Package // the package, type-checked
-	fset     *token.FileSet // the positions of the standard library packages std imported
-	std      types.Importer // the standard library packages the package imports, shared with Go plugins' checks
+	Contract    *offline.Contract
+	pkg         *types.Package // the package, type-checked
+	fset        *token.FileSet // the positions of the standard library packages std imported
+	std         types.Importer // the standard library packages the package imports, shared with Go plugins' checks
+	interpreter *interpreter   // the package's interpreter, which interprets the Host's methods too
+	implemented string         // the interface's name
 }
 
 // iface is an interface the contract package declares.
@@ -84,14 +86,55 @@ func Load(dir, pkgPath, name, host string) (*Loaded, error) {
 		return nil, err
 	}
 
+	loaded := &Loaded{Contract: contract, pkg: pkg, fset: fset, std: std, interpreter: interpreter, implemented: name}
+
 	if host != "" {
-		contract.Host, err = loadHost(pkg, interpreter, host)
+		err = loaded.SetHost(host)
 		if err != nil {
-			return nil, fmt.Errorf("host: %w", err)
+			return nil, err
 		}
 	}
 
-	return &Loaded{Contract: contract, pkg: pkg, fset: fset, std: std}, nil
+	return loaded, nil
+}
+
+// PackageName is the contract package's name, which a Go plugin importing it without a name refers to it by.
+func (l *Loaded) PackageName() string {
+	return l.pkg.Name()
+}
+
+// SetHost describes the Host interface name of the contract package as the Contract's Host.
+func (l *Loaded) SetHost(name string) error {
+	host, err := loadHost(l.pkg, l.interpreter, name)
+	if err != nil {
+		return fmt.Errorf("host: %w", err)
+	}
+
+	l.Contract.Host = host
+
+	return nil
+}
+
+// Hosts describes, by name, every interface besides the implemented one the contract package declares that could
+// be its Host: those plg gen could generate for and the interpreter can interpret. It does not check them as plg
+// checks a Host ([offline.CheckHost] does).
+func (l *Loaded) Hosts() []*offline.Host {
+	var hosts []*offline.Host
+
+	scope := l.pkg.Scope()
+	for _, name := range scope.Names() { // sorted
+		obj, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok || name == l.implemented || !obj.Exported() || !types.IsInterface(obj.Type()) {
+			continue
+		}
+
+		host, err := loadHost(l.pkg, l.interpreter, name)
+		if err == nil {
+			hosts = append(hosts, host)
+		}
+	}
+
+	return hosts
 }
 
 // loadHost describes the Host interface name of pkg.

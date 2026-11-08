@@ -54,7 +54,8 @@ commands:
                       type-check the contract, check that a Go plugin's go.mod requires the pinned version, then
                       load the plugin and run its Create in the real guest, with a Host whose every call fails;
                       -host names the contract's Host interface a Lua or TypeScript plugin uses (a Go plugin's
-                      Create names it), -cache-dir is the compilation cache directory, as for warm
+                      Create names it; by default the contract's only interface that can be a Host),
+                      -cache-dir is the compilation cache directory, as for warm
   status [-profile name] [-format table|json] [-team name] [key]
                       show every plugin an environment's admin handler (plg.AdminHandler) serves, or one in
                       detail; -team keeps the plugins whose owner team is name

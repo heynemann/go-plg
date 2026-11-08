@@ -22,6 +22,14 @@ var errStubHost = errors.New("plg validate runs plugins without the service's Ho
 //nolint:gochecknoinits // plg validate reaches plg's unexported loading code through offline.Check, set here
 func init() {
 	offline.Check = checkOffline
+	offline.CheckHost = checkOfflineHost
+}
+
+// checkOfflineHost is [offline.CheckHost]: it checks spec as checkOffline checks the Host of a contract of pkgPath.
+func checkOfflineHost(pkgPath string, spec *offline.Host) error {
+	_, err := stubHost(pkgPath, spec.Interface.Type, spec)
+
+	return err
 }
 
 // checkOffline is [offline.Check]: it prepares spec as Register prepares a registered contract, with a Host whose
@@ -41,7 +49,7 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 		return nil, err
 	}
 
-	hst, err := stubHost(contr, spec.Host)
+	hst, err := stubHost(contr.pkgPath, contr.described.Type, spec.Host)
 	if err != nil {
 		return nil, err
 	}
@@ -93,8 +101,8 @@ func offlineContract(spec *offline.Contract) (*contract, error) {
 }
 
 // stubHost returns the Host of spec, checked as [WithHost] checks a Host, whose methods fail every call with
-// errStubHost; nil when spec is nil.
-func stubHost(contr *contract, spec *offline.Host) (*host, error) {
+// errStubHost; nil when spec is nil. The Host must be declared in the package pkgPath of the interface owner.
+func stubHost(pkgPath string, owner fmt.Stringer, spec *offline.Host) (*host, error) {
 	if spec == nil {
 		return nil, nil //nolint:nilnil // the plugin's Create takes no Host, which is not an error
 	}
@@ -106,9 +114,9 @@ func stubHost(contr *contract, spec *offline.Host) (*host, error) {
 		return nil, fmt.Errorf("%w: %w %s: %w", ErrInvalidHost, ErrInvalidInterface, named, err)
 	}
 
-	if named.Path != contr.pkgPath {
+	if named.Path != pkgPath {
 		return nil, fmt.Errorf("%w %s %w %s of %s, whose source Go plugins interpret; it is in %s",
-			ErrInvalidHost, named, errHostPackage, contr.pkgPath, contr.described.Type, named.Path)
+			ErrInvalidHost, named, errHostPackage, pkgPath, owner, named.Path)
 	}
 
 	funcs := make([]reflect.Value, len(spec.Methods))

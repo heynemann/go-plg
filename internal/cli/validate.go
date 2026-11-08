@@ -30,6 +30,7 @@ const (
 	stepOK      = "ok"
 	stepFailed  = "FAIL"
 	stepWarning = "warning"
+	stepHint    = "hint"
 )
 
 // runValidate runs `plg validate`.
@@ -77,6 +78,7 @@ type validation struct {
 	dir      string
 	host     string
 	cacheDir string
+	hosts    []string // the contract's Host candidates when there are several and none was chosen
 }
 
 // run runs the steps in order, stopping at the first that fails; it reports whether every step passed.
@@ -152,21 +154,34 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	return mod, true
 }
 
-// contract type-checks the contract package and describes the interface and the Host the plugin's Create takes.
+// contract type-checks the contract package and describes the interface and the Host the plugin's Create takes:
+// -host's, else the one a Go plugin's Create names, else the contract's only interface that passes as a Host for a
+// Lua or TypeScript plugin.
 func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *plg.Descriptor) (
 	*contractload.Loaded, bool,
 ) {
-	host := v.host
-	if host == "" && desc.Language == plg.LanguageGo {
-		host = createHost(os.DirFS(v.dir), desc.Entrypoint, ref.Package)
-	}
-
 	rel := strings.TrimPrefix(strings.TrimPrefix(ref.Package, mod.Path), "/")
 
-	loaded, err := contractload.Load(filepath.Join(mod.Dir, filepath.FromSlash(rel)), ref.Package, ref.Interface,
-		host)
+	loaded, err := contractload.Load(filepath.Join(mod.Dir, filepath.FromSlash(rel)), ref.Package, ref.Interface, "")
 	if err != nil {
 		return nil, v.failed("interface", err)
+	}
+
+	host := v.host
+
+	switch {
+	case host != "":
+	case desc.Language == plg.LanguageGo:
+		host = createHost(os.DirFS(v.dir), desc.Entrypoint, ref.Package, loaded.PackageName())
+	default:
+		v.defaultHost(loaded, ref.Package)
+	}
+
+	if host != "" {
+		err = loaded.SetHost(host)
+		if err != nil {
+			return nil, v.failed("interface", err)
+		}
 	}
 
 	contract := loaded.Contract
@@ -181,6 +196,28 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	v.table.row("interface", stepOK, detail)
 
 	return loaded, true
+}
+
+// defaultHost gives a Lua or TypeScript plugin's contract the Host stub of the contract package's only interface
+// that passes plg's Host checks; with several, it keeps their names for the hint after a failed load.
+func (v *validation) defaultHost(loaded *contractload.Loaded, pkgPath string) {
+	var candidates []*offline.Host
+
+	for _, host := range loaded.Hosts() {
+		if offline.CheckHost(pkgPath, host) == nil {
+			candidates = append(candidates, host)
+		}
+	}
+
+	switch len(candidates) {
+	case 0:
+	case 1:
+		loaded.Contract.Host = candidates[0]
+	default:
+		for _, host := range candidates {
+			v.hosts = append(v.hosts, host.Interface.Type.Name)
+		}
+	}
 }
 
 // goTypes type-checks a Go plugin's package against the contract.
@@ -249,6 +286,11 @@ func (v *validation) load(ctx context.Context, contract *offline.Contract, manif
 		v.table.row("load", stepFailed, *report.Error)
 	}
 
+	if !ok && len(v.hosts) > 0 {
+		v.table.row("", stepHint, fmt.Sprintf("if Create takes a Host, pass -host <%s>",
+			strings.Join(v.hosts, "|")))
+	}
+
 	issues(v.table, report)
 
 	return ok
@@ -277,9 +319,10 @@ func methodNames(methods []goabi.Method) string {
 }
 
 // createHost returns the name of the contract's interface a Go plugin's Create takes as its parameter, as the
-// plugin's source writes it (contract.Host through an import of pkgPath, or Host through a dot import); empty
-// when Create takes none, another one or cannot be found: the guest then tells what Create should be.
-func createHost(files fs.FS, entrypoint, pkgPath string) string {
+// plugin's source writes it (contract.Host through an import of pkgPath, whose package is named pkgName, or Host
+// through a dot import); empty when Create takes none, another one or cannot be found: the guest then tells what
+// Create should be.
+func createHost(files fs.FS, entrypoint, pkgPath, pkgName string) string {
 	dir := goPackageDir(entrypoint)
 
 	entries, err := fs.ReadDir(files, dir)
@@ -305,7 +348,7 @@ func createHost(files fs.FS, entrypoint, pkgPath string) string {
 			continue
 		}
 
-		if host, found := fileCreateHost(file, pkgPath); found {
+		if host, found := fileCreateHost(file, pkgPath, pkgName); found {
 			return host
 		}
 	}
@@ -315,11 +358,11 @@ func createHost(files fs.FS, entrypoint, pkgPath string) string {
 
 // fileCreateHost returns the Host the Create file declares takes (see createHost) and whether file declares
 // Create.
-func fileCreateHost(file *ast.File, pkgPath string) (string, bool) {
+func fileCreateHost(file *ast.File, pkgPath, pkgName string) (string, bool) {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if ok && fn.Recv == nil && fn.Name.Name == goabi.CreateFunc {
-			return paramHost(fn.Type.Params.List, importName(file, pkgPath)), true
+			return paramHost(fn.Type.Params.List, importName(file, pkgPath, pkgName)), true
 		}
 	}
 
@@ -348,9 +391,9 @@ func paramHost(params []*ast.Field, imported string) string {
 	return ""
 }
 
-// importName is the name file imports pkgPath under: its explicit name, else the last element of its path (a
-// package named otherwise is not recognized); empty when file does not import it.
-func importName(file *ast.File, pkgPath string) string {
+// importName is the name file imports pkgPath, the package pkgName, under: its explicit name, else pkgName; empty
+// when file does not import it.
+func importName(file *ast.File, pkgPath, pkgName string) string {
 	for _, imp := range file.Imports {
 		imported, err := strconv.Unquote(imp.Path.Value)
 		if err != nil || imported != pkgPath {
@@ -361,7 +404,7 @@ func importName(file *ast.File, pkgPath string) string {
 			return imp.Name.Name
 		}
 
-		return path.Base(pkgPath)
+		return pkgName
 	}
 
 	return ""

@@ -64,3 +64,10 @@ type Options struct {
 //
 //nolint:gochecknoglobals // the one seam from the command to plg's unexported loading code, set from plg's init
 var Check func(ctx context.Context, contract *Contract, plugin *Plugin, opts *Options) (*adminjson.Report, error)
+
+// CheckHost checks host, of the contract package at import path pkgPath, as [Check] checks a contract's Host (as
+// plg.WithHost checks one): plg validate offers the contract's interfaces that pass as the default Host. Package plg
+// sets it.
+//
+//nolint:gochecknoglobals // the seam's second entry, set with Check from plg's init
+var CheckHost func(pkgPath string, host *Host) error

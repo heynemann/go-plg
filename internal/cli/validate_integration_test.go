@@ -70,10 +70,10 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 				"load       ok      Create ran in the go guest (version ",
 			},
 		},
-		{"luagood", []string{
+		{"luagood", []string{ // the contract's only interface that passes as a Host is the stub Host
 			"manifest   ok      lua plugin luagood implementing example.com/rewards/cohort.Provider@v1.2.0\n",
 			"contract   ok      " + module + "\n",
-			"interface  ok      cohort.Provider: IsMember, List\n",
+			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
 			"load       ok      Create ran in the lua guest (version ",
 		}},
 		{"tsgood", []string{
@@ -88,6 +88,12 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
 			"go.mod     ok      " + filepath.Join(abs(t, "goaliasimport"), "go.mod") +
 				" requires example.com/rewards v1.2.0\n",
+			"load       ok      Create ran in the go guest (version ",
+		}},
+		{"gov2", []string{ // Create(users rewards.Users), importing example.com/rewards/v2 without a name
+			"contract   ok      module example.com/rewards/v2 v2.0.0 (",
+			"interface  ok      rewards.Provider: IsMember; Host rewards.Users: Tier (a stub: every call fails)\n",
+			"types      ok      the plugin's package type-checks against rewards.Provider\n",
 			"load       ok      Create ran in the go guest (version ",
 		}},
 	}
@@ -127,6 +133,14 @@ func TestValidateLoadsGoodPluginsOfEveryLanguage(t *testing.T) {
 	require.Equal(t, 0, offline.code, "the module cache serves the contract offline\n%s%s", offline.stdout,
 		offline.stderr)
 	assert.Contains(t, offline.stdout, "contract   ok      "+module+"\n")
+
+	cacheDir := t.TempDir()
+	cached := validate(environ, "tsgood", "-cache-dir", cacheDir)
+	require.Equal(t, 0, cached.code, "%s%s", cached.stdout, cached.stderr)
+
+	compiled, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	assert.NotEmpty(t, compiled, "-cache-dir is where the guest is compiled to")
 }
 
 // TestValidateFailsEachBrokenPlugin validates broken plugins: each fails at its step with a message naming the
@@ -160,10 +174,20 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 		{"failing Create", []string{"createfails"}, []string{
 			"load       FAIL    plugin Create failed: no cohort configured\n",
 		}},
-		{"Host called by Create", []string{"hostincreate", "-host", "Users"}, []string{
+		{"Host called by Create, the contract's only Host candidate", []string{"hostincreate"}, []string{
 			"interface  ok      cohort.Provider: IsMember, List; Host cohort.Users: Tier (a stub: every call fails)\n",
 			"load       FAIL    plugin Create failed: plg validate runs plugins without the service's Host: " +
 				"cohort.Users.Tier was called\n",
+		}},
+		{"Host called by Create, the contract having several Host candidates", []string{"tsv2hosts"}, []string{
+			"interface  ok      rewards.Provider: IsMember\n",
+			"load       FAIL    plugin Create failed: ",
+			"           hint    if Create takes a Host, pass -host <Ledger|Users>\n",
+		}},
+		{"Host chosen by -host", []string{"tsv2hosts", "-host", "Users"}, []string{
+			"interface  ok      rewards.Provider: IsMember; Host rewards.Users: Tier (a stub: every call fails)\n",
+			"load       FAIL    plugin Create failed: plg validate runs plugins without the service's Host: " +
+				"rewards.Users.Tier was called\n",
 		}},
 		{"method of another signature", []string{"wrongsignature"}, []string{
 			"types      FAIL    the plugin does not type-check against the contract: plugin.go:14:9: cannot use " +
@@ -206,7 +230,8 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 		},
 		{"pinned to a version adding a method", []string{"newerpin"}, []string{
 			"contract   ok      module example.com/rewards v1.3.0 (",
-			"interface  ok      cohort.Provider: IsMember, List, Size\n",
+			"interface  ok      cohort.Provider: IsMember, List, Size; Host cohort.Users: Tier (a stub: every call " +
+				"fails)\n",
 			"load       FAIL    plugin source failed to load: the table Create returned has no method Size\n",
 		}},
 	}
