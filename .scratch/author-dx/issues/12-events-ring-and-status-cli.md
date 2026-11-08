@@ -8,4 +8,4 @@
 
 - [x] Tests: the ring keeps the newest 100 per key under concurrency (-race), the endpoint's JSON and 404/405 behaviour, the CLI against an httptest admin handler (profiles, token sources, table and JSON output, team filter, auth errors)
 - [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI run 42451142920 for `dcfcf21`: success)
