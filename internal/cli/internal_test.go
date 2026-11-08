@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,113 @@ import (
 	"github.com/heynemann/go-plg/internal/adminjson"
 	"github.com/heynemann/go-plg/internal/offline"
 )
+
+// TestResolveReturnsCleanAbsolutePaths: a path given to a command resolves against the working directory to a
+// clean absolute path, whether that directory is given relative or absolute, so "." names the directory itself
+// (its last element is the plugin's key) and git's pathspecs and the author repository's directory compare with
+// it; an empty path stays empty (a flag not given). With the working directory gone, a relative path stays
+// relative, cleaned.
+//
+//nolint:paralleltest // t.Chdir: the working directory is the process's
+func TestResolveReturnsCleanAbsolutePaths(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+
+	for _, c := range []struct{ dir, path, want string }{
+		{".", ".", root},
+		{".", "rules/vip/", filepath.Join(root, "rules", "vip")},
+		{"rules", "../lib", filepath.Join(root, "lib")},
+		{root, "rules/./vip", filepath.Join(root, "rules", "vip")},
+		{"rules", "/elsewhere/x/..", "/elsewhere"},
+		{".", "", ""},
+	} {
+		assert.Equal(t, c.want, resolve(c.dir, c.path), "%s %s", c.dir, c.path)
+	}
+
+	gone := filepath.Join(root, "gone")
+	require.NoError(t, os.Mkdir(gone, 0o750))
+	t.Chdir(gone)
+	require.NoError(t, os.Remove(gone))
+
+	assert.Equal(t, filepath.Join("rules", "vip"), resolve(".", "rules/./vip"))
+}
+
+// TestWatchTicksReportsChangedFiles drives plg dev's polling watcher with explicit ticks: each tick reports the
+// files created, changed and removed under the watched directory and the watched file since the last report, and
+// nothing outside them; a tick with nothing changed sends nothing.
+func TestWatchTicksReportsChangedFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	plugin := filepath.Join(dir, "plugin")
+	repo := filepath.Join(dir, "plg.yaml")
+	outside := filepath.Join(dir, "outside.txt")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(plugin, "tests"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(plugin, "plugin.lua"), []byte("a"), 0o600))
+	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin]\n"), 0o600))
+
+	ticks := make(chan time.Time)
+	changes := watchTicks(t.Context(), []string{plugin, repo}, ticks)
+
+	tick := func() { ticks <- time.Time{} }
+
+	test := filepath.Join(plugin, "tests", "example.yaml")
+	require.NoError(t, os.WriteFile(test, []byte("cases: []\n"), 0o600))
+	require.NoError(t, os.WriteFile(outside, []byte("x"), 0o600))
+	tick()
+	assert.Equal(t, []string{test}, <-changes)
+
+	require.NoError(t, os.WriteFile(filepath.Join(plugin, "plugin.lua"), []byte("ab"), 0o600))
+	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin, other]\n"), 0o600))
+	tick()
+	assert.Equal(t, []string{repo, filepath.Join(plugin, "plugin.lua")}, <-changes) // sorted
+
+	require.NoError(t, os.Remove(test))
+	tick()
+	assert.Equal(t, []string{test}, <-changes)
+
+	for range 2 { // the watcher takes the second tick only if the first one, with nothing changed, sent nothing
+		select {
+		case ticks <- time.Time{}:
+		case changed := <-changes:
+			t.Fatalf("nothing changed, yet the watcher reports %v", changed)
+		}
+	}
+}
+
+// TestPollWatchReportsAChange runs plg dev's default watcher, which polls on its own ticker: a file created under the
+// watched directory is reported, and the channel closes once the context ends.
+func TestPollWatchReportsAChange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	changes := pollWatch(ctx, []string{dir})
+
+	file := filepath.Join(dir, "plugin.lua")
+	require.NoError(t, os.WriteFile(file, []byte("a"), 0o600))
+	assert.Equal(t, []string{file}, <-changes)
+
+	cancel()
+
+	for range changes { // drains until the watcher closes the channel
+	}
+}
+
+// TestAHangingTokenCommandTimesOut: a token command that never prints its token is killed at the timeout (the
+// admin requests' own, in `plg status`) and fails saying so, a child holding its output open included.
+func TestAHangingTokenCommandTimesOut(t *testing.T) {
+	t.Parallel()
+
+	prof := &profile{Name: "p", Token: &tokenSource{Command: []string{"sh", "-c", "sleep 60 & sleep 60"}}}
+
+	token, err := prof.token(t.Context(), &Env{Dir: t.TempDir()}, 50*time.Millisecond)
+	require.ErrorIs(t, err, errTokenCommand)
+	assert.Empty(t, token)
+	assert.EqualError(t, err,
+		`profile p: token command failed: ["sh" "-c" "sleep 60 & sleep 60"] did not finish within 50ms`)
+}
 
 // sample is a report of a plugin with every kind of step: ok, a warning holding an issue, one with a subject, and
 // a failure with lines, a hint and issues of each severity; its resources hold one call near its memory limit.
@@ -333,4 +441,42 @@ func TestResourcesFlagsACallNearItsTimeout(t *testing.T) {
 	}, run.report.Resources)
 	assert.Equal(t, 2, run.report.Warnings)
 	assert.True(t, run.report.Valid, "calls near their limits are warnings")
+}
+
+// TestDescribeShowsTheProvenance shows the provenance of a plugin loaded from an artifact on a row of plg status's
+// table: its commit and whether the files differed from it (or that there was no commit), its contract module,
+// the plg that packed it and its digest. A plugin without provenance has no such row.
+func TestDescribeShowsTheProvenance(t *testing.T) {
+	t.Parallel()
+
+	provenance := &adminjson.Provenance{
+		Contract: adminjson.Module{Path: "example.com/rewards", Version: "v1.2.0"},
+		Digest:   "sha256:00ff", Commit: "0123abcd", Plg: "v0.9.0", Dirty: true,
+	}
+	plugin := adminjson.Plugin{Key: "rules/silver", Registration: "rules", Status: "serving", Provenance: provenance}
+
+	for _, tc := range []struct {
+		commit string
+		want   string
+		dirty  bool
+	}{
+		{"0123abcd", "commit 0123abcd (dirty)", true},
+		{"0123abcd", "commit 0123abcd", false},
+		{"", "no git commit", false},
+	} {
+		provenance.Commit, provenance.Dirty = tc.commit, tc.dirty
+
+		var out bytes.Buffer
+
+		require.NoError(t, describe(&out, &plugin))
+		assert.Contains(t, out.String(), "\nprovenance    "+tc.want+", contract example.com/rewards v1.2.0, packed "+
+			"by plg v0.9.0, digest sha256:00ff\n")
+	}
+
+	plugin.Provenance = nil
+
+	var out bytes.Buffer
+
+	require.NoError(t, describe(&out, &plugin))
+	assert.NotContains(t, out.String(), "provenance")
 }
