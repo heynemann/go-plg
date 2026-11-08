@@ -480,3 +480,28 @@ func TestDescribeShowsTheProvenance(t *testing.T) {
 	require.NoError(t, describe(&out, &plugin))
 	assert.NotContains(t, out.String(), "provenance")
 }
+
+// TestDescribeShowsAReportsIssues shows a report on a row of plg status's table, then each of its issues on a row
+// of its own, as plg validate writes them: severity, code, field (if any) and message.
+func TestDescribeShowsAReportsIssues(t *testing.T) {
+	t.Parallel()
+
+	failed := "plugin Validate failed"
+	plugin := adminjson.Plugin{
+		Key: "rules/silver", Registration: "rules", Status: "rejected",
+		Rejection: &adminjson.Report{
+			At: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), Version: "3", Error: &failed,
+			Issues: []adminjson.Issue{
+				{Severity: "error", Code: "rules.tier", Message: "unknown tier", Field: "tier"},
+				{Severity: "warning", Code: "rules.slow", Message: "takes a while"},
+			},
+		},
+	}
+
+	var out bytes.Buffer
+
+	require.NoError(t, describe(&out, &plugin))
+	assert.Contains(t, out.String(), "\nrejection     2026-11-08T12:00:00Z version 3: plugin Validate failed\n"+
+		"              error rules.tier (tier): unknown tier\n"+
+		"              warning rules.slow: takes a while\n")
+}

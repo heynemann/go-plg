@@ -160,12 +160,7 @@ func describeReport(table *table, name string, report *adminjson.Report) {
 	table.row(name, fmt.Sprintf("%s version %s: %s", stamp(report.At), orNone(report.Version), outcome))
 
 	for _, issue := range report.Issues {
-		at := ""
-		if issue.Field != "" {
-			at = " (" + issue.Field + ")"
-		}
-
-		table.row("", fmt.Sprintf("%s %s%s: %s", issue.Severity, issue.Code, at, issue.Message))
+		table.row("", issue.Severity+" "+issueText(&issue))
 	}
 }
 
