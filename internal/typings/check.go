@@ -74,10 +74,11 @@ func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker,
 }
 
 // checkProject returns the type-check's own project: a tsconfig.json extending the plugin's, over the plugin's
-// files and check.ts, which passes the plugin's Create where a function returning iface is expected.
+// typings and check.ts, which passes the plugin's Create where a function returning iface is expected. Only what
+// check.ts reaches through the entrypoint's imports is checked, as only that is bundled.
 func checkProject(entrypoint, iface string) (*memfs.FS, error) {
-	config := `{"extends": "../plugin/` + TSConfigFile + `", "include": ["../plugin/**/*"], "files": ["` + checkFile +
-		`"]}` + "\n"
+	config := `{"extends": "../plugin/` + TSConfigFile + `", "files": ["` + checkFile + `", "../plugin/` +
+		TypeScriptFile + `"]}` + "\n"
 	check := `import { Create } from ` + strconv.Quote("../plugin/"+entrypoint) + ";\n" +
 		"declare function implementsInterface(create: (...args: never[]) => " + iface + " | Promise<" + iface +
 		">): void;\n" +

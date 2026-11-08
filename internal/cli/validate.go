@@ -397,8 +397,12 @@ func (v *validation) contract(ref contractref.Ref, mod modfetch.Module, desc *pl
 	case desc.Language == plg.LanguageGo:
 		host = createHost(v.files, desc.Entrypoint, ref.Package, loaded.PackageName())
 	default:
+		// Typings written for an earlier contract may name a Host it no longer has: they are stale then, which the
+		// typings step reports, so the Host is chosen as if there were none.
 		host = typings.HostIn(string(desc.Language), v.files)
-		if host == "" {
+		if host != "" && loaded.SetHost(host) == nil {
+			host = ""
+		} else {
 			host = v.defaultHost(loaded, ref.Package)
 		}
 	}

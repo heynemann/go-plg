@@ -180,6 +180,23 @@ func TestValidateRepoAppliesItsSettings(t *testing.T) {
 		"unowned  ok      1 warning\n"), got.stdout)
 }
 
+// TestValidateRepoTypeChecksOnlyWhatThePluginImports validates the TypeScript plugin coupon of a repository whose
+// shared directory also holds a file written for another contract's typings: coupon never imports it, so its
+// type-check passes.
+func TestValidateRepoTypeChecksOnlyWhatThePluginImports(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+
+	repo := copyRepo(t, "plugins: [coupon]\nshared: [lib]\n", map[string]string{
+		"lib/pricing.ts": "export const none: pricing.Order | null = null;\n",
+	})
+
+	got := validate(environ, repo)
+	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
+	assert.Contains(t, section(t, got.stdout, "coupon"), "types      ok      ")
+}
+
 // TestValidateRepoReplacesTheContractByALocalCheckout validates plugins of a repository whose plg.yaml replaces
 // the contract module by a local checkout declaring a method v1.2.0 lacks: no module is fetched (GOPROXY=off, an
 // empty module cache), the interface is the checkout's, a plugin implementing it passes with the warnings that its

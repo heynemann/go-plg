@@ -89,8 +89,9 @@ func TestValidateTypeChecksTypeScriptPlugins(t *testing.T) {
 }
 
 // TestValidateFailsOnStaleTypings validates copies of good Lua and TypeScript plugins whose typings are missing,
-// edited, or written for another version of the contract: the typings step fails naming the stale files and the
-// plg types command line to run, which then makes the plugin pass.
+// edited, written for another version of the contract or for a Host it lacks: the typings step fails naming the
+// stale files and the plg types command line to run, which then makes the plugin pass. Without -host, plg types
+// replaces typings recording a Host the contract lacks.
 func TestValidateFailsOnStaleTypings(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +118,10 @@ func TestValidateFailsOnStaleTypings(t *testing.T) {
 			t.Helper()
 			replaceIn(t, dir, "plugin.yaml", "@v1.2.0", "@v1.3.0")
 		}, "another contract version", "tsgood", "plg.d.ts"},
+		{func(t *testing.T, dir string) {
+			t.Helper()
+			replaceIn(t, dir, "plg.d.ts", "// Host: Users\n", "// Host: Members\n")
+		}, "recorded Host the contract lacks", "tsgood", "plg.d.ts"},
 	}
 
 	for _, tc := range tests {
@@ -137,6 +142,15 @@ func TestValidateFailsOnStaleTypings(t *testing.T) {
 		assert.NotContains(t, got.stdout, "typings    FAIL", "%s\n%s", tc.name, got.stdout)
 		assert.Contains(t, got.stdout, "typings    ok      ", tc.name)
 	}
+
+	// Without -host, plg types takes the contract's only Host when the recorded one is gone.
+	dir := pluginCopy(t, "tsgood")
+	replaceIn(t, dir, "plg.d.ts", "// Host: Users\n", "// Host: Members\n")
+
+	written := plgTypes(environ, dir)
+	require.Equal(t, 0, written.code, written.stdout+written.stderr)
+	assert.Contains(t, written.stdout, "Host cohort.Users: Tier")
+	assert.Contains(t, written.stdout, "typings    ok      wrote plg.d.ts; tsconfig.json already up to date\n")
 }
 
 // TestTypesWritesTypings writes typings with plg types: into a plugin without them, its Host taken from -host, then
