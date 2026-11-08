@@ -337,11 +337,12 @@ func (c *Container) countValidation(ctx context.Context, reg *registration, laun
 		}
 	}
 
-	tags := launch.owner.metrics
-	key, lang := attribute.String("key", launch.key), attribute.String("language", string(launch.lang))
+	id := launch.id
+	tags := id.owner.metrics
+	key, lang := attribute.String("key", id.key), attribute.String("language", string(id.lang))
 	when := attribute.String("trigger", trigger)
 
-	c.panics.callback(ctx, launch.key, launch.lang, meterMethod, func() {
+	c.panics.callback(ctx, id.key, id.lang, meterMethod, func() {
 		c.meters.validations.Add(ctx, 1, metric.WithAttributes(key, lang, when,
 			attribute.String("outcome", outcome), tags[0], tags[1], tags[2]))
 

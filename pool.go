@@ -50,10 +50,8 @@ type poolConfig struct {
 	http         engine.HTTPFunc                         // makes the requests of multiplexed instances
 	budget       *memoryBudget
 	meters       *pluginMeters
-	owner        *ownerTags // the plugin version's owner, on its reports and log records
-	key          string
-	lang         Language
-	limit        uint64 // memory limit of each instance, charged to the budget while it lives
+	id           pluginID // the plugin version, on its reports and log records; a nil owner is noOwner
+	limit        uint64   // memory limit of each instance, charged to the budget while it lives
 	minSize      int32
 	maxSize      int32
 	lanes        int32         // calls each instance serves at once (see mux.go); 1 for instances that do not multiplex
@@ -83,15 +81,13 @@ type pool struct {
 	http         engine.HTTPFunc
 	budget       *memoryBudget
 	meters       *pluginMeters
-	owner        *ownerTags
 	beforeGrow   func()             // test hook: runs in await between its check for closure and its reservation
 	stop         context.CancelFunc // ends the refiller's context
 	idle         chan *slot
 	wake         chan struct{} // one pending signal for the refiller (and close): an instance retired
 	done         chan struct{} // closed by close
 	stopped      chan struct{} // closed when the refiller returns
-	key          string
-	lang         Language
+	id           pluginID      // its owner is never nil
 	limit        uint64
 	closeTimeout time.Duration // bounds the plugin's Close of each instance a failed warm started
 	ids          atomic.Uint64
@@ -112,21 +108,19 @@ type pool struct {
 func newPool(cfg *poolConfig) *pool {
 	lanes := max(cfg.lanes, 1)
 
-	owner := cfg.owner
-	if owner == nil {
-		owner = noOwner
+	id := cfg.id
+	if id.owner == nil {
+		id.owner = noOwner
 	}
 
 	return &pool{
-		logger:       cfg.panics.pluginLogger(pluginID{owner: owner, key: cfg.key, lang: cfg.lang}),
-		owner:        owner,
+		logger:       cfg.panics.pluginLogger(id),
+		id:           id,
 		panics:       cfg.panics,
 		spawn:        cfg.spawn,
 		http:         cfg.http,
 		budget:       cfg.budget,
 		meters:       cfg.meters,
-		key:          cfg.key,
-		lang:         cfg.lang,
 		limit:        cfg.limit,
 		minSize:      cfg.minSize,
 		maxSize:      cfg.maxSize,
@@ -305,7 +299,7 @@ func (p *pool) discard(ctx context.Context, held *slot) {
 	err := p.closeInstance(ended, held)
 	if err != nil {
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
-			slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+			slog.String("key", p.id.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
 	}
 }
 
@@ -321,7 +315,7 @@ func (p *pool) closeInstance(ctx context.Context, held *slot) (err error) {
 	defer p.retire()
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{Key: p.key, Language: p.lang, Phase: PhaseClose, Owner: p.owner.owner, tags: p.owner}
+			failure := p.id.panicked(PhaseClose)
 			p.panics.recovered(ctx, failure, v)
 
 			err = failure
@@ -344,7 +338,7 @@ func (p *pool) closeIdle(ctx context.Context) {
 			err := p.closeInstance(ctx, held)
 			if err != nil {
 				p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an abandoned instance failed",
-					slog.String("key", p.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
+					slog.String("key", p.id.key), slog.Uint64("instance", held.id), slog.String("error", err.Error()))
 			}
 		default:
 			return
@@ -385,7 +379,7 @@ func (p *pool) disengage(held *slot) {
 // measure runs fn, which calls the meter provider's instruments, the user's code. A panic in it is reported as a
 // [PanicError] in [PhaseCallback]. The pool's logger guards itself.
 func (p *pool) measure(ctx context.Context, fn func()) {
-	p.panics.callback(ctx, p.key, p.lang, meterMethod, fn)
+	p.panics.callback(ctx, p.id.key, p.id.lang, meterMethod, fn)
 }
 
 // reserve takes a place for a new instance: [errPoolFull] at the pool's maximum, [errBudgetFull] when the
@@ -447,7 +441,7 @@ func (p *pool) spawnGuarded(ctx context.Context, phase Phase) (instance, error) 
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{Key: p.key, Language: p.lang, Phase: phase, Owner: p.owner.owner, tags: p.owner}
+				failure := p.id.panicked(phase)
 				p.panics.recovered(ctx, failure, v)
 
 				inst, err = nil, failure
@@ -501,11 +495,7 @@ func (p *pool) refillStep(ctx context.Context, delay *time.Duration) bool {
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				p.panics.recovered(
-					ctx,
-					&PanicError{Key: p.key, Language: p.lang, Phase: PhaseRefill, Owner: p.owner.owner, tags: p.owner},
-					v,
-				)
+				p.panics.recovered(ctx, p.id.panicked(PhaseRefill), v)
 			}
 		}()
 
@@ -548,7 +538,7 @@ func (p *pool) refillOnce(ctx context.Context, delay *time.Duration) bool {
 		*delay = backoff(*delay)
 
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "plg: starting an instance to refill the pool failed",
-			slog.String("key", p.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
+			slog.String("key", p.id.key), slog.String("error", err.Error()), slog.Duration("retry_in", *delay))
 
 		return sleep(ctx, *delay)
 	}
@@ -619,13 +609,13 @@ func (p *pool) close(ctx context.Context) error {
 			p.abandoned.Store(true)
 			p.closeIdle(ctx) // what release gave back before it could see abandoned
 
-			return fmt.Errorf("plg: draining %s: %w", p.key, context.Cause(ctx))
+			return fmt.Errorf("plg: draining %s: %w", p.id.key, context.Cause(ctx))
 		}
 	}
 
 	err := errors.Join(errs...)
 	if err != nil {
-		return fmt.Errorf("plg: closing %s: %w", p.key, err)
+		return fmt.Errorf("plg: closing %s: %w", p.id.key, err)
 	}
 
 	return nil

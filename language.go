@@ -87,12 +87,10 @@ type launcher struct {
 	// ([panicReporter.guardedLogger]), since its records are logged inside the guest's steps.
 	output  *slog.Logger
 	panics  *panicReporter
-	owner   *ownerTags
 	spans   *pluginSpans   // the version's spans; nil traces nothing
 	secrets *pluginSecrets // the version's secrets, whose values the results' messages and output are scrubbed of
+	id      pluginID       // the version, on its reports and log records
 	opts    engine.InstanceOptions
-	key     string
-	lang    Language
 	payload []byte
 	// createTimeout bounds each instance's Create, and not its instantiation before it; 0 does not.
 	createTimeout time.Duration
@@ -105,7 +103,7 @@ type launcher struct {
 //
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
 func (l *launcher) start(ctx context.Context) (instance, error) {
-	out := guestout.New(l.output, l.key, l.secrets.redactor())
+	out := guestout.New(l.output, l.id.key, l.secrets.redactor())
 	opts := l.opts
 	opts.Stdout, opts.Stderr = out.Stdout(), out.Stderr()
 
@@ -183,16 +181,14 @@ func (l *launcher) discardUnstarted(ctx context.Context, inst closer) {
 	err := inst.Close(ended)
 	if err != nil {
 		l.output.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
-			slog.String("key", l.key), slog.String("error", err.Error()))
+			slog.String("key", l.id.key), slog.String("error", err.Error()))
 	}
 }
 
 // failed reports a step (Create, Close) the guest failed, with what it wrote to stderr meanwhile.
 func (l *launcher) failed(ctx context.Context, phase Phase, value any, out *guestout.Capture) *PanicError {
-	failure := &PanicError{
-		Key: l.key, Language: l.lang, Phase: phase, Value: value, Guest: out.Guest(), Owner: l.owner.owner,
-		tags: l.owner,
-	}
+	failure := l.id.panicked(phase)
+	failure.Value, failure.Guest = value, out.Guest()
 	l.panics.report(ctx, failure)
 
 	return failure

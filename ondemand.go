@@ -201,7 +201,7 @@ func (c *Container) validated(ctx context.Context, gen *plugin, report *Report) 
 	c.events.generation(ctx, EventValidated, gen, report)
 
 	attrs := []slog.Attr{
-		slog.String("key", gen.key), gen.launch.owner.log, slog.String("version", gen.desc.Version),
+		slog.String("key", gen.key), gen.launch.id.owner.log, slog.String("version", gen.desc.Version),
 	}
 
 	switch {

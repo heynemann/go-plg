@@ -262,7 +262,7 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 	}
 
 	info := PluginInfo{
-		Owner: *src.desc.owner(), Key: launch.key, Version: src.desc.Version, Language: src.desc.Language,
+		Owner: *src.desc.owner(), Key: launch.id.key, Version: src.desc.Version, Language: launch.id.lang,
 		Storage: src.storeName,
 	}
 
@@ -397,10 +397,8 @@ func (c *Container) validationInput(ctx context.Context, val *validation, launch
 	}()
 
 	if panicked != nil {
-		failure := &PanicError{
-			Key: info.Key, Language: info.Language, Phase: PhaseCallback, Method: "WithValidation",
-			Owner: launch.owner.owner, tags: launch.owner,
-		}
+		failure := launch.id.panicked(PhaseCallback)
+		failure.Method = "WithValidation"
 		c.panics.recovered(ctx, failure, panicked)
 
 		return nil, fmt.Errorf("%w: %v", errInputPanic, panicked)
@@ -484,7 +482,7 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 		return nil, false, errNoValidate
 	case wire.StatusError:
 		return nil, false, fmt.Errorf("%w: Validate returned an error: %w", ErrValidation, &PluginError{
-			Key: launch.key, Method: goabi.ValidateMethod, Message: res.Message, Owner: launch.owner.owner,
+			Key: launch.id.key, Method: goabi.ValidateMethod, Message: res.Message, Owner: launch.id.owner.owner,
 		})
 	case wire.StatusConvert:
 		return nil, false, fmt.Errorf("%w: Validate returned issues that cannot cross the plugin boundary: %s",
@@ -500,10 +498,8 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 // validateFailed reports a Validate call the guest failed (a panic, a trap, its deadline, a broken ABI), with
 // what the guest wrote to stderr meanwhile.
 func (c *Container) validateFailed(ctx context.Context, launch *launcher, inst instance, value any) *PanicError {
-	failure := &PanicError{
-		Key: launch.key, Language: launch.lang, Phase: PhaseCall, Method: goabi.ValidateMethod, Value: value,
-		Guest: inst.Guest(), Owner: launch.owner.owner, tags: launch.owner,
-	}
+	failure := launch.id.panicked(PhaseCall)
+	failure.Method, failure.Value, failure.Guest = goabi.ValidateMethod, value, inst.Guest()
 	c.panics.report(ctx, failure)
 
 	return failure
@@ -519,6 +515,6 @@ func (c *Container) closeValidation(ctx context.Context, launch *launcher, inst 
 
 	if err != nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a validation instance failed",
-			slog.String("key", launch.key), launch.owner.log, slog.String("error", err.Error()))
+			slog.String("key", launch.id.key), launch.id.owner.log, slog.String("error", err.Error()))
 	}
 }

@@ -237,9 +237,7 @@ func (m *muxInstance) do(operation func()) {
 	defer func() {
 		if v := recover(); v != nil {
 			// The owner serves many calls and has no context of its own.
-			m.pool.panics.recovered(context.Background(), &PanicError{
-				Key: m.pool.key, Language: m.pool.lang, Phase: PhaseCall, Owner: m.pool.owner.owner, tags: m.pool.owner,
-			}, v)
+			m.pool.panics.recovered(context.Background(), m.pool.id.panicked(PhaseCall), v)
 			m.fail(nil, engine.Result{}, fmt.Errorf("%w: %v", errMuxPanic, v))
 		}
 	}()
@@ -572,10 +570,9 @@ func (m *muxInstance) fail(culprit *callState, res engine.Result, err error) {
 	answered := culprit != nil && culprit.mailbox != nil && culprit.mailbox.answer(res, err, guest)
 
 	if culprit != nil && !answered && !m.stopped {
-		m.pool.panics.report(culprit.ctx, &PanicError{
-			Key: m.pool.key, Language: m.pool.lang, Phase: PhaseCall, Value: cause, Guest: guest,
-			Owner: m.pool.owner.owner, tags: m.pool.owner,
-		})
+		failure := m.pool.id.panicked(PhaseCall)
+		failure.Value, failure.Guest = cause, guest
+		m.pool.panics.report(culprit.ctx, failure)
 	}
 
 	lost := m.lost(cause)

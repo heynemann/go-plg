@@ -201,7 +201,7 @@ func (r *offlineRunner) call(ctx context.Context, launch *offlineLaunch, meth *m
 
 	var taken atomic.Bool
 
-	gen := newGeneration(launch.cand.launch.key, nil, &launch.src.desc, newPool(&poolConfig{
+	gen := newGeneration(launch.cand.launch.id.key, nil, &launch.src.desc, newPool(&poolConfig{
 		panics: r.ctr.panics,
 		spawn: func(context.Context) (instance, error) {
 			if !taken.CompareAndSwap(false, true) {
@@ -211,8 +211,7 @@ func (r *offlineRunner) call(ctx context.Context, launch *offlineLaunch, meth *m
 			return inst, nil
 		},
 		http: launch.cand.launch.opts.HTTP, budget: &r.ctr.budget, meters: launch.cand.meters,
-		owner: launch.cand.launch.owner, key: launch.cand.launch.key, lang: launch.src.desc.Language,
-		limit: launch.src.limit, maxSize: 1, closeTimeout: r.ctr.closeTimeout,
+		id: launch.cand.launch.id, limit: launch.src.limit, maxSize: 1, closeTimeout: r.ctr.closeTimeout,
 	}))
 	gen.spans = launch.cand.launch.spans
 

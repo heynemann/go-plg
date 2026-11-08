@@ -692,8 +692,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		return nil, err
 	}
 
-	owner := launch.owner
-	instances := c.pluginPool(reg, key, src, owner, meters, launch.start, launch.opts.HTTP)
+	instances := c.pluginPool(reg, src, launch, meters)
 
 	err = instances.warm(ctx)
 	if err != nil {
@@ -711,7 +710,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 		}
 	}()
 
-	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key), owner.log,
+	c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin loaded", slog.String("key", key), launch.id.owner.log,
 		slog.String("language", string(src.desc.Language)), slog.String("version", src.desc.Version),
 		slog.Uint64("memory_limit", src.limit), slog.Int("pool_min", reg.cfg.poolMin),
 		slog.Int("pool_max", reg.cfg.poolMax), slog.Duration("duration", time.Since(start)))
@@ -780,7 +779,7 @@ func (c *Container) newLauncher(reg *registration, id pluginID, src *source, spe
 		mod:           mod,
 		output:        output,
 		panics:        c.panics,
-		owner:         id.owner,
+		id:            id,
 		spans:         spans,
 		secrets:       secrets,
 		payload:       spec.payload,
@@ -792,17 +791,13 @@ func (c *Container) newLauncher(reg *registration, id pluginID, src *source, spe
 			Host:        reg.host.handler(id, c.panics, spans),
 			Secret:      secrets.serve,
 		},
-		key:  id.key,
-		lang: id.lang,
 	}
 }
 
-// pluginPool returns the (not yet warm) pool of a plugin's instances, started by spawn and measured in meters.
-// Instances of a language whose guest multiplexes serve up to the Register's [WithConcurrentCalls] calls at
-// once, making their HTTP requests through httpFn.
-func (c *Container) pluginPool(reg *registration, key string, src *source, owner *ownerTags, meters *pluginMeters,
-	spawn func(context.Context) (instance, error), httpFn engine.HTTPFunc,
-) *pool {
+// pluginPool returns the (not yet warm) pool of a plugin version's instances, started by launch and measured in
+// meters. Instances of a language whose guest multiplexes serve up to the Register's [WithConcurrentCalls] calls
+// at once, making their HTTP requests through launch's HTTP function.
+func (c *Container) pluginPool(reg *registration, src *source, launch *launcher, meters *pluginMeters) *pool {
 	lanes := 1
 	if src.loader.multiplexes() {
 		lanes = reg.cfg.concurrent
@@ -810,13 +805,11 @@ func (c *Container) pluginPool(reg *registration, key string, src *source, owner
 
 	return newPool(&poolConfig{
 		panics:       c.panics,
-		spawn:        spawn,
-		http:         httpFn,
+		spawn:        launch.start,
+		http:         launch.opts.HTTP,
 		budget:       &c.budget,
 		meters:       meters,
-		owner:        owner,
-		key:          key,
-		lang:         src.desc.Language,
+		id:           launch.id,
 		limit:        src.limit,
 		minSize:      int32(reg.cfg.poolMin), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
 		maxSize:      int32(reg.cfg.poolMax), //nolint:gosec // G115: pool sizes are validated to at most maxPoolSize
@@ -853,7 +846,7 @@ func (c *Container) closeUnpublished(ctx context.Context, plugins []*plugin) {
 
 		if err != nil {
 			c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing an unpublished plugin failed",
-				slog.String("key", gen.key), gen.pool.owner.log, slog.String("error", err.Error()))
+				slog.String("key", gen.key), gen.pool.id.owner.log, slog.String("error", err.Error()))
 		}
 	}
 }

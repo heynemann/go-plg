@@ -112,14 +112,14 @@ func (t *tracing) on() bool {
 }
 
 // start starts a span named name with opts, a child of the span in ctx, and returns ctx holding it; a panic in
-// the provider is reported under the plugin key in lang, and the span is left out (nil).
+// the provider is reported under the plugin version id, and the span is left out (nil).
 //
 //nolint:ireturn // the span is the OpenTelemetry API's interface
-func (t *tracing) start(ctx context.Context, key string, lang Language, name string, opts []trace.SpanStartOption,
+func (t *tracing) start(ctx context.Context, id pluginID, name string, opts []trace.SpanStartOption,
 ) (context.Context, trace.Span) {
 	started, span := ctx, trace.Span(nil)
 
-	t.panics.callback(ctx, key, lang, traceMethod, func() {
+	t.panics.callback(ctx, id.key, id.lang, traceMethod, func() {
 		started, span = t.tracer.Start(ctx, name, opts...) //nolint:fatcontext // runs once: started is the result
 	})
 
@@ -131,9 +131,9 @@ func (t *tracing) start(ctx context.Context, key string, lang Language, name str
 }
 
 // end runs fn, setting the span's last attributes and status, then ends span; a panic in the provider is
-// reported under the plugin key in lang.
-func (t *tracing) end(ctx context.Context, key string, lang Language, span trace.Span, fn func()) {
-	t.panics.callback(ctx, key, lang, traceMethod, func() {
+// reported under the plugin version id.
+func (t *tracing) end(ctx context.Context, id pluginID, span trace.Span, fn func()) {
+	t.panics.callback(ctx, id.key, id.lang, traceMethod, func() {
 		fn()
 		span.End()
 	})
@@ -149,8 +149,7 @@ type spanStart struct {
 // builds neither. It is immutable; a nil *pluginSpans traces nothing.
 type pluginSpans struct {
 	tracing *tracing
-	key     string
-	lang    Language
+	id      pluginID
 	calls   []spanStart // by method index
 	hosts   []spanStart // by Host method index; empty without WithHost
 	http    []trace.SpanStartOption
@@ -171,8 +170,7 @@ func newPluginSpans(tracing *tracing, id pluginID, methods []*method, hst *host)
 
 	spans := &pluginSpans{
 		tracing: tracing,
-		key:     id.key,
-		lang:    id.lang,
+		id:      id,
 		calls:   make([]spanStart, len(methods)),
 		http:    []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(plugin...)},
 	}
@@ -209,7 +207,7 @@ func (s *pluginSpans) call(ctx context.Context, index uint32) (context.Context, 
 
 	start := &s.calls[index]
 
-	return s.tracing.start(ctx, s.key, s.lang, start.name, start.opts)
+	return s.tracing.start(ctx, s.id, start.name, start.opts)
 }
 
 // called ends a call's span (nil: none), which ended with err.
@@ -218,7 +216,7 @@ func (s *pluginSpans) called(ctx context.Context, span trace.Span, err error) {
 		return
 	}
 
-	s.tracing.end(ctx, s.key, s.lang, span, func() {
+	s.tracing.end(ctx, s.id, span, func() {
 		span.SetAttributes(attribute.String("outcome", outcomeOf(err).String()))
 
 		if err != nil {
@@ -238,7 +236,7 @@ func (s *pluginSpans) host(ctx context.Context, index uint32) (context.Context, 
 
 	start := &s.hosts[index]
 
-	return s.tracing.start(ctx, s.key, s.lang, start.name, start.opts)
+	return s.tracing.start(ctx, s.id, start.name, start.opts)
 }
 
 // hostAnswered ends a Host method's span (nil: none) from its status-prefixed answer, or the failure to serve it.
@@ -247,7 +245,7 @@ func (s *pluginSpans) hostAnswered(ctx context.Context, span trace.Span, answer 
 		return
 	}
 
-	s.tracing.end(ctx, s.key, s.lang, span, func() {
+	s.tracing.end(ctx, s.id, span, func() {
 		got := hostOutcome(answer, err)
 		span.SetAttributes(attribute.String("outcome", got.outcome.String()))
 
@@ -303,7 +301,7 @@ func (s *pluginSpans) httpRequest(ctx context.Context) (context.Context, httpcap
 		return ctx, nil
 	}
 
-	ctx, span := s.tracing.start(ctx, s.key, s.lang, "plg.http", s.http)
+	ctx, span := s.tracing.start(ctx, s.id, "plg.http", s.http)
 	if span == nil {
 		return ctx, nil
 	}
@@ -313,7 +311,7 @@ func (s *pluginSpans) httpRequest(ctx context.Context) (context.Context, httpcap
 
 // httpAnswered ends an HTTP request's span with its report.
 func (s *pluginSpans) httpAnswered(ctx context.Context, span trace.Span, report *httpcap.Report) {
-	s.tracing.end(ctx, s.key, s.lang, span, func() {
+	s.tracing.end(ctx, s.id, span, func() {
 		if report.Method != "" {
 			span.SetName("plg.http " + report.Method)
 			span.SetAttributes(attribute.String("http.request.method", report.Method))

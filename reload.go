@@ -470,7 +470,7 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 
 	for _, gen := range changes.removed {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin removed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version))
 	}
 
 	return nil
@@ -508,7 +508,7 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 				Language: gen.desc.Language,
 				Phase:    PhaseClose,
 				Owner:    *gen.desc.owner(),
-				tags:     gen.pool.owner,
+				tags:     gen.pool.id.owner,
 			}
 			c.panics.recovered(ctx, failure, v)
 
@@ -537,10 +537,10 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 
 	if err != nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a plugin version failed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
 	} else {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin version closed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version))
 	}
 }
 

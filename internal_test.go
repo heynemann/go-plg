@@ -507,7 +507,7 @@ func reporting(handler slog.Handler) *panicReporter {
 // newTestPool returns a pool of sp's instances; cfg's spawn, key, language and limit are set, and its panic
 // reporter, budget and meters default to a discarding one, no budget and discarding instruments.
 func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
-	cfg.spawn, cfg.key, cfg.lang, cfg.limit = spawner.spawn, "test/k", LanguageGo, testLimit
+	cfg.spawn, cfg.id, cfg.limit = spawner.spawn, pluginID{owner: noOwner, key: "test/k", lang: LanguageGo}, testLimit
 	if cfg.panics == nil {
 		cfg.panics = reporting(slog.DiscardHandler)
 	}
@@ -519,7 +519,7 @@ func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
 	if cfg.meters == nil {
 		cfg.meters = newPluginMeters(
 			discardInstruments(),
-			pluginID{owner: noOwner, key: cfg.key, lang: cfg.lang},
+			cfg.id,
 			methodsOf(reflect.TypeFor[testIface]()),
 		)
 	}
@@ -807,7 +807,7 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 			panics: reporting(slog.DiscardHandler),
 			spawn:  spawner.spawn,
 			budget: budget,
-			key:    "test/other",
+			id:     pluginID{owner: noOwner, key: "test/other", lang: LanguageGo},
 			meters: newPluginMeters(
 				discardInstruments(),
 				pluginID{owner: noOwner, key: "test/other", lang: LanguageGo},
@@ -1461,7 +1461,7 @@ func TestDiscardingAnUnstartedInstanceLogsItsCloseFailure(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecorder()
-	starting := &launcher{output: slog.New(rec), key: "test/k"}
+	starting := &launcher{output: slog.New(rec), id: pluginID{key: "test/k"}}
 	inst := &failingCloser{}
 
 	starting.discardUnstarted(t.Context(), inst)
@@ -2691,8 +2691,7 @@ func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
 		spawn:   func(context.Context) (instance, error) { return guest, nil },
 		panics:  reporting(slog.DiscardHandler),
 		budget:  &memoryBudget{},
-		key:     "test/k",
-		lang:    LanguageLua,
+		id:      pluginID{owner: noOwner, key: "test/k", lang: LanguageLua},
 		limit:   testLimit,
 		minSize: 1,
 		maxSize: 1,
@@ -3160,7 +3159,8 @@ func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFun
 
 	cfg := &poolConfig{
 		spawn: func(context.Context) (instance, error) { return guest, nil }, http: web, panics: panics,
-		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1,
+		budget: &memoryBudget{}, id: pluginID{owner: noOwner, key: "test/k", lang: LanguageLua}, limit: testLimit,
+		minSize: 1, maxSize: 1,
 		lanes: lanes,
 	}
 	if cfg.panics == nil {
@@ -3169,7 +3169,7 @@ func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFun
 
 	cfg.meters = newPluginMeters(
 		discardInstruments(),
-		pluginID{owner: noOwner, key: cfg.key, lang: cfg.lang},
+		cfg.id,
 		methodsOf(reflect.TypeFor[testIface]()),
 	)
 

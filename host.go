@@ -179,10 +179,8 @@ func (hc *hostCaller) serve(ctx context.Context, dst []byte, index uint32, raw [
 	func() {
 		defer func() {
 			if v := recover(); v != nil { // reported here, so the stack is the panicking one
-				failure := &PanicError{
-					Key: hc.id.key, Language: hc.id.lang, Phase: PhaseHost, Method: hst.name + "." + meth.name,
-					Owner: hc.id.owner.owner, tags: hc.id.owner,
-				}
+				failure := hc.id.panicked(PhaseHost)
+				failure.Method = hst.name + "." + meth.name
 				hc.panics.recovered(ctx, failure, v)
 
 				answer, err = wire.AppendMessage(append(dst, byte(wire.StatusPanic)), failure.Error()), nil

@@ -13,7 +13,7 @@ import (
 func validatedGeneration(policy ValidationPolicy) *plugin {
 	gen := testGeneration()
 	gen.reg = &registration{validation: &validation{policy: policy}, keys: xsync.NewMap[string, *listedPlugin]()}
-	gen.launch = &launcher{owner: noOwner, key: gen.key}
+	gen.launch = &launcher{id: pluginID{owner: noOwner, key: gen.key}}
 
 	return gen
 }
