@@ -329,6 +329,42 @@ Agreed in a design session after the second adversarial review; tickets in `.scr
 - **Inspection:** *(implemented: ticket 09, which adds `skipped` for a plugin in a language its Register does not enable, and calls `rejected` any plugin no version of which serves because its latest load or listing failed.)* `plg.Info(c, key)` and `plg.Plugins(c)` list every plugin a registration's storages hold: `serving`, `degraded`, `serving_last_good` (an update was rejected, with that version's report), `rejected` (never loaded, with the reason and the owner if the manifest parsed) or `retired`, with owner, versions, last reports, panic counts and pool stats.
 - **Admin page:** *(implemented: ticket 10, which answers GET only, HEAD too getting a 405, and documents the JSON shape on `AdminHandler` and in the README.)* `plg.AdminHandler(c)` serves the same as read-only JSON. The service mounts and protects it (it shows owner emails); validation, reload and Check stay Go calls behind the service's own auth.
 
+## Author developer experience (planned)
+
+Agreed in a design session for the first real user: a rewards platform where growth teams set up incentives for cohorts of users, and cohort providers, eligibility conditions and reward delivery are plugins written by many teams. The goal is a self-service experience while authoring, deploying and observing plugins. Tickets in `.scratch/author-dx/issues/`.
+
+### Boundary
+
+- **plg stays generic.** It gains the generic developer tooling below; rewards concepts (cohorts, eligibility, delivery, the campaign manager and the campaign object passed to plugins) are the platform's contracts and code.
+- **The platform publishes.** How plugin artifacts reach an environment's storages is the platform's job; plg produces the artifacts and opens them.
+- **Contract guidance for such platforms** (documented, not enforced): cohort providers answer with bounded predicates and pages (`IsMember`, `List(cursor)` with a capped page size), never whole cohorts; side-effecting plugins (reward delivery) are at-least-once, because a call stopped at its deadline may already have sent its request, so the platform passes idempotency keys and owns retries.
+
+### Declaring and resolving contracts
+
+- **One plugin, one interface.** `plugin.yaml` gains a required `implements: <module>/<package>.<Interface>@<version>` (clean cutover). A registration loads only plugins declaring its interface; other plugins in the same storage are `skipped`.
+- **Version rule:** a plugin loads when its pinned major equals the service's and its minor is not newer. The service's version comes from its build info (`runtime/debug.ReadBuildInfo` of the contract module); a service built from a local checkout (`(devel)`) accepts with a warning. Contracts follow semver: additive changes only within a major.
+- **Offline resolution:** `plg validate` fetches the contract module at the pinned version through the local `go` command (`go mod download -json`, so GOPROXY, GOPRIVATE and credentials work as for any Go build) and type-checks its source with go/types, as `plg gen` does.
+- **Contract directives** on the interface's doc comment: `//plg:limits memory=… timeout=… pool=…` (recommended limits, used by local runs) and `//plg:guest-packages …` (extra Go guest packages; validate builds and caches that custom guest).
+- **Go plugins** also require the contract module in their `go.mod`; validate fails when its version (after replaces) differs from `plugin.yaml`'s pin.
+
+### Author repositories
+
+- **`plg.yaml`** at the repo root lists the repo's plugins, shared directories (copied into each plugin by `plg pack`, so the runtime's one-directory rule stays), limit overrides (on top of the contract's directives), `requireOwnership`, and `replace` entries pointing contract modules at local checkouts (like go.mod; `plg pack` refuses while a replace is active).
+- **Typings are committed:** TypeScript `.d.ts` and Lua Language Server annotations generated from the pinned contract; validate fails when they are stale.
+- **Tests:** `tests/*.yaml` cases run inside the real guests: `call` (a method or `Validate`), `input` by parameter name with `$ref` fixtures, `host:` stubs (matched arguments → result or error, call counts), `http:` stubs (unmatched requests fail), `secrets:` fakes, and `expect:` (result, error or issues).
+
+### CLI
+
+- **`plg init --implements <interface> --lang <go|lua|ts>`** scaffolds a plugin (manifest, typings, a working skeleton, example tests); **`plg dev`** watches and re-runs validation on save, and can call one method interactively.
+- **`plg validate <plugin or repo>`** runs: manifest and ownership; contract resolution and pins; language checks (TypeScript type-check against the typings, Go plugin restrictions, Lua syntax); load and `Create` in the real guest; `Validate` with example inputs; the test cases; a resource report (peak memory and time per call against the limits). Terminal output, `--format json`, `--junit`; non-zero exit on any error.
+- **`plg pack`** validates (refusing on errors) and writes a reproducible `.plg` archive: the self-contained plugin plus a provenance record (content digest, git commit, plg and contract versions, the validate report). `plg.OpenArtifact(r)` returns an `fs.FS`, so any storage can keep one blob per plugin; inspection shows the provenance; nothing is enforced at load.
+- **`plg status` / `plg events`** read an environment's admin handler through profiles in `~/.config/plg/profiles.yaml` (URL, token from an env var or command). The admin handler gains `GET /plugins/{key}/events`, backed by the last 100 events per plugin.
+
+### Runtime additions
+
+- **Secrets:** `plg.WithSecrets(func(ctx, plg.PluginInfo, name string) (string, error))` per registration. Plugins read only names their manifest declares (`secrets.get` in Lua and TypeScript, `plugin.Secret(ctx, name)` in Go); values are resolved on access with a short per-version cache (rotation without reloads) and scrubbed from logs, errors, panic values and guest output.
+- **Tracing:** `WithTracerProvider` (OTel trace API only; global by default): a span per plugin call (`plg.call <key>.<method>`, with key, version, language, method, outcome and owner team/org/company), child spans for Host methods and HTTP requests (which carry `traceparent`), trace and span IDs on guest log records. Parent spans come from the caller's context.
+
 ## Milestones
 
 Each milestone is implemented, tested with `go test -race`, smoke-run against real plugins, and committed separately.
