@@ -1,6 +1,8 @@
 // A test plugin reading the secrets its plugin.yaml declares with secrets.get, like testdata/plugins/go/secrets:
-// Foo(name) returns the secret name, Foo("@create") what Create read of the secret create, and Fail(cmd) leaks a
-// secret (print, error, panic: writes it to stderr, then runs out of memory, fetch).
+// Create fails with "refused <value>" when the secret create starts with "fail", Foo(name) returns the secret name,
+// Foo("@create") what Create read of the secret create, Validate(check) returns an info issue holding the value of
+// the secret check.Mode names, and Fail(cmd) leaks a secret (print, error, panic: writes it to stderr, then runs
+// out of memory, fetch).
 const hoard: ArrayBuffer[] = [];
 
 export function Create() {
@@ -10,7 +12,14 @@ export function Create() {
   } catch (e) {
     created = "error: " + (e as Error).message;
   }
+  if (created.startsWith("fail")) {
+    throw new Error("refused " + created);
+  }
   return {
+    Validate(check: { Mode: string }) {
+      const value = secrets.get(check.Mode);
+      return [{ severity: "info", code: "secrets." + value, message: "rejected " + value, field: value }];
+    },
     Foo(name: string): string {
       return name === "@create" ? created : secrets.get(name);
     },

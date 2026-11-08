@@ -1,6 +1,8 @@
 // Package secrets is a test plugin reading the secrets its plugin.yaml declares (api_key, create, broken) with
-// plugin.Secret. Foo(name) returns the secret name; Foo("@create") what Create read of the secret create (its value,
-// or "error: " and why). Fail(cmd) leaks a secret as cmd says:
+// plugin.Secret. Create reads the secret create, and fails with "refused <value>" when that starts with "fail".
+// Foo(name) returns the secret name; Foo("@create") what Create read of the secret create (its value, or "error: "
+// and why). Validate(Check) returns an info issue holding the value of the secret the Check's Mode names in its
+// code, message and field. Fail(cmd) leaks a secret as cmd says:
 //
 //	print <name>        writes "token <value>" to stdout (a Go plugin's stderr holds its panics' tracebacks only)
 //	error <name>        returns the error "rejected <value>"
@@ -30,7 +32,22 @@ func Create() (testcontract.Fooer, error) {
 		value = "error: " + err.Error()
 	}
 
+	if strings.HasPrefix(value, "fail") {
+		return nil, errors.New("refused " + value)
+	}
+
 	return &secrets{created: value}, nil
+}
+
+func (*secrets) Validate(ctx context.Context, in testcontract.Check) ([]plugin.Issue, error) {
+	value, err := plugin.Secret(ctx, in.Mode)
+	if err != nil {
+		return nil, err
+	}
+
+	return []plugin.Issue{
+		{Severity: plugin.Info, Code: "secrets." + value, Message: "rejected " + value, Field: value},
+	}, nil
 }
 
 func (s *secrets) Foo(ctx context.Context, name string) (string, error) {

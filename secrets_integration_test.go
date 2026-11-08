@@ -289,6 +289,42 @@ func assertPanicScrubbed(t *testing.T, lang plg.Language, err error) {
 	}
 }
 
+// TestSecretsAreScrubbedFromValidationAndCreate: a value the plugin read is replaced by "[secret <name>]" in the
+// code, message and field of the issues its Validate returns, and in the error of a Create that fails with it.
+func TestSecretsAreScrubbedFromValidationAndCreate(t *testing.T) {
+	t.Parallel()
+
+	ctr := newContainer(t)
+
+	for _, lang := range contractLanguages() {
+		t.Run(string(lang.lang), func(t *testing.T) {
+			t.Parallel()
+
+			value := "tok-" + lang.dir + "-5c1d2b"
+			keys := newVault(map[string]string{"api_key": value, "create": "created-value"})
+			secretsPlugin(t, lang, ctr, lang.dir, plg.WithSecrets(keys.resolve),
+				plg.WithValidation(func(context.Context, plg.PluginInfo) (testcontract.Check, error) {
+					return testcontract.Check{Mode: "api_key"}, nil
+				}))
+
+			report, err := plg.Validate(t.Context(), ctr, lang.dir+"/p")
+			require.NoError(t, err)
+			assert.Equal(t, []plg.Issue{{
+				Severity: plg.SeverityInfo, Code: "secrets.[secret api_key]", Message: "rejected [secret api_key]",
+				Field: "[secret api_key]",
+			}}, report.Issues)
+
+			refusing := newVault(map[string]string{"create": "fail-" + value})
+			err = plg.Register[testcontract.Fooer](t.Context(), ctr, lang.dir+"-refuses", plg.WithPool(1, 1),
+				plg.WithStorage(lang.storage(t, lang.dir+"-refuses", map[string]string{"p": "secrets"})),
+				plg.WithSecrets(refusing.resolve))
+			require.ErrorIs(t, err, plg.ErrLoad)
+			assert.Contains(t, err.Error(), "refused [secret create]")
+			assert.NotContains(t, err.Error(), value)
+		})
+	}
+}
+
 // TestChangingTheDeclaredSecretsReloadsThePlugin: plugin.yaml's secrets are part of the descriptor, so a reload
 // loads a plugin whose secrets changed although its version did not.
 func TestChangingTheDeclaredSecretsReloadsThePlugin(t *testing.T) {
