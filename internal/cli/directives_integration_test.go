@@ -114,9 +114,9 @@ func TestValidateBuildsAndCachesTheContractsGoGuest(t *testing.T) {
 }
 
 // TestValidateRepoLimitsOverrideTheContracts: an author repository's plg.yaml raises TightRule's 16 MiB memory
-// limit to 64 MiB and its 300ms timeout to 10s (writing 20 MiB can take longer under the race detector), keeping
-// its pool, and the plugin keeping 20 MiB, which fails under TightRule alone
-// (TestValidateRunsPluginsUnderTheContractsLimits), passes.
+// limit to 64 MiB and its 300ms timeout to 1h, keeping its pool, and the plugin keeping 20 MiB, which fails under
+// TightRule alone (TestValidateRunsPluginsUnderTheContractsLimits), passes. The hour is past go test's -timeout,
+// so it never fires first: writing 20 MiB under the race detector took over 10s on a loaded CI runner.
 func TestValidateRepoLimitsOverrideTheContracts(t *testing.T) {
 	t.Parallel()
 
@@ -126,7 +126,7 @@ func TestValidateRepoLimitsOverrideTheContracts(t *testing.T) {
 	manifest, err := os.ReadFile(filepath.Join("..", "..", "testdata", "validate", "plugins", "luabig", "plugin.yaml"))
 	require.NoError(t, err)
 
-	repo := copyRepo(t, "plugins: [tightbig]\nlimits: {memory: 64MiB, timeout: 10s}\n", map[string]string{
+	repo := copyRepo(t, "plugins: [tightbig]\nlimits: {memory: 64MiB, timeout: 1h}\n", map[string]string{
 		"tightbig/plugin.lua": string(big), "tightbig/plugin.yaml": string(manifest),
 	})
 
@@ -138,7 +138,7 @@ func TestValidateRepoLimitsOverrideTheContracts(t *testing.T) {
 		t,
 		steps,
 		"limits",
-		"memory=64MiB timeout=10s pool=1..2 (plg.yaml memory=64MiB timeout=10s over //plg:limits "+
+		"memory=64MiB timeout=1h0m0s pool=1..2 (plg.yaml memory=64MiB timeout=1h0m0s over //plg:limits "+
 			"memory=16MiB timeout=300ms pool=1..2)\n",
 	)
 	assertOK(t, steps, "load", "Create ran in the lua guest")
