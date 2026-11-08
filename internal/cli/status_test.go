@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -441,8 +442,7 @@ func TestStatusFailures(t *testing.T) {
 	t.Parallel()
 
 	env := newEnvironment(t)
-	gone := httptest.NewServer(http.NotFoundHandler())
-	gone.Close()
+	gone := goneServer(t)
 
 	profile := func(url, token string) string {
 		return fmt.Sprintf("profiles:\n  - name: p\n    url: %s\n%s", url, token)
@@ -607,4 +607,27 @@ func TestStatusOfAClosedContainer(t *testing.T) {
 	assert.Equal(t, "plg events: profile staging: GET "+env.srv.URL+"/staging/plugins/ping/search/events: the "+
 		"admin handler answered 503 Service Unavailable: plg: container closed\n",
 		env.fails(t, nil, "events", "ping/search"))
+}
+
+// gone is a server that is gone: its URL's port is held by a socket the test owns, bound but not listening, so
+// connecting to it is refused for as long as the test runs (a closed server's freed port could be taken by
+// another process meanwhile, answering instead of refusing).
+type gone struct{ URL string }
+
+func goneServer(t *testing.T) gone {
+	t.Helper()
+
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, syscall.Close(fd)) })
+
+	require.NoError(t, syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}))
+
+	addr, err := syscall.Getsockname(fd)
+	require.NoError(t, err)
+
+	inet, ok := addr.(*syscall.SockaddrInet4)
+	require.True(t, ok)
+
+	return gone{URL: "http://127.0.0.1:" + strconv.Itoa(inet.Port)}
 }
