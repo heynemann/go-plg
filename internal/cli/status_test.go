@@ -36,8 +36,9 @@ const (
 
 // environment is a service holding plugins none of which serves (no guest runs): it mounts plg.AdminHandler on a
 // real HTTP server at /staging/ and /prod/, each behind its own bearer token, and at /open/ without one; /forbidden/
-// refuses everyone as the service's own authorization would, /broken/ is a failing proxy and /garbled/ answers
-// 200 with something else than JSON. home is the user's home directory, where profiles go.
+// refuses everyone as the service's own authorization would, /broken/ is a failing proxy, /escaped/ one whose
+// status line holds an escape sequence and /garbled/ answers 200 with something else than JSON. home is the user's
+// home directory, where profiles go.
 type environment struct {
 	ctr  *plg.Container
 	srv  *httptest.Server
@@ -105,6 +106,7 @@ func newEnvironment(t *testing.T) *environment {
 	mux.HandleFunc("/broken/", func(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "upstream\tdown\n\x1b[2Jfor now", http.StatusBadGateway)
 	})
+	mux.Handle("/escaped/", rawAnswer(t, "HTTP/1.1 502 \x1b[2JBad Gateway\r\n"))
 	mux.HandleFunc("/garbled/", func(writer http.ResponseWriter, _ *http.Request) {
 		_, err := writer.Write([]byte("<html>not json</html>"))
 		assert.NoError(t, err)
@@ -126,6 +128,25 @@ func bearer(token string, next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(writer, req)
+	})
+}
+
+// rawAnswer answers with the status line and headers head as they are, which Go's server would not write, and no
+// body.
+func rawAnswer(t *testing.T, head string) http.Handler {
+	t.Helper()
+
+	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := http.NewResponseController(writer).Hijack()
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		defer func() { assert.NoError(t, conn.Close()) }()
+
+		_, err = buf.WriteString(head + "Content-Length: 0\r\nConnection: close\r\n\r\n")
+		assert.NoError(t, err)
+		assert.NoError(t, buf.Flush())
 	})
 }
 
@@ -572,6 +593,10 @@ func TestStatusFailures(t *testing.T) {
 			profiles: profile(url("/broken"), ""),
 			contains: "answered 502 Bad Gateway: upstream down \ufffd[2Jfor now\n",
 		},
+		"a proxy's status line with an escape sequence": {
+			profiles: profile(url("/escaped"), ""),
+			contains: "answered 502 \ufffd[2JBad Gateway\n",
+		},
 		"an answer that is not JSON": {
 			profiles: profile(url("/garbled"), ""),
 			contains: "GET " + url("/garbled/plugins") + ": reading the answer: ",
@@ -599,13 +624,15 @@ func TestStatusFailures(t *testing.T) {
 			assert.Contains(t, stderr,
 				strings.ReplaceAll(tc.contains, "$FILE", filepath.Join(home, ".config", "plg", "profiles.yaml")))
 			assert.NotContains(t, stderr, "s3cret", "no error shows a URL's password")
+			assert.NotContains(t, stderr, "\x1b", "no error drives the terminal")
 		})
 	}
 }
 
 // TestStatusFollowsNoRedirect: an admin URL answering with a redirect, here to another port of the same host, where
 // Go's client would carry the bearer token, fails plg status and plg events with the redirect's status and target,
-// and the token never reaches the target; a redirect without a target fails likewise.
+// and the token never reaches the target; a redirect without a target fails likewise. Control characters in the
+// status line and the target become U+FFFD.
 func TestStatusFollowsNoRedirect(t *testing.T) {
 	t.Parallel()
 
@@ -619,8 +646,13 @@ func TestStatusFollowsNoRedirect(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	redirecting := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
-		if strings.HasPrefix(req.URL.Path, "/nowhere/") {
+		switch {
+		case strings.HasPrefix(req.URL.Path, "/nowhere/"):
 			writer.WriteHeader(http.StatusMultipleChoices)
+
+			return
+		case strings.HasPrefix(req.URL.Path, "/escaped/"):
+			rawAnswer(t, "HTTP/1.1 302 \x1b[2JFound\r\nLocation: "+target.URL+"/x?\u009b2J\r\n").ServeHTTP(writer, req)
 
 			return
 		}
@@ -648,6 +680,10 @@ func TestStatusFollowsNoRedirect(t *testing.T) {
 	writeProfiles(t, filepath.Join(env.home, ".config"), profiles("/nowhere"))
 	assert.Equal(t, "plg status: profile p: GET "+redirecting.URL+"/nowhere/plugins: the admin handler answered "+
 		"300 Multiple Choices"+advice, env.fails(t, nil, "status"))
+
+	writeProfiles(t, filepath.Join(env.home, ".config"), profiles("/escaped"))
+	assert.Equal(t, "plg status: profile p: GET "+redirecting.URL+"/escaped/plugins: the admin handler answered "+
+		"302 \ufffd[2JFound to "+target.URL+"/x?\ufffd2J"+advice, env.fails(t, nil, "status"))
 
 	assert.Zero(t, reached.Load(), "plg follows no redirect")
 }

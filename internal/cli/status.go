@@ -289,8 +289,8 @@ func (c *adminClient) get(ctx context.Context, target *url.URL, out any) error {
 }
 
 // refused explains an answer other than 200: its status and the handler's message ({"error": …}) or, from
-// anything else (the service's own authentication, a proxy), the start of its body, on one line without control
-// characters. A redirect is explained by redirected.
+// anything else (the service's own authentication, a proxy), the start of its body, each on one line without
+// control characters. A redirect is explained by redirected.
 func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
 	if answer.StatusCode >= http.StatusMultipleChoices && answer.StatusCode < http.StatusBadRequest {
 		return c.redirected(target, answer)
@@ -301,7 +301,7 @@ func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
 		body = nil
 	}
 
-	msg, text := answer.Status, string(body)
+	msg, text := oneLine(answer.Status), string(body)
 
 	var decoded adminjson.Error
 
@@ -321,13 +321,13 @@ func (c *adminClient) refused(target *url.URL, answer *http.Response) error {
 }
 
 // redirected explains a redirect, which the client does not follow (see followNoRedirect): its status and where
-// it led, when it says.
+// it led, when it says, each on one line without control characters.
 func (c *adminClient) redirected(target *url.URL, answer *http.Response) error {
-	msg := answer.Status
+	msg := oneLine(answer.Status)
 
 	to, err := answer.Location()
 	if err == nil {
-		msg += " to " + to.Redacted()
+		msg += " to " + oneLine(to.Redacted())
 	}
 
 	return fmt.Errorf("profile %s: GET %s: %w %s (plg follows no redirect, which would carry the token: set the "+
