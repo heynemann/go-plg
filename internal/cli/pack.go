@@ -73,7 +73,7 @@ func runPack(env *Env, args []string) outcome {
 
 	run, out := loading.validation(env, operands[0], defaultNearLimit), resolve(env.Dir, *outDir)
 
-	err := checkOutput(run.dir, out)
+	err := checkOutput(run.dir, out, *outDir)
 	if err != nil {
 		return failure("pack", err)
 	}
@@ -100,8 +100,9 @@ func runPack(env *Env, args []string) outcome {
 }
 
 // checkOutput fails when out, the output directory, is inside a directory whose files plg pack packs from dir (see
-// packedDirs). Both are clean absolute paths (see resolve), as are the directories packedDirs returns.
-func checkOutput(dir, out string) error {
+// packedDirs), naming the output directory shown, as -o gave it. Both are clean absolute paths (see resolve), as are
+// the directories packedDirs returns.
+func checkOutput(dir, out, shown string) error {
 	inputs, err := packedDirs(dir)
 	if err != nil {
 		return err
@@ -109,7 +110,7 @@ func checkOutput(dir, out string) error {
 
 	for _, input := range inputs {
 		if out == input || strings.HasPrefix(out, input+string(filepath.Separator)) {
-			return fmt.Errorf("%w: %s is inside %s", errOutputInside, out, input)
+			return fmt.Errorf("%w: %s is inside %s", errOutputInside, shown, input)
 		}
 	}
 

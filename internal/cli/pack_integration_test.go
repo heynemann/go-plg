@@ -277,9 +277,13 @@ func TestPackRefusesInvalidPluginsAndReplacedContracts(t *testing.T) {
 	assertEndsWith(t, got.stderr, "\nplg pack: wrote luagood.plg ("+openPacked(t, written).Provenance().Digest+")\n")
 	assert.Equal(t, []string{"luagood", "luagood.plg"}, artifactsIn(t, parent), "no temporary file is left")
 
-	got = packIn(environ, plugin, ".") // from inside the plugin
+	got = packIn(environ, plugin, ".") // from inside the plugin, -o defaulting to "."
 	assert.Equal(t, 1, got.code)
-	assert.Contains(t, got.stderr, "choose another with -o: "+plugin+" is inside "+plugin+"\n")
+	assert.Contains(t, got.stderr, "choose another with -o: . is inside "+plugin+"\n", "-o is named as given")
+
+	got = packIn(environ, plugin, "-o", "dist", ".")
+	assert.Equal(t, 1, got.code)
+	assert.Contains(t, got.stderr, "choose another with -o: dist is inside "+plugin+"\n", "-o is named as given")
 }
 
 // gitIn returns a function running git with its arguments in the repository repo, in the environment environ, as
