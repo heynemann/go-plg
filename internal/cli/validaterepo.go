@@ -132,7 +132,7 @@ func (v *validation) repository() bool {
 			strings.Join(replaces, ", ")))
 	}
 
-	v.report.row(authorrepo.FileName, resultOK, settings(v.repo))
+	v.report.row(authorrepo.FileName, resultOK, settings(v.repo, v.shown(v.repo.File())))
 
 	return true
 }
@@ -151,8 +151,8 @@ func (v *validation) findRepository() bool {
 	}
 
 	if _, listed := repo.Lists(v.dir); !listed {
-		v.report.row(authorrepo.FileName, resultWarning, repo.File()+" does not list this plugin: it is validated "+
-			"without the repository's settings")
+		v.report.row(authorrepo.FileName, resultWarning, v.shown(repo.File())+" does not list this plugin: it is "+
+			"validated without the repository's settings")
 
 		return true
 	}
@@ -162,9 +162,9 @@ func (v *validation) findRepository() bool {
 	return v.repository()
 }
 
-// settings describes what a repository's plg.yaml sets for its plugins.
-func settings(repo *authorrepo.Repo) string {
-	described := []string{repo.File()}
+// settings describes what a repository's plg.yaml, named file, sets for its plugins.
+func settings(repo *authorrepo.Repo, file string) string {
+	described := []string{file}
 
 	if len(repo.Shared) > 0 {
 		described = append(described, "shared "+strings.Join(repo.Shared, ", "))
@@ -183,11 +183,11 @@ func settings(repo *authorrepo.Repo) string {
 
 // shared sets the plugin's files: its directory, or, when its author repository has shared directories, a
 // temporary copy of it with them copied in, which cleanup removes.
-func (v *validation) shared(desc *plg.Descriptor) (func(), bool) {
+func (v *validation) shared(ctx context.Context, desc *plg.Descriptor) (func(), bool) {
 	v.files, v.filesDir = os.DirFS(v.dir), v.dir
 
 	if v.repo == nil || len(v.repo.Shared) == 0 {
-		return func() {}, true
+		return func() {}, v.snapshot(ctx)
 	}
 
 	plugin, _ := v.repo.Lists(v.dir)
@@ -224,6 +224,12 @@ func (v *validation) shared(desc *plg.Descriptor) (func(), bool) {
 	v.report.row("shared", resultOK, detail)
 
 	v.files, v.filesDir = os.DirFS(dir), dir
+
+	if !v.snapshot(ctx) {
+		cleanup()
+
+		return nil, false
+	}
 
 	return cleanup, true
 }

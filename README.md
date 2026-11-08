@@ -881,9 +881,13 @@ An artifact is a gzip-compressed tar archive:
 The same input packs to the same bytes: entries in walk order, every one a regular file of mode 0644 dated the
 Unix epoch without owner, a gzip header without name or time, and a report without what changes from one run to
 the next: the resource report (each case's time and peak memory) is left out, and a custom Go guest's step says it
-came "from" the guest cache whether or not it was built in this run. The report still names this machine's paths
-(the plugin's directory, the module cache, the guest cache) and its defaults (the pool's maximum is `GOMAXPROCS`),
-so the bytes are reproducible where those are the same; the digest depends on the files alone.
+came "from" the guest cache whether or not it was built in this run. Nor does it name the machine: its paths are
+relative to the author repository (to the plugin's directory without one), the contract module is its path and
+version without the module cache's directory, the guest cache is not named, and a pool plg's defaults set reads
+`pool=1..GOMAXPROCS` rather than this machine's CPU count. So the same input packs to the same bytes from any
+checkout on any machine; the digest depends on the files alone. Pack copies the plugin's files once, before
+validating them, and validates and packs that copy (git's state is read at the same moment), so a file changed
+during the run is neither validated nor packed.
 
 Services read artifacts with `plg.OpenArtifact` (see [Storages](#storages)); `plg.Info`, the admin handler and
 `plg status <key>` show the provenance of a plugin loaded from one. Nothing about it is enforced at load.
@@ -1000,8 +1004,9 @@ func (s *blobStorage) Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error
 ```
 
 `OpenArtifact` holds an artifact to the limits above (a file stating more than `MaxPluginFileSize`, files over
-`MaxPluginSize` together, more than `MaxPluginEntries` files or paths over `MaxPluginPathBytes`: `ErrPluginTooLarge`,
-before they are read; decompressing stops past what those limits allow, so a compression bomb is not inflated),
+`MaxPluginSize` together, more than `MaxPluginEntries` entries or paths over `MaxPluginPathBytes`, counting each
+directory a file's path implies once with its path, as a storage's listing does: `ErrPluginTooLarge`, before they are
+read; decompressing stops past what those limits allow, so a compression bomb is not inflated),
 and fails with `plg.ErrInvalidArtifact` on anything `plg pack` does not write: an archive cut short or corrupted
 (gzip's checksum, or files whose content digest is not the provenance's), an entry outside `plugin/` (`..`,
 absolute or unclean paths), anything but a regular file (links, directories, devices), a file twice, a missing

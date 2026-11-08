@@ -182,8 +182,9 @@ func (b *boundedReader) Read(buf []byte) (int, error) {
 type artifactReader struct {
 	archive    *tar.Reader
 	tree       memfs.Builder
-	provenance []byte // nil until the record is read
-	count      int    // the plugin's files so far
+	dirs       map[string]struct{} // the directories charged
+	provenance []byte              // nil until the record is read
+	count      int                 // the plugin's entries so far: its files and their directories
 	pathBytes  int
 	total      int64
 	manifest   bool // plugin.yaml was read
@@ -230,8 +231,36 @@ func (a *artifactReader) entry(header *tar.Header) error {
 	return a.file(name, header.Size)
 }
 
-// charge counts the entry name against [MaxPluginEntries] and its path against [MaxPluginPathBytes].
+// charge counts the entry name, and each of its parent directories not counted yet, against [MaxPluginEntries]
+// and their paths against [MaxPluginPathBytes], as a storage's listing counts them, so a deep path is refused
+// before the plugin's files are built.
 func (a *artifactReader) charge(name string) error {
+	err := a.chargeOne(name)
+
+	for dir := name; err == nil; {
+		i := strings.LastIndexByte(dir, '/')
+		if i < 0 {
+			break
+		}
+
+		dir = dir[:i]
+		if _, seen := a.dirs[dir]; seen { // its parents were charged with it
+			break
+		}
+
+		if a.dirs == nil {
+			a.dirs = make(map[string]struct{})
+		}
+
+		a.dirs[dir] = struct{}{}
+		err = a.chargeOne(dir)
+	}
+
+	return err
+}
+
+// chargeOne counts the entry name against [MaxPluginEntries] and its path against [MaxPluginPathBytes].
+func (a *artifactReader) chargeOne(name string) error {
 	a.count++
 	a.pathBytes += len(name)
 

@@ -86,7 +86,8 @@ commands:
                       repository's shared directories copied in, as a storage loads them) and a provenance record
                       (the files' content digest, the git commit and whether the files differ from it, the plg
                       version, the contract module and version, and validate's JSON report, without the resource
-                      report, whose measurements change from run to run); the same input packs to the same bytes.
+                      report, whose measurements change from run to run, with paths relative to the repository); the
+                      same input packs to the same bytes on any machine.
                       Nothing is written when a plugin is not valid or while plg.yaml or a Go plugin's go.mod
                       replaces the contract module by a local directory. Services open artifacts with
                       plg.OpenArtifact; other flags as for validate

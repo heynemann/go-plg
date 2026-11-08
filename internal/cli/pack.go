@@ -35,6 +35,9 @@ var errOutputInside = errors.New("the output directory is inside files plg pack 
 // errNotCopied reports a storage's Open that did not return its copy of the plugin's files.
 var errNotCopied = errors.New("plg's storage did not return its copy of the plugin's files")
 
+// errManifestChanged reports a plugin.yaml changed between its reading and the snapshot plg pack packs.
+var errManifestChanged = errors.New("plugin.yaml changed while plg pack read the plugin's files: pack again")
+
 // Modes of what plg pack writes.
 const (
 	artifactMode = 0o644
@@ -42,14 +45,15 @@ const (
 )
 
 // packed is a plugin plg pack validated: its report, its files as a storage loads them (the author repository's
-// shared directories copied in), the contract module it was validated against, and what it was packed from: its
-// directory, and those of the shared directories and plg.yaml, which say whether the commit is dirty.
+// shared directories copied in), the contract module it was validated against, the git state of what its files
+// were snapshotted from, and the directory its report's paths are relative to.
 type packed struct {
 	report   *pluginReport
 	files    *memfs.FS
 	contract modfetch.Module
 	key      string
-	inputs   []string
+	root     string
+	git      gitCommit
 }
 
 // runPack runs `plg pack`.
@@ -99,7 +103,7 @@ func runPack(env *Env, args []string) outcome {
 		return outcome{code: exitFailure, msg: "plg pack: " + rep.invalid() + ": nothing packed\n"}
 	}
 
-	written, err := writeArtifacts(env, rep, plugins, out)
+	written, err := writeArtifacts(rep, plugins, out)
 	if err != nil {
 		return failure("pack", err)
 	}
@@ -157,23 +161,24 @@ func packedDirs(dir string) ([]string, error) {
 	return inputs, nil
 }
 
-// keep keeps the plugin's files for plg pack as a storage loads them (plg.NewFSStorage's copy: regular files, links
-// inside the plugin left out, within the limits of a plugin's files), and passes it on; a failure to copy them
-// fails the plugin's pack step.
-func (v *validation) keep(ctx context.Context, res *resolved) {
+// snapshot, for plg pack, copies the plugin's files once as a storage loads them (plg.NewFSStorage's copy:
+// regular files, links inside the plugin left out, within the limits of a plugin's files) and reads the git state
+// of what they were copied from at that moment; validation then reads that copy, which is what is packed, so a
+// file changed on disk meanwhile is neither validated nor packed. A failure fails the plugin's pack step.
+func (v *validation) snapshot(ctx context.Context) bool {
+	if v.packed == nil {
+		return true
+	}
+
 	opened, err := plg.NewFSStorage(filepath.Dir(v.filesDir)).Open(ctx,
 		&plg.Descriptor{Key: filepath.Base(v.filesDir)})
 	if err != nil {
-		v.failed("pack", err)
-
-		return
+		return v.failed("pack", err)
 	}
 
 	files, ok := opened.(*memfs.FS)
 	if !ok { // unreachable: FSStorage's Open returns its copy
-		v.failed("pack", fmt.Errorf("%w: %T", errNotCopied, opened))
-
-		return
+		return v.failed("pack", fmt.Errorf("%w: %T", errNotCopied, opened))
 	}
 
 	inputs := []string{v.dir}
@@ -185,11 +190,37 @@ func (v *validation) keep(ctx context.Context, res *resolved) {
 		inputs = append(inputs, v.repo.File())
 	}
 
-	v.packed(&packed{report: v.report, files: files, contract: res.mod, key: v.key(), inputs: inputs})
+	state, err := gitState(ctx, v.env, inputs)
+	if err != nil {
+		return v.failed("pack", err)
+	}
+
+	v.files, v.snap, v.git = files, files, state
+
+	return true
+}
+
+// checkSnapshot fails when the snapshot's plugin.yaml is not manifest, the plugin.yaml validation read before it.
+func (v *validation) checkSnapshot(manifest []byte) bool {
+	if v.snap == nil {
+		return true
+	}
+
+	data, err := v.snap.ReadFile("plugin.yaml")
+	if err != nil || !bytes.Equal(data, manifest) {
+		return v.failed("pack", errManifestChanged)
+	}
+
+	return true
+}
+
+// keep passes the plugin plg pack validated on, with the files validation read.
+func (v *validation) keep(res *resolved) {
+	v.packed(&packed{report: v.report, files: v.snap, contract: res.mod, key: v.key(), root: v.root(), git: v.git})
 }
 
 // writeArtifacts writes the artifact of each plugin, <key>.plg in the directory out, and returns what it wrote.
-func writeArtifacts(env *Env, rep *report, plugins []*packed, out string) (string, error) {
+func writeArtifacts(rep *report, plugins []*packed, out string) (string, error) {
 	err := os.MkdirAll(out, outDirMode)
 	if err != nil {
 		return "", fmt.Errorf("creating the output directory: %w", err)
@@ -198,7 +229,7 @@ func writeArtifacts(env *Env, rep *report, plugins []*packed, out string) (strin
 	var written strings.Builder
 
 	for _, plugin := range plugins {
-		record, err := provenance(env, rep, plugin)
+		record, err := provenance(rep, plugin)
 		if err != nil {
 			return "", err
 		}
@@ -216,30 +247,30 @@ func writeArtifacts(env *Env, rep *report, plugins []*packed, out string) (strin
 	return written.String(), nil
 }
 
-// provenance returns the provenance record of the plugin, validated as rep reports.
-func provenance(env *Env, rep *report, plugin *packed) (*adminjson.Provenance, error) {
-	own := report{
-		Version: reportVersion, Repository: rep.Repository, Plugins: []*pluginReport{plugin.report},
-		Valid: plugin.report.Valid,
+// provenance returns the provenance record of the plugin, validated as rep reports; its report's paths are
+// relative to the plugin's root.
+func provenance(rep *report, plugin *packed) (*adminjson.Provenance, error) {
+	own := report{Version: reportVersion, Valid: plugin.report.Valid}
+	if rep.Repository != "" {
+		own.Repository = relativeTo(plugin.root, rep.Repository)
 	}
+
+	shown := *plugin.report
+	shown.Dir = relativeTo(plugin.root, shown.Dir)
+	own.Plugins = []*pluginReport{&shown}
 
 	data, err := sonic.ConfigStd.Marshal(&own)
 	if err != nil {
 		return nil, fmt.Errorf("plugin %s: the report: %w", plugin.key, err)
 	}
 
-	state, err := gitState(env, plugin.inputs)
-	if err != nil {
-		return nil, fmt.Errorf("plugin %s: %w", plugin.key, err)
-	}
-
 	return &adminjson.Provenance{
 		Report:   data,
 		Contract: adminjson.Module{Path: plugin.contract.Path, Version: plugin.contract.Version},
 		Digest:   artifact.Digest(plugin.files),
-		Commit:   state.commit,
+		Commit:   plugin.git.commit,
 		Plg:      contractref.Built(plgModule).Version,
-		Dirty:    state.dirty,
+		Dirty:    plugin.git.dirty,
 	}, nil
 }
 
@@ -252,13 +283,13 @@ type gitCommit struct {
 // gitState returns the git commit the first of inputs (a directory) is at, and whether any of inputs differs from
 // it: changed, added, untracked or ignored files. Without git, or outside a repository with a commit, there is no
 // commit.
-func gitState(env *Env, inputs []string) (gitCommit, error) {
-	head, err := git(env, inputs[0], "rev-parse", "--verify", "HEAD")
+func gitState(ctx context.Context, env *Env, inputs []string) (gitCommit, error) {
+	head, err := git(ctx, env, inputs[0], "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return gitCommit{}, nil //nolint:nilerr // no repository, no commit or no git: nothing to record
 	}
 
-	status, err := git(env, inputs[0], append([]string{
+	status, err := git(ctx, env, inputs[0], append([]string{
 		"status", "--porcelain", "-z", "--untracked-files=all",
 		"--ignored=matching", "--",
 	}, inputs...)...)
@@ -270,9 +301,9 @@ func gitState(env *Env, inputs []string) (gitCommit, error) {
 }
 
 // git runs git with args in dir, in env's environment, and returns its output.
-func git(env *Env, dir string, args ...string) ([]byte, error) {
+func git(ctx context.Context, env *Env, dir string, args ...string) ([]byte, error) {
 	//nolint:gosec // G204: git, with plg's own arguments and the packed paths
-	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = env.environ()
 
 	var stderr bytes.Buffer

@@ -141,7 +141,9 @@ func TestPackWritesReproducibleArtifacts(t *testing.T) {
 		assert.False(t, provenance.Dirty, key)
 
 		report := packedReport(t, art)
-		assert.Equal(t, filepath.Join(repo, "plg.yaml"), report["repository"], key)
+		assert.Equal(t, "plg.yaml", report["repository"], key)
+		assert.NotContains(t, string(provenance.Report), repo, "%s: the report's paths are relative to the repository",
+			key)
 		assert.Equal(t, true, report["valid"], key)
 
 		plugins, ok := report["plugins"].([]any)

@@ -32,6 +32,7 @@ import (
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/goallow"
 	"github.com/heynemann/go-plg/internal/gorestrict"
+	"github.com/heynemann/go-plg/internal/memfs"
 	"github.com/heynemann/go-plg/internal/modfetch"
 	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/internal/testcase"
@@ -153,7 +154,11 @@ type validation struct {
 	packed func(*packed)
 	files  fs.FS
 	// filesDir is the directory of files: dir, or the temporary copy with the shared directories.
-	filesDir   string
+	filesDir string
+	// snap and git are plg pack's snapshot of the plugin's files, which files then is, and the git state of what
+	// it was copied from.
+	snap       *memfs.FS
+	git        gitCommit
 	dir        string
 	arg        string
 	host       string
@@ -201,7 +206,7 @@ func (v *validation) steps(ctx context.Context) {
 	}
 
 	if v.packed != nil && v.report.FailedStep == "" {
-		v.keep(ctx, res)
+		v.keep(res)
 	}
 }
 
@@ -252,8 +257,14 @@ func (v *validation) resolveContract(ctx context.Context) (*resolved, func(), bo
 		return nil, nil, false
 	}
 
-	cleanup, ok := v.shared(&desc)
+	cleanup, ok := v.shared(ctx, &desc)
 	if !ok {
+		return nil, nil, false
+	}
+
+	if !v.checkSnapshot(manifest) {
+		cleanup()
+
 		return nil, nil, false
 	}
 
@@ -373,7 +384,16 @@ func (v *validation) limits(desc *plg.Descriptor, declared directive.Limits) dir
 	limits := defaults.Override(declared)
 	limits = limits.Override(repo)
 
-	detail := limits.String()
+	shown := limits
+	if v.packed != nil && declared.Override(repo).PoolMax == 0 { // pack records no machine's CPU count
+		shown.PoolMin, shown.PoolMax = 0, 0
+	}
+
+	detail := shown.String()
+	if shown != limits {
+		detail += " pool=1..GOMAXPROCS"
+	}
+
 	if limits.Timeout == 0 {
 		detail += ", no timeout"
 	}
@@ -450,20 +470,23 @@ func (v *validation) goGuest(ctx context.Context, pkgs []string) ([]byte, bool) 
 		return nil, v.failed("guest", err)
 	}
 
-	how := "built into"
-
-	switch {
-	case v.packed != nil: // pack records only what does not change from one run to the next
-		how = "from"
-	case guest.Hit:
-		how = "found in"
-	default:
-	}
-
-	v.report.row("guest", resultOK, fmt.Sprintf("a custom Go guest with %s, %s the guest cache (%s)",
-		strings.Join(pkgs, " "), how, guest.Path))
+	v.report.row("guest", resultOK, fmt.Sprintf("a custom Go guest with %s, %s", strings.Join(pkgs, " "),
+		v.guestOrigin(&guest)))
 
 	return wasm, true
+}
+
+// guestOrigin says where the guest row's guest came from: the guest cache, found in or built into it, at its
+// path; plg pack records only what does not change from one run or machine to the next.
+func (v *validation) guestOrigin(guest *buildguest.Guest) string {
+	switch {
+	case v.packed != nil:
+		return "from the guest cache"
+	case guest.Hit:
+		return "found in the guest cache (" + guest.Path + ")"
+	default:
+		return "built into the guest cache (" + guest.Path + ")"
+	}
 }
 
 // failed adds the failed step's row.
@@ -529,6 +552,48 @@ func (v *validation) key() string {
 	return filepath.Base(v.dir)
 }
 
+// shown is name, a path, as the report names it: as is, or for plg pack relative to the author repository (the plugin's
+// directory without one), slash-separated, so the packed report names no machine's directories.
+func (v *validation) shown(name string) string {
+	if v.packed == nil {
+		return name
+	}
+
+	return relativeTo(v.root(), name)
+}
+
+// root is the directory plg pack's paths are relative to: the author repository's, or the plugin's.
+func (v *validation) root() string {
+	if v.repo != nil {
+		return v.repo.Dir
+	}
+
+	return v.dir
+}
+
+// relativeTo returns name relative to root, slash-separated, or name when it has none.
+func relativeTo(root, name string) string {
+	rel, err := filepath.Rel(root, name)
+	if err != nil {
+		return name
+	}
+
+	return filepath.ToSlash(rel)
+}
+
+// moduleDir is the contract row's parenthesis: the module's directory followed by more, or for plg pack, which
+// names no module cache, only more.
+func (v *validation) moduleDir(dir, more string) string {
+	switch {
+	case v.packed == nil:
+		return " (" + dir + more + ")"
+	case more == "":
+		return ""
+	default:
+		return " (" + strings.TrimPrefix(more, "; ") + ")"
+	}
+}
+
 // resolve fetches the contract module the plugin pins through the go command, or finds it in the module cache; a
 // module the author repository replaces is its local checkout.
 func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch.Module, bool) {
@@ -543,8 +608,8 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	}
 
 	if mod, ok := v.modules.find(ref); ok {
-		v.report.row("contract", resultOK, fmt.Sprintf("module %s %s (%s; resolved by an earlier run)", mod.Path,
-			mod.Version, mod.Dir))
+		v.report.row("contract", resultOK, fmt.Sprintf("module %s %s%s", mod.Path, mod.Version,
+			v.moduleDir(mod.Dir, "; resolved by an earlier run")))
 
 		return mod, true
 	}
@@ -557,7 +622,7 @@ func (v *validation) resolve(ctx context.Context, ref contractref.Ref) (modfetch
 	}
 
 	v.modules.keep(ref, mod)
-	v.report.row("contract", resultOK, fmt.Sprintf("module %s %s (%s)", mod.Path, mod.Version, mod.Dir))
+	v.report.row("contract", resultOK, fmt.Sprintf("module %s %s%s", mod.Path, mod.Version, v.moduleDir(mod.Dir, "")))
 
 	return mod, true
 }
@@ -801,7 +866,7 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 		return v.failed("go.mod", fmt.Errorf("%w: %s requires %s %s, plugin.yaml pins %s: %s", modfetch.ErrGoMod,
 			req.GoMod, mod.Path, req.Version, ref.Version, change))
 	default:
-		v.report.row("go.mod", resultOK, fmt.Sprintf("%s requires %s %s", req.GoMod, mod.Path, req.Version))
+		v.report.row("go.mod", resultOK, fmt.Sprintf("%s requires %s %s", v.shown(req.GoMod), mod.Path, req.Version))
 	}
 
 	return true

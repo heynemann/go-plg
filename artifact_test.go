@@ -276,6 +276,23 @@ func TestOpenArtifactHoldsFilesToTheStorageLimits(t *testing.T) {
 	require.ErrorIs(t, err, plg.ErrPluginTooLarge)
 	require.ErrorContains(t, err, "brings the plugin's entry paths over 2097152 bytes")
 
+	// Directories count as a storage's listing counts them: once each, with its path. One file 1,500 directories
+	// deep has a 3 KB path but brings 2.25 MB of directory paths; 8,193 files in a directory each are 16,386
+	// entries. Both are refused while reading the headers, before the plugin's files are built.
+	deep := strings.Repeat("d/", 1500) + "f"
+	_, err = openArtifact(rawArchive(t, 0, false, append(head(), rawEntry{name: "plugin/" + deep})...))
+	require.ErrorIs(t, err, plg.ErrPluginTooLarge)
+	require.ErrorContains(t, err, "brings the plugin's entry paths over 2097152 bytes")
+
+	dirs := head()
+	for i := range plg.MaxPluginEntries/2 + 1 {
+		dirs = append(dirs, rawEntry{name: fmt.Sprintf("plugin/d%05d/f", i)})
+	}
+
+	_, err = openArtifact(rawArchive(t, 0, false, dirs...))
+	require.ErrorIs(t, err, plg.ErrPluginTooLarge)
+	require.ErrorContains(t, err, "brings the plugin over 16384 entries")
+
 	bomb := rawArchive(t, 128<<20, false, append([]rawEntry{provenanceEntry(t, nil)}, fileEntries()...)...)
 	require.Less(t, len(bomb), 1<<20, "128 MiB of zeros compress well")
 
