@@ -3,7 +3,6 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -19,15 +18,7 @@ import (
 func TestInitFromTheCommand(t *testing.T) {
 	t.Parallel()
 
-	bin := filepath.Join(t.TempDir(), "plg")
-
-	//nolint:gosec // G204: builds this module's plg command
-	build := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".")
-
-	build.Env = append(os.Environ(), "GOWORK=off")
-
-	out, err := build.CombinedOutput()
-	require.NoError(t, err, string(out))
+	bin := buildCommand(t)
 
 	modules, err := filepath.Abs(filepath.Join("..", "..", "testdata", "validate", "modules"))
 	require.NoError(t, err)
