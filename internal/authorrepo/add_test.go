@@ -22,27 +22,35 @@ func readFile(t *testing.T, name string) string {
 }
 
 // TestAddPluginKeepsTheFile adds a plugin to a plg.yaml listing its plugins in a block sequence: the new plugin
-// follows the last one at its indentation, every comment and other line unchanged, and the repository lists it.
-// Adding it again changes nothing.
+// follows the last one with its dash at the sequence's indentation (whatever the spaces after the dashes), every
+// comment and other line unchanged, and the repository lists it. Adding it again changes nothing.
 func TestAddPluginKeepsTheFile(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	write(t, dir, map[string]string{
-		"plg.yaml": "# rules\nplugins:\n    - gold   # the first\n    - rules/silver\nshared: [lib]   # shared\n",
-		"gold/":    "", "rules/silver/": "", "lib/": "", "rules/bronze/": "",
-	})
+	for _, tc := range []struct{ content, want string }{
+		{
+			"# rules\nplugins:\n    - gold   # the first\n    - rules/silver\nshared: [lib]   # shared\n",
+			"# rules\nplugins:\n    - gold   # the first\n    - rules/silver\n    - rules/bronze\nshared: [lib]   # shared\n",
+		},
+		{
+			"plugins:\n-   gold\n-   rules/silver\nshared: [lib]\n",
+			"plugins:\n-   gold\n-   rules/silver\n- rules/bronze\nshared: [lib]\n",
+		},
+	} {
+		dir := t.TempDir()
+		write(t, dir, map[string]string{
+			"plg.yaml": tc.content, "gold/": "", "rules/silver/": "", "lib/": "", "rules/bronze/": "",
+		})
 
-	repo, err := authorrepo.Load(dir)
-	require.NoError(t, err)
-	require.NoError(t, repo.AddPlugin(filepath.Join(dir, "rules", "bronze")))
-	assert.Equal(t, []string{"gold", "rules/silver", "rules/bronze"}, repo.Plugins)
+		repo, err := authorrepo.Load(dir)
+		require.NoError(t, err)
+		require.NoError(t, repo.AddPlugin(filepath.Join(dir, "rules", "bronze")), tc.content)
+		assert.Equal(t, []string{"gold", "rules/silver", "rules/bronze"}, repo.Plugins)
+		assert.Equal(t, tc.want, readFile(t, filepath.Join(dir, "plg.yaml")))
 
-	want := "# rules\nplugins:\n    - gold   # the first\n    - rules/silver\n    - rules/bronze\nshared: [lib]   # shared\n"
-	assert.Equal(t, want, readFile(t, filepath.Join(dir, "plg.yaml")))
-
-	require.NoError(t, repo.AddPlugin(filepath.Join(dir, "rules", "bronze")))
-	assert.Equal(t, want, readFile(t, filepath.Join(dir, "plg.yaml")))
+		require.NoError(t, repo.AddPlugin(filepath.Join(dir, "rules", "bronze")))
+		assert.Equal(t, tc.want, readFile(t, filepath.Join(dir, "plg.yaml")))
+	}
 }
 
 // TestAddPluginToAFlowSequence adds a plugin to plugins written as a flow sequence, and to a last line without a

@@ -81,7 +81,7 @@ func addPlugin(data []byte, rel string) ([]byte, error) {
 	if plugins.Style&yaml.FlowStyle == 0 {
 		item, _ := yaml.Marshal(rel) //nolint:errcheck // a string always marshals
 
-		return appendItem(data, plugins.Content[len(plugins.Content)-1], strings.TrimSuffix(string(item), "\n")), nil
+		return appendItem(data, plugins, strings.TrimSuffix(string(item), "\n")), nil
 	}
 
 	plugins.Content = append(plugins.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: rel})
@@ -89,13 +89,12 @@ func addPlugin(data []byte, rel string) ([]byte, error) {
 	return encode(root)
 }
 
-// appendItem returns data with a block sequence item holding scalar on a line after the item last, at its
-// indentation.
-func appendItem(data []byte, last *yaml.Node, scalar string) []byte {
-	const dash = "- "
-
+// appendItem returns data with an item holding scalar appended to the block sequence seq, on a line after its last
+// item, its dash at the column of seq's dashes (whatever the spaces after them).
+func appendItem(data []byte, seq *yaml.Node, scalar string) []byte {
+	last := seq.Content[len(seq.Content)-1]
 	lines := bytes.SplitAfter(data, []byte("\n"))
-	item := strings.Repeat(" ", max(last.Column-1-len(dash), 0)) + dash + scalar + "\n"
+	item := strings.Repeat(" ", seq.Column-1) + "- " + scalar + "\n"
 
 	if !bytes.HasSuffix(lines[last.Line-1], []byte("\n")) {
 		lines[last.Line-1] = append(lines[last.Line-1], '\n')
