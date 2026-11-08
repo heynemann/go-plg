@@ -698,8 +698,8 @@ test       FAIL    tests/fail.yaml: a timeout: Spin failed: it did not return wi
 tests      FAIL    test cases failed: 2 failed, 1 passed
 ```
 
-When every case passes the last row is `tests ok 10 passed`; without test cases it is `tests ok no test cases
-(tests/*.yaml)`.
+When every case passes the `tests` row is `tests ok 10 passed`, before the `resources` rows; without test cases it
+is `tests ok no test cases (tests/*.yaml)`.
 
 ### Author repositories: `plg.yaml`
 
