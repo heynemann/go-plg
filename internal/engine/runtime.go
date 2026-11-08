@@ -258,7 +258,8 @@ func (m *Module) enterNew(ctx context.Context, name string, state *hostState,
 
 // sandbox returns the configuration of the guest module named name, instance or command: it has clocks, a
 // cryptographic random source, mounts as its only file system and stdout and stderr (nil discards) as its output;
-// no environment, arguments, start functions or sockets, which the caller adds as it needs.
+// no environment, arguments or sockets, which the caller adds as it needs, and wazero's default start function
+// (_start), which the caller replaces.
 //
 //nolint:ireturn // wazero's module configuration is an interface
 func sandbox(name string, mounts []Mount, stdout, stderr io.Writer) wazero.ModuleConfig {
