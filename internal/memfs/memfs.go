@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"iter"
 	"path"
 	"slices"
 	"strings"
@@ -156,6 +157,14 @@ func (f *FS) Size() int64 {
 	return f.size
 }
 
+// Files yields every file's name and contents in the order fs.WalkDir visits them: each directory's entries by
+// name, a subdirectory's files where its name sorts. The contents are the tree's own: do not modify them.
+func (f *FS) Files() iter.Seq2[string, []byte] {
+	return func(yield func(string, []byte) bool) {
+		f.walk(".", yield)
+	}
+}
+
 // Open opens the named file or directory.
 func (f *FS) Open(name string) (fs.File, error) {
 	n, err := f.lookup("open", name)
@@ -206,6 +215,23 @@ func (f *FS) Stat(name string) (fs.FileInfo, error) {
 	}
 
 	return n, nil
+}
+
+// walk yields the files below the directory dir, reporting false when yield stopped the walk.
+func (f *FS) walk(dir string, yield func(string, []byte) bool) bool {
+	for _, entry := range f.nodes[dir].entries {
+		name := entry.Name()
+		if dir != "." {
+			name = dir + "/" + name
+		}
+
+		n := f.nodes[name]
+		if n.dir && !f.walk(name, yield) || !n.dir && !yield(name, n.data) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (f *FS) lookup(op, name string) (*node, error) {

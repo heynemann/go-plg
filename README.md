@@ -692,8 +692,8 @@ When every case passes the last row is `tests ok 10 passed`; without test cases 
 
 ### Author repositories: `plg.yaml`
 
-Teams keep several plugins in one repository. A `plg.yaml` at its root lists them and what `plg validate` (and,
-later, `plg pack`) applies to them all:
+Teams keep several plugins in one repository. A `plg.yaml` at its root lists them and what `plg validate` and
+`plg pack` apply to them all:
 
 ```yaml
 plugins:                 # the plugins' directories (at least one); a plugin's key is its directory's name
@@ -761,7 +761,7 @@ otherwise. `-host` applies to every plugin.
 - **requireOwnership** checks ownership as `plg.WithRequiredOwnership` does: a missing owner fails the load.
 - **replace** takes a contract module from a local checkout instead of `go mod download` (no network or module
   cache needed): the contract step and the load warn that the pin is not checked against it, as a service built
-  with a directory replace does.
+  with a directory replace does. `plg pack` refuses to pack while one is set.
 
 ### Typings: `plg types`
 
@@ -847,6 +847,47 @@ the parameters the YAML input file gives by name, as a test case's `input` (`$re
 Host and HTTP requests fail, as in `plg validate`'s `load`. `run` validates again, and `quit` or the end of the
 input stops it.
 
+### Packing a plugin: `plg pack`
+
+Once a plugin validates, `plg pack` turns it into one file a platform can keep anywhere (a bucket, a database
+row) and load through any storage:
+
+```sh
+go run github.com/heynemann/go-plg/cmd/plg pack -o dist rules     # an author repository: dist/<key>.plg each
+go run github.com/heynemann/go-plg/cmd/plg pack -o dist rules/gold
+```
+
+It validates exactly as `plg validate` does (same flags, but `-near-limit`; same table, `-format json` and
+`-junit`) and writes nothing unless every plugin is valid: a failed step, an author repository whose `plg.yaml`
+replaces the contract module, or a Go plugin whose `go.mod` replaces it by a directory, stops it with exit code 1
+(validate only warns about those replaces; an artifact must be checked against the module its `plugin.yaml` pins).
+It then writes `<key>.plg` per plugin into `-o` (default: the working directory, which may not be inside the
+files it packs, or the next pack would pack the artifacts) and says so on stderr: `plg pack: wrote
+dist/gold.plg (sha256:…)`.
+
+An artifact is a gzip-compressed tar archive:
+
+- `provenance.json`, first: `format` (1), `contract` (`path` and `version` of the contract module the plugin was
+  validated against), `digest` (the content digest of the files below: `sha256:` and the SHA-256 over each file's
+  path and SHA-256, the version Register gives a plugin whose `plugin.yaml` names none), `commit` (the git commit
+  `HEAD` of the plugin's repository; empty outside git), `dirty` (whether the files packed — the plugin's, the
+  repository's shared directories and `plg.yaml` — differ from that commit: changed, added, untracked or
+  ignored), `plgVersion` (the plg that packed it, `(devel)` built from a checkout) and `report` (validate's JSON
+  report of this plugin, as below).
+- `plugin/…`: the plugin's files as a storage loads them, the repository's shared directories copied in where
+  validate copies them (Lua and TypeScript at their repository paths, Go under `vendor/`): regular files only
+  (links inside the plugin are left out, as every storage leaves them out).
+
+The same input packs to the same bytes: entries in walk order, every one a regular file of mode 0644 dated the
+Unix epoch without owner, a gzip header without name or time, and a report without what changes from one run to
+the next: the resource report (each case's time and peak memory) is left out, and a custom Go guest's step says it
+came "from" the guest cache whether or not it was built in this run. The report still names this machine's paths
+(the plugin's directory, the module cache, the guest cache) and its defaults (the pool's maximum is `GOMAXPROCS`),
+so the bytes are reproducible where those are the same; the digest depends on the files alone.
+
+Services read artifacts with `plg.OpenArtifact` (see [Storages](#storages)); `plg.Info`, the admin handler and
+`plg status <key>` show the provenance of a plugin loaded from one. Nothing about it is enforced at load.
+
 ## Storages
 
 ```go
@@ -922,6 +963,50 @@ reloads skip unchanged plugins (an empty one makes plg hash the files on every r
 kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.yaml
 layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, the plugin.yaml stored as one of
 the plugin's file rows, only enabled plugins listed, versions maintained by triggers, migrations included).
+
+A storage may also keep one blob per plugin: the `.plg` artifact `plg pack` writes (see
+[Packing a plugin](#packing-a-plugin-plg-pack)). `plg.OpenArtifact(r io.ReaderAt, size int64)` reads one into
+memory and returns a `*plg.Artifact`: an `fs.FS` (also `fs.ReadFileFS`, `fs.ReadDirFS`, `fs.StatFS`) of the
+plugin's files and its `Provenance()`. List each artifact by its `plugin.yaml` and return the `*plg.Artifact` itself
+from `Open`: Register loads its files as they are, without another copy, and `plg.Info` and the admin handler show
+its provenance (a wrapper or a copy loads the same files without it):
+
+```go
+func (s *blobStorage) List(ctx context.Context) ([]plg.Descriptor, error) {
+	var descs []plg.Descriptor
+	for key, blob := range s.blobs { // blob is a .plg file's bytes, from wherever the platform keeps them
+		art, err := plg.OpenArtifact(bytes.NewReader(blob), int64(len(blob)))
+		if err != nil {
+			return nil, err
+		}
+		manifest, err := art.ReadFile("plugin.yaml")
+		if err != nil {
+			return nil, err
+		}
+		desc, err := plg.ParseManifest(manifest)
+		if err != nil {
+			return nil, err
+		}
+		desc.Key = key
+		descs = append(descs, desc)
+	}
+	return descs, nil
+}
+
+func (s *blobStorage) Open(ctx context.Context, d *plg.Descriptor) (fs.FS, error) {
+	blob := s.blobs[d.Key]
+	return plg.OpenArtifact(bytes.NewReader(blob), int64(len(blob)))
+}
+```
+
+`OpenArtifact` holds an artifact to the limits above (a file stating more than `MaxPluginFileSize`, files over
+`MaxPluginSize` together, more than `MaxPluginEntries` files or paths over `MaxPluginPathBytes`: `ErrPluginTooLarge`,
+before they are read; decompressing stops past what those limits allow, so a compression bomb is not inflated),
+and fails with `plg.ErrInvalidArtifact` on anything `plg pack` does not write: an archive cut short or corrupted
+(gzip's checksum, or files whose content digest is not the provenance's), an entry outside `plugin/` (`..`,
+absolute or unclean paths), anything but a regular file (links, directories, devices), a file twice, a missing
+provenance record or `plugin.yaml`, or a format it does not read. It enforces nothing about the provenance itself:
+a plugin loads whatever its commit, dirty flag or report say; the platform decides what to accept.
 
 
 ## Ownership
@@ -1463,9 +1548,11 @@ validation (`Validation`); the `Report` of what keeps the listing from being ser
 or listing, or the validation that unpublished it) and its version (`RejectedVersion`); the `PanicError`s reported
 under the key since the storages listed it (`Panics`, a `plg.Check`'s excepted) with the newest (`LastPanic`); and
 its pool (`plg.PoolStats`: bounds, instances, those in use, calls in flight, idle call slots, waiting calls,
-refills, grows, memory limit and memory). A degraded version beside a rejected update shows `degraded`, with both
-reports. A plugin is known once its first load settled, until the storages stop listing it; a failed Register
-keeps nothing. Both read what the container keeps, never waiting for a load or a call and running no plugin code;
+refills, grows, memory limit and memory). A version loaded from an artifact also carries its `Provenance` (see
+[Packing a plugin](#packing-a-plugin-plg-pack)); nil otherwise. A degraded version beside a rejected update shows
+`degraded`, with both reports. A plugin is known once its first load settled, until the storages stop listing it; a
+failed Register keeps nothing. Both read what the container keeps, never waiting for a load or a call and running
+no plugin code;
 `Get` and `All` are unchanged (still no allocation). The reports and `PanicError`s are the container's own: treat
 them as read-only.
 
@@ -1533,6 +1620,7 @@ A `<plugin>` (here, one serving its last good version beside an update its valid
     "guest": "",
     "stack": ""
   },
+  "provenance": null,
   "load": {
     "key": "pricing/discounts", "version": "1", "at": "2026-11-06T09:14:03.30154402Z", "durationNs": 186778190,
     "error": null, "owner": {"…": "as above"}, "issues": []
@@ -1550,6 +1638,18 @@ A `<plugin>` (here, one serving its last good version beside an update its valid
 - **Every key is always present.** `loadedAt` and `pool` are `null` when no version serves; `load`, `validation`,
   `rejection` and `lastPanic` are `null` when the state has none (the fields of `plg.PluginState` of the same
   names); a report's `error` is `null` when it has none. Lists and `labels` are empty, never `null`.
+- **`provenance`** is `null` unless the version served was loaded from an artifact (see
+  [Packing a plugin](#packing-a-plugin-plg-pack)); then it is the artifact's record: `contract` (`path`,
+  `version`), `digest`, `commit`, `dirty`, `plgVersion` and `report`, plg validate's JSON report of the plugin as
+  plg pack ran it:
+
+  ```json
+  "provenance": {
+    "contract": {"path": "example.com/shop", "version": "v1.0.0"},
+    "digest": "sha256:5f0c…", "commit": "8e2a91c…", "dirty": false, "plgVersion": "v0.9.0",
+    "report": {"version": 1, "repository": "/src/rules/plg.yaml", "valid": true, "plugins": [{"plugin": "discounts", "…": "…"}]}
+  }
+  ```
 - **Errors are their messages** (`err.Error()`), never Go values: a report's `error`, a panic's `message` (the
   `PanicError`'s) and `value` (the recovered value, the guest's panic message or the trap, printed).
 - **Times** are RFC 3339 strings with nanoseconds, in UTC; **durations** (`durationNs`) are integer nanoseconds;

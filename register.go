@@ -12,6 +12,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 
+	"github.com/heynemann/go-plg/internal/artifact"
 	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
@@ -179,13 +180,14 @@ func (c *Container) newRegistration(contr *contract, cfg *registerConfig, name s
 
 // source is a plugin a storage listed.
 type source struct {
-	storage   Storage
-	loader    loader
-	guest     guestreg.Guest
-	ref       contractref.Ref // the interface desc.Implements names
-	storeName string          // storage.Name(), asked once
-	desc      Descriptor
-	limit     uint64 // per-instance memory limit, whole pages
+	storage    Storage
+	loader     loader
+	guest      guestreg.Guest
+	provenance *Provenance     // the provenance of the artifact Open returned; nil for other files
+	ref        contractref.Ref // the interface desc.Implements names
+	storeName  string          // storage.Name(), asked once
+	desc       Descriptor
+	limit      uint64 // per-instance memory limit, whole pages
 }
 
 // problem is a listed plugin that cannot be loaded: its descriptor is invalid, its key is listed twice or its
@@ -638,18 +640,21 @@ func (c *Container) open(ctx context.Context, key string, src *source) (*memfs.F
 }
 
 // snapshotPlugin copies a plugin's files into the snapshot it returns, under the snapshot limits (see [Storage]), and
-// resolves its version: a content hash of the snapshot when its descriptor gives none.
+// resolves its version: a content hash of the snapshot when its descriptor gives none. Files opened as an
+// [Artifact] are used as they are, and its provenance recorded.
 func snapshotPlugin(ctx context.Context, src *source, opened fs.FS) (*memfs.FS, error) {
+	src.provenance = nil
+	if art, ok := opened.(*Artifact); ok {
+		src.provenance = &art.provenance
+	}
+
 	files, err := snapshotFiles(ctx, opened)
 	if err != nil {
 		return nil, fmt.Errorf("opening: %w", err)
 	}
 
 	if src.desc.Version == "" {
-		src.desc.Version, err = contentVersion(files, ".")
-		if err != nil {
-			return nil, err
-		}
+		src.desc.Version = artifact.Digest(files)
 	}
 
 	return files, nil
@@ -692,6 +697,7 @@ func (c *Container) launch(ctx context.Context, reg *registration, key string, s
 
 	gen := newGeneration(key, reg.contr.iface, &src.desc, instances)
 	gen.reg, gen.launch, gen.storage, gen.spans = reg, launch, src.storeName, launch.spans
+	gen.provenance = src.provenance
 
 	defer func() {
 		if v := recover(); v != nil {

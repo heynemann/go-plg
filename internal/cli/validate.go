@@ -89,25 +89,13 @@ func runValidate(env *Env, args []string) outcome {
 		out.junit = resolve(env.Dir, *junit)
 	}
 
-	if authorrepo.Exists(dir) {
-		return validateRepo(&run, out)
-	}
-
-	run.report = newPluginReport(operands[0], dir)
-	rep := &report{Version: reportVersion, Plugins: []*pluginReport{run.report}}
-	rep.Valid = run.run(context.Background())
-
-	err := out.plugin(env.Stdout, rep, run.report)
-	if err == nil {
-		err = out.show(env.Stdout, rep)
-	}
-
+	rep, err := validateTarget(&run, out)
 	if err != nil {
 		return failure("validate", err)
 	}
 
 	if !rep.Valid {
-		return outcome{code: exitFailure, msg: fmt.Sprintf("plg validate: %s is not a valid plugin\n", dir)}
+		return outcome{code: exitFailure, msg: "plg validate: " + rep.invalid() + "\n"}
 	}
 
 	return outcome{code: exitOK}
@@ -158,8 +146,14 @@ type validation struct {
 	report *pluginReport
 	repo   *authorrepo.Repo
 	// modules, when set, keeps the contract modules resolved, so that later runs (plg dev's) reuse them.
-	modules    *modules
-	files      fs.FS
+	modules *modules
+	// packed, set by plg pack, gets each plugin that passes, its files kept as a storage loads them; a replaced
+	// contract module then fails, and what changes from one run to the next (the resource report, whether a
+	// custom guest was in the cache) is left out of the report.
+	packed func(*packed)
+	files  fs.FS
+	// filesDir is the directory of files: dir, or the temporary copy with the shared directories.
+	filesDir   string
 	dir        string
 	arg        string
 	host       string
@@ -204,6 +198,10 @@ func (v *validation) steps(ctx context.Context) {
 
 	if v.languageChecks(ctx, res, opts) && v.load(ctx, res.loaded.Contract, res.manifest, &res.desc, opts) {
 		v.exercise(ctx, res.loaded.Contract, res.manifest, opts)
+	}
+
+	if v.packed != nil && v.report.FailedStep == "" {
+		v.keep(ctx, res)
 	}
 }
 
@@ -453,8 +451,13 @@ func (v *validation) goGuest(ctx context.Context, pkgs []string) ([]byte, bool) 
 	}
 
 	how := "built into"
-	if guest.Hit {
+
+	switch {
+	case v.packed != nil: // pack records only what does not change from one run to the next
+		how = "from"
+	case guest.Hit:
 		how = "found in"
+	default:
 	}
 
 	v.report.row("guest", resultOK, fmt.Sprintf("a custom Go guest with %s, %s the guest cache (%s)",
@@ -781,6 +784,9 @@ func (v *validation) goMod(ref contractref.Ref, mod modfetch.Module) bool {
 	}
 
 	switch {
+	case req.Dir != "" && v.packed != nil:
+		return v.failed("go.mod", fmt.Errorf("%w: %s replaces %s by the directory %s", errReplaced, req.GoMod,
+			mod.Path, req.Dir))
 	case req.Dir != "":
 		v.report.row("go.mod", resultWarning, fmt.Sprintf("%s replaces %s by the directory %s: the pin %s is not "+
 			"checked against it", req.GoMod, mod.Path, req.Dir, ref.Version))
@@ -881,7 +887,9 @@ func (v *validation) exercise(ctx context.Context, contract *offline.Contract, m
 		}
 	}
 
-	v.resources(calls)
+	if v.packed == nil { // pack leaves out what changes from one run to the next
+		v.resources(calls)
+	}
 }
 
 // examples calls the plugin's Validate with each example validation input, as a service registered with

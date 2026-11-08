@@ -23,19 +23,21 @@ import (
 //     part is "events" (a storage whose keys hold slashes) reads its <plugin> with that slash escaped as %2F.
 //
 // A <plugin> is an object with the keys "key", "registration", "storage", "language", "status" (a [Status]),
-// "version", "rejectedVersion", "loadedAt", "owner", "pool", "panics", "lastPanic", "load", "validation" and
-// "rejection", as in [PluginState]. A <report> ("load", "validation", "rejection") has "key", "version", "at",
-// "durationNs", "error", "owner" and "issues" (each with "severity", "code", "message" and "field"); a
-// "lastPanic" has "time", "phase", "method", "message", "value", "guest" and "stack"; "pool" has "min", "max",
-// "instances", "inUse", "callsInFlight", "idleSlots", "waiting", "refills", "grows", "memoryLimitBytes" and
-// "memoryBytes"; "owner" has "team" ("name", "department"), "org", "company", "contact" ("oncall", "channel",
-// "email"), "links" ("repository", "docs", "runbook", "issues"), "maintainers" (each with "name", "email",
-// "handle") and "labels". An <event> has "at", "kind" (an [EventKind]), "key", "version", "language", "storage",
-// "owner", "report" (a <report>) and "panic" (as "lastPanic"), as in [Event]. Every key is always present: a
-// report, a panic, "pool" and "loadedAt" are null when the state or event has none (the pool when no version
-// serves), "error" is null when the report has none, and lists and labels are empty rather than null. Errors and
-// panic values are their messages. Times are RFC 3339 strings with nanoseconds, in UTC; durations are integer
-// nanoseconds; memory is in bytes.
+// "version", "rejectedVersion", "loadedAt", "owner", "pool", "panics", "lastPanic", "provenance", "load",
+// "validation" and "rejection", as in [PluginState]. A <report> ("load", "validation", "rejection") has "key",
+// "version", "at", "durationNs", "error", "owner" and "issues" (each with "severity", "code", "message" and
+// "field"); a "lastPanic" has "time", "phase", "method", "message", "value", "guest" and "stack"; "pool" has "min",
+// "max", "instances", "inUse", "callsInFlight", "idleSlots", "waiting", "refills", "grows", "memoryLimitBytes" and
+// "memoryBytes"; "provenance" (a [Provenance]) has "contract" ("path", "version"), "digest", "commit", "dirty",
+// "plgVersion" and "report", plg validate's JSON report as the artifact holds it; "owner" has "team" ("name",
+// "department"), "org", "company", "contact" ("oncall", "channel", "email"), "links" ("repository", "docs",
+// "runbook", "issues"), "maintainers" (each with "name", "email", "handle") and "labels". An <event> has "at",
+// "kind" (an [EventKind]), "key", "version", "language", "storage", "owner", "report" (a <report>) and "panic" (as
+// "lastPanic"), as in [Event]. Every key is always present: a report, a panic, "pool", "provenance" and "loadedAt"
+// are null when the state or event has none (the pool when no version serves, the provenance unless it was loaded
+// from an [Artifact]), "error" is null when the report has none, and lists and labels are empty rather than null.
+// Errors and panic values are their messages. Times are RFC 3339 strings with nanoseconds, in UTC; durations are
+// integer nanoseconds; memory is in bytes.
 //
 // Any other path answers 404, and any other method on these paths 405 with "Allow: GET" (HEAD included). Errors
 // answer {"error": "<message>"}; a closed container answers 503. Every answer is JSON with Cache-Control:
@@ -166,6 +168,7 @@ func newAdminState(src *PluginState) adminjson.Plugin {
 		Validation:      newAdminReport(src.Validation),
 		Rejection:       newAdminReport(src.Rejection),
 		LastPanic:       newAdminPanic(src.LastPanic),
+		Provenance:      newAdminProvenance(src.Provenance),
 		Key:             src.Key,
 		Registration:    src.Registration,
 		Storage:         src.Storage,

@@ -78,6 +78,18 @@ commands:
                       -junit also writes it as JUnit XML to file, -color colours the table (auto: on a terminal
                       without NO_COLOR or TERM=dumb), -near-limit flags test cases at or above that share of a
                       limit (default 0.8)
+  pack [-o dir] [-host Interface] [-cache-dir dir] [-guest-cache dir] [-format table|json] [-junit file]
+       [-color auto|always|never] <plugin dir or author repository>
+                      validate a plugin, or every plugin of an author repository, as validate does and, when all
+                      are valid, write each as a reproducible artifact, <key>.plg in -o (default: the current
+                      directory, which must not be inside the files packed): a gzipped tar of its files (the
+                      repository's shared directories copied in, as a storage loads them) and a provenance record
+                      (the files' content digest, the git commit and whether the files differ from it, the plg
+                      version, the contract module and version, and validate's JSON report, without the resource
+                      report, whose measurements change from run to run); the same input packs to the same bytes.
+                      Nothing is written when a plugin is not valid or while plg.yaml or a Go plugin's go.mod
+                      replaces the contract module by a local directory. Services open artifacts with
+                      plg.OpenArtifact; other flags as for validate
   types [-host Interface] <plugin dir>
                       write a Lua or TypeScript plugin's typings, to commit with it, from the contract its
                       plugin.yaml pins (resolved as validate resolves it): TypeScript declarations (plg.d.ts) and
@@ -180,6 +192,7 @@ var commands = map[string]func(env *Env, args []string) outcome{
 	"status":      runStatus,
 	"events":      runEvents,
 	"validate":    runValidate,
+	"pack":        runPack,
 	"types":       runTypes,
 	"init":        runInit,
 	"dev":         runDev,

@@ -4,7 +4,11 @@
 // with errors as their messages, times in UTC, durations in nanoseconds and memory in bytes.
 package adminjson
 
-import "time"
+import (
+	"time"
+
+	"github.com/bytedance/sonic"
+)
 
 // Plugins is the answer to GET /plugins.
 type Plugins struct {
@@ -23,21 +27,42 @@ type Error struct {
 
 // Plugin is a plg.PluginState.
 type Plugin struct {
-	LoadedAt        *time.Time `json:"loadedAt"`
-	Load            *Report    `json:"load"`
-	Validation      *Report    `json:"validation"`
-	Rejection       *Report    `json:"rejection"`
-	LastPanic       *Panic     `json:"lastPanic"`
-	Pool            *Pool      `json:"pool"`
-	Key             string     `json:"key"`
-	Registration    string     `json:"registration"`
-	Storage         string     `json:"storage"`
-	Language        string     `json:"language"`
-	Status          string     `json:"status"`
-	Version         string     `json:"version"`
-	RejectedVersion string     `json:"rejectedVersion"`
-	Owner           Owner      `json:"owner"`
-	Panics          uint64     `json:"panics"`
+	LoadedAt        *time.Time  `json:"loadedAt"`
+	Load            *Report     `json:"load"`
+	Validation      *Report     `json:"validation"`
+	Rejection       *Report     `json:"rejection"`
+	LastPanic       *Panic      `json:"lastPanic"`
+	Pool            *Pool       `json:"pool"`
+	Provenance      *Provenance `json:"provenance"`
+	Key             string      `json:"key"`
+	Registration    string      `json:"registration"`
+	Storage         string      `json:"storage"`
+	Language        string      `json:"language"`
+	Status          string      `json:"status"`
+	Version         string      `json:"version"`
+	RejectedVersion string      `json:"rejectedVersion"`
+	Owner           Owner       `json:"owner"`
+	Panics          uint64      `json:"panics"`
+}
+
+// Provenance is a plg.Provenance, and the provenance record of an artifact (its provenance.json) as plg pack
+// writes it, beside its format.
+type Provenance struct {
+	Contract Module `json:"contract"`
+	Digest   string `json:"digest"`
+	Commit   string `json:"commit"`
+	Plg      string `json:"plgVersion"`
+	// Report is plg validate's JSON report of the plugin.
+	Report sonic.NoCopyRawMessage `json:"report"`
+	// Format is the artifact's format (internal/artifact.Format); the admin handler leaves it out.
+	Format int  `json:"format,omitempty"`
+	Dirty  bool `json:"dirty"`
+}
+
+// Module is a module and its version.
+type Module struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
 }
 
 // Report is a plg.Report.

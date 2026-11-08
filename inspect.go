@@ -51,6 +51,9 @@ type PluginState struct {
 	Rejection *Report
 	// LastPanic is the newest of the PanicErrors Panics counts; nil when there is none.
 	LastPanic *PanicError
+	// Provenance is the provenance of the artifact the version served was loaded from (its storage's Open
+	// returned an [Artifact]); nil when none serves or it was not loaded from one.
+	Provenance *Provenance
 	// Key is the plugin's key, "<name>/<descriptor key>".
 	Key string
 	// Registration is the Register name the plugin belongs to.
@@ -235,6 +238,7 @@ func (s *PluginState) rejected(rej *rejection) {
 func (s *PluginState) served(gen *plugin, rej *rejection) {
 	s.Storage, s.Language, s.Owner = gen.storage, gen.desc.Language, *gen.desc.owner()
 	s.Version, s.Load, s.LoadedAt = gen.desc.Version, gen.report, gen.report.At.Add(gen.report.Duration)
+	s.Provenance = gen.provenance
 	s.Validation = gen.validated.Load()
 	s.Pool = gen.pool.stats()
 

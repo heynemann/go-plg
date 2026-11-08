@@ -414,8 +414,32 @@ func stateJSON(state *plg.PluginState) map[string]any {
 	}
 
 	want["lastPanic"] = panicJSON(state.LastPanic)
+	want["provenance"] = provenanceJSON(state.Provenance)
 
 	return want
+}
+
+// provenanceJSON is the documented JSON form of provenance: null when it is nil, its report as the JSON it holds.
+func provenanceJSON(provenance *plg.Provenance) any {
+	if provenance == nil {
+		return nil
+	}
+
+	var report any
+
+	err := sonic.ConfigStd.Unmarshal(provenance.Report, &report)
+	if err != nil {
+		return err.Error()
+	}
+
+	return map[string]any{
+		"contract":   map[string]any{"path": provenance.Contract.Path, "version": provenance.Contract.Version},
+		"digest":     provenance.Digest,
+		"commit":     provenance.Commit,
+		"plgVersion": provenance.PlgVersion,
+		"dirty":      provenance.Dirty,
+		"report":     report,
+	}
 }
 
 // panicJSON is the documented JSON form of failure: null when it is nil.

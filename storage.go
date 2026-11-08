@@ -208,10 +208,14 @@ func (s *MemoryStorage) Open(_ context.Context, d *Descriptor) (fs.FS, error) {
 var errSymlinkOut = errors.New("symbolic link out of the plugin's files")
 
 // snapshotFiles returns an immutable copy of a plugin's files, as [Storage] describes, failing when ctx ends. A
-// [memfs.FS], which the built-in storages return, is one already.
+// [memfs.FS], which the built-in storages return, is one already, and so are an [Artifact]'s files.
 func snapshotFiles(ctx context.Context, files fs.FS) (*memfs.FS, error) {
-	if frozen, ok := files.(*memfs.FS); ok {
+	switch frozen := files.(type) {
+	case *memfs.FS:
 		return frozen, nil
+	case *Artifact:
+		return frozen.files, nil
+	default:
 	}
 
 	return copySnapshot(ctx, files, func(name string) (fs.File, error) {

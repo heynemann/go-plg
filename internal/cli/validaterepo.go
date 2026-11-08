@@ -14,18 +14,35 @@ import (
 	"github.com/heynemann/go-plg/internal/typings"
 )
 
+// validateTarget validates what base.dir holds, a plugin directory or an author repository, and shows the report
+// as plg validate does; it fails when the repository's plg.yaml cannot be loaded or the report shown.
+func validateTarget(base *validation, out *output) (*report, error) {
+	if !authorrepo.Exists(base.dir) {
+		base.report = newPluginReport(base.arg, base.dir)
+		rep := &report{Version: reportVersion, Plugins: []*pluginReport{base.report}}
+		rep.Valid = base.run(context.Background())
+
+		err := out.plugin(base.env.Stdout, rep, base.report)
+		if err == nil {
+			err = out.show(base.env.Stdout, rep)
+		}
+
+		return rep, err
+	}
+
+	return validateRepo(base, out)
+}
+
 // validateRepo validates every plugin the author repository in run.dir lists, in its plg.yaml's order, and shows
 // the report: as a table, a section per plugin (its name, then its steps) as each is validated, then a summary
 // table with a row per plugin. An invalid plg.yaml is reported as the repository's one failed step.
-func validateRepo(base *validation, out *output) outcome {
+func validateRepo(base *validation, out *output) (*report, error) {
 	repo, err := authorrepo.Load(base.dir)
 	if err != nil {
 		return invalidRepo(base, out, err)
 	}
 
 	rep := &report{Version: reportVersion, Repository: repo.File(), Valid: true}
-
-	var invalid []string
 
 	for _, plugin := range repo.Plugins {
 		run := *base
@@ -36,33 +53,40 @@ func validateRepo(base *validation, out *output) outcome {
 
 		if !run.run(context.Background()) {
 			rep.Valid = false
-
-			invalid = append(invalid, plugin)
 		}
 
 		err = out.plugin(base.env.Stdout, rep, run.report)
 		if err != nil {
-			return failure("validate", err)
+			return nil, err
 		}
 	}
 
-	err = out.show(base.env.Stdout, rep)
-	if err != nil {
-		return failure("validate", err)
+	return rep, out.show(base.env.Stdout, rep)
+}
+
+// invalid says which plugins of the report are not valid: the plugin validated on its own, or those of the
+// repository.
+func (r *report) invalid() string {
+	if r.Repository == "" {
+		return r.Plugins[0].Dir + " is not a valid plugin"
 	}
 
-	if len(invalid) > 0 {
-		return outcome{code: exitFailure, msg: fmt.Sprintf("plg validate: %d of the %d plugins %s lists %s not "+
-			"valid: %s\n", len(invalid), len(repo.Plugins), repo.File(), plural(len(invalid), "is", "are"),
-			strings.Join(invalid, ", "))}
+	var invalid []string
+
+	for _, plugin := range r.Plugins {
+		if !plugin.Valid {
+			invalid = append(invalid, plugin.Plugin)
+		}
 	}
 
-	return outcome{code: exitOK}
+	return fmt.Sprintf("%d of the %d plugins %s lists %s not valid: %s", len(invalid), len(r.Plugins),
+		r.Repository, plural(len(invalid), "is", "are"), strings.Join(invalid, ", "))
 }
 
 // invalidRepo shows the report of a repository whose plg.yaml is invalid: no plugin was validated, and the
-// repository, named as on the command line, failed its plg.yaml step. The table, JSON report and JUnit file show it.
-func invalidRepo(base *validation, out *output, invalid error) outcome {
+// repository, named as on the command line, failed its plg.yaml step. The table, JSON report and JUnit file show it;
+// the error returned is the plg.yaml's (or the output's, when showing it fails).
+func invalidRepo(base *validation, out *output, invalid error) (*report, error) {
 	failed := newPluginReport(base.arg, base.dir)
 	failed.row(authorrepo.FileName, resultFailed, invalid.Error())
 	failed.finish()
@@ -76,10 +100,10 @@ func invalidRepo(base *validation, out *output, invalid error) outcome {
 	}
 
 	if err != nil {
-		return failure("validate", err)
+		return nil, err
 	}
 
-	return failure("validate", invalid)
+	return nil, invalid
 }
 
 // plural returns one when n is 1, else many.
@@ -96,6 +120,16 @@ func plural(n int, one, many string) string {
 func (v *validation) repository() bool {
 	if v.repo == nil {
 		return v.findRepository()
+	}
+
+	if v.packed != nil && len(v.repo.Replace) > 0 {
+		replaces := make([]string, len(v.repo.Replace))
+		for i, replace := range v.repo.Replace {
+			replaces[i] = replace.Path + " => " + replace.Dir
+		}
+
+		return v.failed(authorrepo.FileName, fmt.Errorf("%w: %s replaces %s", errReplaced, v.repo.File(),
+			strings.Join(replaces, ", ")))
 	}
 
 	v.report.row(authorrepo.FileName, resultOK, settings(v.repo))
@@ -150,7 +184,7 @@ func settings(repo *authorrepo.Repo) string {
 // shared sets the plugin's files: its directory, or, when its author repository has shared directories, a
 // temporary copy of it with them copied in, which cleanup removes.
 func (v *validation) shared(desc *plg.Descriptor) (func(), bool) {
-	v.files = os.DirFS(v.dir)
+	v.files, v.filesDir = os.DirFS(v.dir), v.dir
 
 	if v.repo == nil || len(v.repo.Shared) == 0 {
 		return func() {}, true
@@ -189,7 +223,7 @@ func (v *validation) shared(desc *plg.Descriptor) (func(), bool) {
 
 	v.report.row("shared", resultOK, detail)
 
-	v.files = os.DirFS(dir)
+	v.files, v.filesDir = os.DirFS(dir), dir
 
 	return cleanup, true
 }

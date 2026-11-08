@@ -56,6 +56,10 @@ func describe(out io.Writer, plugin *adminjson.Plugin) error {
 		table.row("loaded", stamp(*plugin.LoadedAt))
 	}
 
+	if provenance := plugin.Provenance; provenance != nil {
+		table.row("provenance", describeProvenance(provenance))
+	}
+
 	describeOwner(table, &plugin.Owner)
 
 	if pool := plugin.Pool; pool != nil {
@@ -75,6 +79,22 @@ func describe(out io.Writer, plugin *adminjson.Plugin) error {
 	describeReport(table, "rejection", plugin.Rejection)
 
 	return table.flush()
+}
+
+// describeProvenance says where an artifact's plugin comes from: its commit (and whether the files differed from
+// it), its contract module, the plg that packed it and its content digest.
+func describeProvenance(provenance *adminjson.Provenance) string {
+	commit := "no git commit"
+	if provenance.Commit != "" {
+		commit = "commit " + provenance.Commit
+	}
+
+	if provenance.Dirty {
+		commit += " (dirty)"
+	}
+
+	return fmt.Sprintf("%s, contract %s %s, packed by plg %s, digest %s", commit, provenance.Contract.Path,
+		provenance.Contract.Version, provenance.Plg, provenance.Digest)
 }
 
 // describeOwner adds the owner's fields that are set to table.

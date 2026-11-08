@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/heynemann/go-plg/internal/artifact"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
 	"github.com/heynemann/go-plg/plgimpl"
@@ -158,7 +159,7 @@ func LoadedVersion(ctx context.Context, store Storage, desc *Descriptor) (string
 		return "", err
 	}
 
-	return contentVersion(frozen, ".")
+	return artifact.Digest(frozen), nil
 }
 
 // OpenSwapping opens the plugin directory desc names as s.Open does, calling beforeOpen with the

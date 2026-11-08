@@ -2,9 +2,6 @@ package plg
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -29,9 +26,6 @@ const (
 func validMemoryLimit(limit uint64) bool {
 	return limit >= minMemoryLimit && limit <= maxMemoryLimit
 }
-
-// contentVersionPrefix starts every version computed from a plugin's files.
-const contentVersionPrefix = "sha256:"
 
 // FSStorage is a [Storage] over a file tree holding one plugin per top-level directory. The directory's name is
 // the plugin's key, and the directory holds the plugin's files and a plugin.yaml manifest:
@@ -343,73 +337,4 @@ func readRegular(file fs.File) ([]byte, error) {
 	}
 
 	return data, nil
-}
-
-// contentVersion returns the version of the files below root in fsys: a SHA-256 over every regular file's path
-// relative to root and the SHA-256 of its contents, in lexical order. Register hashes the snapshot it loads,
-// which holds regular files only.
-func contentVersion(fsys fs.FS, root string) (string, error) {
-	sum, file := sha256.New(), sha256.New()
-	buf := make([]byte, 0, binary.MaxVarintLen64+sha256.Size)
-	copyBuf := make([]byte, copyBufferSize)
-
-	prefix := root + "/"
-	if root == "." {
-		prefix = ""
-	}
-
-	err := fs.WalkDir(fsys, root, func(name string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		file.Reset()
-
-		err = copyFile(file, fsys, name, copyBuf)
-		if err != nil {
-			return err
-		}
-
-		rel := strings.TrimPrefix(name, prefix)
-		buf = binary.AppendVarint(buf[:0], int64(len(rel)))
-		buf = append(buf, rel...)
-		buf = file.Sum(buf)
-		sum.Write(buf)
-
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("hashing the plugin's files: %w", err)
-	}
-
-	version := make([]byte, 0, len(contentVersionPrefix)+hex.EncodedLen(sha256.Size))
-	version = append(version, contentVersionPrefix...)
-	version = hex.AppendEncode(version, sum.Sum(buf[:0]))
-
-	return string(version), nil
-}
-
-// copyBufferSize is the size of the buffer contentVersion reads files through; plugin sources are small.
-const copyBufferSize = 4 << 10
-
-// copyFile writes the contents of the file name in fsys to dst, through buf.
-func copyFile(dst io.Writer, fsys fs.FS, name string, buf []byte) error {
-	src, err := fsys.Open(name)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", name, err)
-	}
-
-	// Hiding src's WriteTo makes io.CopyBuffer use buf: *os.File's WriteTo allocates its own buffer per call.
-	_, err = io.CopyBuffer(dst, struct{ io.Reader }{src}, buf)
-
-	err = errors.Join(err, src.Close())
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", name, err)
-	}
-
-	return nil
 }
