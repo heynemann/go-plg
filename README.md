@@ -589,7 +589,8 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
 - **validate / example:** each `examples/validation/*.yaml` file is an input of the plugin's `Validate`, decoded
   strictly (as test case inputs, `{$ref: …}` reading test fixtures) into the contract's `//plg:validation` type,
   one `example` row each: an issue of error severity fails it, a warning issue is a warning. Examples of a
-  contract with no validation input are warnings; the `validate` row sums them up (`no example inputs` without).
+  contract with no validation input are warnings, not used; the `validate` row sums them up, counting those not
+  used apart (`0 example inputs pass, 2 not used`; `no example inputs` without).
 - **resources:** after the [test cases](#test-cases-testsyaml), one row per case: the peak memory of its instance
   (Create's included; WebAssembly memory only grows) against the memory limit, and the call's time against its
   timeout. A case at or above `-near-limit` of either (a share, default 0.8) is a warning:
@@ -713,7 +714,7 @@ replace:                 # contract modules taken from local checkouts, like go.
 It is read in plugin.yaml's strict YAML subset (unknown or duplicate keys, anchors, aliases and tags are errors).
 Every directory must exist inside the repository, none listed twice nor inside another, and plugins' keys must
 differ; a replace's directory must hold a go.mod declaring that module. An invalid plg.yaml fails before any
-plugin is validated.
+plugin is validated: the report (table, JSON and JUnit) holds the repository alone, failed at its `plg.yaml` step.
 
 ```sh
 go run github.com/heynemann/go-plg/cmd/plg validate .

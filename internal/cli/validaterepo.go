@@ -16,11 +16,11 @@ import (
 
 // validateRepo validates every plugin the author repository in run.dir lists, in its plg.yaml's order, and shows
 // the report: as a table, a section per plugin (its name, then its steps) as each is validated, then a summary
-// table with a row per plugin.
+// table with a row per plugin. An invalid plg.yaml is reported as the repository's one failed step.
 func validateRepo(base *validation, out *output) outcome {
 	repo, err := authorrepo.Load(base.dir)
 	if err != nil {
-		return failure("validate", err)
+		return invalidRepo(base, out, err)
 	}
 
 	rep := &report{Version: reportVersion, Repository: repo.File(), Valid: true}
@@ -58,6 +58,28 @@ func validateRepo(base *validation, out *output) outcome {
 	}
 
 	return outcome{code: exitOK}
+}
+
+// invalidRepo shows the report of a repository whose plg.yaml is invalid: no plugin was validated, and the
+// repository, named as on the command line, failed its plg.yaml step. The table, JSON report and JUnit file show it.
+func invalidRepo(base *validation, out *output, invalid error) outcome {
+	failed := newPluginReport(base.arg, base.dir)
+	failed.row(authorrepo.FileName, resultFailed, invalid.Error())
+	failed.finish()
+
+	rep := &report{Version: reportVersion, Repository: filepath.Join(base.dir, authorrepo.FileName)}
+	rep.Plugins = []*pluginReport{failed}
+
+	err := out.plugin(base.env.Stdout, rep, failed)
+	if err == nil {
+		err = out.show(base.env.Stdout, rep)
+	}
+
+	if err != nil {
+		return failure("validate", err)
+	}
+
+	return failure("validate", invalid)
 }
 
 // plural returns one when n is 1, else many.

@@ -132,8 +132,10 @@ func readJUnit(t *testing.T, name string) junitReport {
 // TestValidateReportsEachStepsFailureInEveryFormat validates a plugin failing at each step of the pipeline, twice:
 // as a table with -junit, and with -format json. The step fails in all three: its table row says FAIL, the JUnit
 // file's suite for the plugin has a failed test case named after it, its first, whose message is the step's
-// detail, and the JSON report names it as the plugin's failed step, with that detail. plg validate exits 1 each
-// time. (The guest step fails in TestValidateReportFromTheCommand, which can take away the user cache directory.)
+// detail, and the JSON report names it as the plugin's failed step, with that detail (and the issue it holds, if
+// any). plg validate exits 1 each time. A repository whose plg.yaml is invalid is reported the same way, its one
+// suite and plugin the repository failing at plg.yaml. (The guest step fails in TestValidateReportFromTheCommand,
+// which can take away the user cache directory.)
 func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 	t.Parallel()
 
@@ -150,22 +152,43 @@ func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 	strict := withCases(t, "luapricing", "examples/validation/strict.yaml", "maxPercent: 5\n")
 	require.NoError(t, os.Remove(filepath.Join(strict, "tests", "fail.yaml")))
 
+	owned := copyRepo(t, "plugins: [unowned]\nrequireOwnership: true\n", map[string]string{})
+
 	tests := []struct {
-		step, detail, plugin string
+		step, detail, plugin, issue string
 	}{
-		{"plg.yaml", "invalid plg.yaml: ", filepath.Join(badRepo, "luagood")},
-		{"manifest", "plg: invalid plugin.yaml: implements is required", "badmanifest"},
-		{"shared", "cannot copy a shared directory into the plugin: ", filepath.Join(clashing, "rules", "silver")},
-		{"contract", "no module provides the contract package example.com/nosuch/cohort at v1.0.0", "unknowncontract"},
-		{"interface", "not an interface plg can adapt: package cohort declares no type Segmenter", "missinginterface"},
-		{"go.mod", "the plugin's go.mod does not require the pinned contract version: ", "gomodmismatch"},
-		{"sandbox", "plg: go statements are not allowed in plugins: plugin.go:15:2, plugin.go:22:3", "gogoroutine"},
-		{"types", "the plugin does not type-check against the contract: plugin.go:14:9: ", "wrongsignature"},
-		{"typings", "plg: invalid interface cohort.Broken: ", "brokencontract"},
-		{"syntax", "1 .lua file does not compile", "luasyntax"},
-		{"load", "plugin Create failed: no cohort configured", "createfails"},
-		{"example", "1 error issue: a service validating with this input would reject the plugin", strict},
-		{"test", "Quote returned other results than expect.result", withCases(t, "luapricing")},
+		{"plg.yaml", "invalid plg.yaml: " + filepath.Join(badRepo, "plg.yaml") + ": ", badRepo, ""},
+		{"plg.yaml", "invalid plg.yaml: ", filepath.Join(badRepo, "luagood"), ""},
+		{"manifest", "plg: invalid plugin.yaml: implements is required", "badmanifest", ""},
+		{
+			"manifest", "lua plugin unowned implementing example.com/rewards/cohort.Provider@v1.2.0",
+			filepath.Join(owned, "unowned"), "plg.ownership.missing",
+		},
+		{"shared", "cannot copy a shared directory into the plugin: ", filepath.Join(clashing, "rules", "silver"), ""},
+		{
+			"contract",
+			"no module provides the contract package example.com/nosuch/cohort at v1.0.0",
+			"unknowncontract",
+			"",
+		},
+		{
+			"interface",
+			"not an interface plg can adapt: package cohort declares no type Segmenter",
+			"missinginterface",
+			"",
+		},
+		{"go.mod", "the plugin's go.mod does not require the pinned contract version: ", "gomodmismatch", ""},
+		{"sandbox", "plg: go statements are not allowed in plugins: plugin.go:15:2, plugin.go:22:3", "gogoroutine", ""},
+		{"types", "the plugin does not type-check against the contract: plugin.go:14:9: ", "wrongsignature", ""},
+		{"types", "plugin.ts:4:51: Property 'Rank' does not exist on type 'Users'. (TS2339)", "tsunknownhost", ""},
+		{"typings", "plg: invalid interface cohort.Broken: ", "brokencontract", ""},
+		{"syntax", "1 .lua file does not compile", "luasyntax", ""},
+		{"load", "plugin Create failed: no cohort configured", "createfails", ""},
+		{
+			"example", "1 error issue: a service validating with this input would reject the plugin", strict,
+			"gold.percent",
+		},
+		{"test", "Quote returned other results than expect.result", withCases(t, "luapricing"), ""},
 	}
 
 	for _, tc := range tests {
@@ -203,6 +226,18 @@ func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 		step, found := got.Plugins[0].step(tc.step, "failed")
 		require.True(t, found, "%s\n%s", tc.step, asJSON.stdout)
 		assert.Contains(t, step.Detail, tc.detail, tc.step)
+
+		if tc.issue != "" {
+			require.Len(t, step.Issues, 1, tc.step)
+			assert.Equal(t, "error", step.Issues[0].Severity, tc.step)
+			assert.Equal(t, tc.issue, step.Issues[0].Code, tc.step)
+		}
+
+		if tc.plugin == badRepo {
+			assert.Equal(t, filepath.Join(badRepo, "plg.yaml"), got.Repository)
+			assert.Equal(t, badRepo, got.Plugins[0].Dir)
+			require.Len(t, got.Plugins[0].Steps, 1, "no plugin validated")
+		}
 	}
 }
 
@@ -274,6 +309,120 @@ func TestValidateReportsAValidPluginAsJSON(t *testing.T) {
 		assert.Positive(t, call.DurationMs, call.Call)
 		assert.Empty(t, call.NearLimit, call.Call)
 	}
+}
+
+// TestValidateReportsEachExampleInput validates pricing rules whose Validate warns about a maxPercent from 10 to
+// 14, fails (raises) at 99 and accepts 15 and more, with example validation inputs of each kind, and a cohort
+// provider whose contract declares no validation input:
+//   - an example Validate warns about is a warning row holding the issue, counted in the warnings; plg validate
+//     exits 0 and the summary counts it among those that pass;
+//   - an example that does not decode into the validation input and one Validate fails for each fail their row, and
+//     the summary row fails counting them; plg validate exits 1;
+//   - examples of a contract without //plg:validation are warnings, not used: the summary says none passed and counts
+//     them apart;
+//   - a rule without examples gets a row saying so.
+func TestValidateReportsEachExampleInput(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+
+	source, err := os.ReadFile(filepath.Join("..", "..", "testdata", "validate", "plugins", "luapricing",
+		"plugin.lua"))
+	require.NoError(t, err)
+
+	pickier := strings.Replace(string(source), "function Rule:Validate(limits)\n", "function Rule:Validate(limits)\n"+
+		"  if limits.maxPercent == 99 then\n"+
+		"    error(\"the limits service is down\")\n"+
+		"  end\n"+
+		"  if limits.maxPercent >= 10 and limits.maxPercent < 15 then\n"+
+		"    return { { severity = \"warning\", code = \"gold.close\", field = \"maxPercent\",\n"+
+		"      message = \"the limit is close to the gold discount\" } }\n"+
+		"  end\n", 1)
+	require.NotEqual(t, string(source), pickier)
+
+	rule := func(examples ...string) string {
+		plugin := withCases(t, "luapricing", examples...)
+		lua := filepath.Join(plugin, "plugin.lua")
+		require.NoError(t, os.WriteFile(lua, []byte(pickier), 0o600)) //nolint:gosec // G703: the test's directory
+		require.NoError(t, os.Remove(filepath.Join(plugin, "tests", "fail.yaml")))
+
+		return plugin
+	}
+
+	warned := rule("examples/validation/close.yaml", "maxPercent: 12\n",
+		"examples/validation/lenient.yaml", "maxPercent: 20\n")
+
+	got := validate(environ, warned)
+	require.Equal(t, 0, got.code, "warnings do not fail validate\n%s%s", got.stdout, got.stderr)
+	assert.Contains(t, rows(got.stdout), "example warning examples/validation/close.yaml: 1 warning issue")
+	assert.Contains(t, rows(got.stdout), "warning gold.close (maxPercent): the limit is close to the gold discount")
+	assert.Contains(t, rows(got.stdout), "example ok examples/validation/lenient.yaml: no issues")
+	assert.Contains(t, rows(got.stdout), "validate ok 2 example inputs pass")
+
+	asJSON := validate(environ, "-format", "json", warned)
+	require.Equal(t, 0, asJSON.code, "%s%s", asJSON.stdout, asJSON.stderr)
+
+	report := decodeReport(t, asJSON.stdout)
+	require.Len(t, report.Plugins, 1)
+	assert.True(t, report.Valid)
+	assert.Equal(t, 1, report.Plugins[0].Warnings, "the warning issue, its step not counted again")
+
+	nearly, found := report.Plugins[0].step("example", "warning")
+	require.True(t, found, asJSON.stdout)
+	assert.Equal(t, "examples/validation/close.yaml", nearly.Subject)
+	assert.Equal(t, []jsonIssue{
+		{
+			Severity: "warning",
+			Code:     "gold.close",
+			Message:  "the limit is close to the gold discount",
+			Field:    "maxPercent",
+		},
+	}, nearly.Issues)
+
+	broken := rule("examples/validation/broken.yaml", "maxPercent: lots\n",
+		"examples/validation/down.yaml", "maxPercent: 99\n", "examples/validation/lenient.yaml", "maxPercent: 20\n")
+
+	got = validate(environ, broken)
+	assert.Equal(t, 1, got.code, "%s%s", got.stdout, got.stderr)
+	assert.Regexp(t, `(?m)^example +FAIL +examples/validation/broken\.yaml: examples/validation/broken\.yaml:1:13: `+
+		`example\.maxPercent: str "lots" is not an `, got.stdout)
+	assert.Regexp(t, `(?m)^example +FAIL +examples/validation/down\.yaml: Validate failed: .*the limits service is `+
+		`down`, got.stdout)
+	assert.Contains(t, rows(got.stdout), "example ok examples/validation/lenient.yaml: no issues")
+	assert.Contains(t, rows(got.stdout), "validate FAIL example validation inputs failed: 2 of 3")
+
+	unused := filepath.Join(t.TempDir(), "luagood")
+	require.NoError(t, os.CopyFS(unused, os.DirFS(filepath.Join("..", "..", "testdata", "validate", "plugins",
+		"luagood"))))
+	require.NoError(t, os.MkdirAll(filepath.Join(unused, "examples", "validation"), 0o750))
+
+	for _, name := range []string{"a.yaml", "b.yaml"} {
+		require.NoError(t, os.WriteFile(filepath.Join(unused, "examples", "validation", name), []byte("limit: 1\n"),
+			0o600))
+	}
+
+	got = validate(environ, unused)
+	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
+
+	for _, name := range []string{"a.yaml", "b.yaml"} {
+		assert.Contains(t, rows(got.stdout), "example warning examples/validation/"+name+": not used: the contract "+
+			"declares no validation input (//plg:validation)")
+	}
+
+	assert.Contains(t, rows(got.stdout), "validate ok 0 example inputs pass, 2 not used")
+	assert.NotContains(t, got.stdout, "2 example inputs pass")
+
+	asJSON = validate(environ, "-format", "json", unused)
+	require.Equal(t, 0, asJSON.code, "%s%s", asJSON.stdout, asJSON.stderr)
+
+	report = decodeReport(t, asJSON.stdout)
+	require.Len(t, report.Plugins, 1)
+	assert.Equal(t, 2, report.Plugins[0].Warnings, "an example not used each")
+
+	none := validate(environ, rule())
+	require.Equal(t, 0, none.code, "%s%s", none.stdout, none.stderr)
+	assert.Contains(t, rows(none.stdout), "validate ok no example inputs (examples/validation/*.yaml)")
+	assert.NotContains(t, none.stdout, "\nexample ")
 }
 
 // TestValidateReportsCallsNearTheirLimits validates a rule whose test cases build a string of 0 and of 6 MiB

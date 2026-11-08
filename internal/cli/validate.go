@@ -886,7 +886,9 @@ func (v *validation) exercise(ctx context.Context, contract *offline.Contract, m
 
 // examples calls the plugin's Validate with each example validation input, as a service registered with
 // plg.WithValidation would, adding a row per example (an error issue fails it: such a service would reject the
-// plugin) and one summing them up; without examples, a contract declaring a validation input gets a row saying so.
+// plugin; without a validation input in the contract it is a warning, not used) and one summing them up, counting
+// the examples not used apart from those that passed; without examples, a contract declaring a validation input
+// gets a row saying so.
 func (v *validation) examples(ctx context.Context, contract *offline.Contract, runner offline.Runner,
 	examples []testcase.Example,
 ) {
@@ -898,11 +900,17 @@ func (v *validation) examples(ctx context.Context, contract *offline.Contract, r
 		return
 	}
 
-	failed := 0
+	failed, unused := 0, 0
 
 	for i := range examples {
-		if !v.example(ctx, contract, runner, &examples[i]) {
+		switch {
+		case errors.Is(examples[i].Err, testcase.ErrNoValidation):
+			unused++
+
+			v.report.about("example", resultWarning, examples[i].Name, "not used: "+testcase.ErrNoValidation.Error())
+		case !v.example(ctx, contract, runner, &examples[i]):
 			failed++
+		default:
 		}
 	}
 
@@ -912,27 +920,28 @@ func (v *validation) examples(ctx context.Context, contract *offline.Contract, r
 		return
 	}
 
-	v.report.row("validate", resultOK, fmt.Sprintf("%d example %s", len(examples),
-		plural(len(examples), "input passes", "inputs pass")))
+	passed := len(examples) - unused
+	detail := fmt.Sprintf("%d example %s", passed, plural(passed, "input passes", "inputs pass"))
+
+	if unused > 0 {
+		detail += fmt.Sprintf(", %d not used", unused)
+	}
+
+	v.report.row("validate", resultOK, detail)
 }
 
 // errExamplesFailed reports example validation inputs that failed.
 var errExamplesFailed = errors.New("example validation inputs failed")
 
-// example calls Validate with the example input and adds its row; it reports whether the example passed.
+// example calls Validate with the example input (one the contract declares a validation input for) and adds its
+// row; it reports whether the example passed.
 func (v *validation) example(ctx context.Context, contract *offline.Contract, runner offline.Runner,
 	example *testcase.Example,
 ) bool {
-	switch {
-	case errors.Is(example.Err, testcase.ErrNoValidation):
-		v.report.about("example", resultWarning, example.Name, "not used: "+testcase.ErrNoValidation.Error())
-
-		return true
-	case example.Err != nil:
+	if example.Err != nil {
 		v.report.about("example", resultFailed, example.Name, example.Err.Error())
 
 		return false
-	default:
 	}
 
 	outcome := runner.Run(ctx, testcase.ValidateWith(contract, example.Input))

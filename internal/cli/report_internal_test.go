@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg/internal/adminjson"
+	"github.com/heynemann/go-plg/internal/offline"
 )
 
 // sample is a report of a plugin with every kind of step: ok, a warning holding an issue, one with a subject, and
@@ -276,4 +277,60 @@ func TestShareOfALimit(t *testing.T) {
 	assert.InDelta(t, 1.5, share(3*time.Second, 2*time.Second), 1e-9)
 	assert.Zero(t, share(uint64(4), uint64(0)), "no limit")
 	assert.Equal(t, "1.5 MiB", mebibytes(3<<19))
+}
+
+// TestResourcesFlagsACallNearItsTimeout reports three calls: one far from both limits, one at 90% of its timeout
+// (flagged for time alone), one near both. Each is a row and an entry of the JSON report's resources; a flagged one
+// is a warning naming the limits it is near.
+func TestResourcesFlagsACallNearItsTimeout(t *testing.T) {
+	t.Parallel()
+
+	run := validation{report: newPluginReport("rules/gold", "/repo/rules/gold"), nearLimit: 0.8}
+	run.resources([]measured{
+		{call: "tests/a.yaml: quick", used: offline.Resources{
+			Memory: 1 << 20, MemoryLimit: 16 << 20, Duration: 10 * time.Millisecond, Timeout: time.Second,
+		}},
+		{call: "tests/a.yaml: slow", used: offline.Resources{
+			Memory: 1 << 20, MemoryLimit: 16 << 20, Duration: 270 * time.Millisecond, Timeout: 300 * time.Millisecond,
+		}},
+		{call: "tests/a.yaml: heavy and slow", used: offline.Resources{
+			Memory: 15 << 20, MemoryLimit: 16 << 20, Duration: 300 * time.Millisecond, Timeout: 300 * time.Millisecond,
+		}},
+	})
+	run.report.finish()
+
+	assert.Equal(t, []*stepReport{
+		{
+			Step: "resources", Result: resultOK, Subject: "tests/a.yaml: quick",
+			Detail: "memory 1.0 MiB of 16.0 MiB (6%), time 10ms of 1s (1%)",
+		},
+		{
+			Step: "resources", Result: resultWarning, Subject: "tests/a.yaml: slow",
+			Detail: "memory 1.0 MiB of 16.0 MiB (6%), time 270ms of 300ms (90%); at or above 80% of its time limit",
+		},
+		{
+			Step: "resources", Result: resultWarning, Subject: "tests/a.yaml: heavy and slow",
+			Detail: "memory 15.0 MiB of 16.0 MiB (94%), time 300ms of 300ms (100%); at or above 80% of its memory " +
+				"and time limits",
+		},
+	}, run.report.Steps)
+	assert.Equal(t, []*callResources{
+		{
+			Call:             "tests/a.yaml: quick",
+			MemoryBytes:      1 << 20,
+			MemoryLimitBytes: 16 << 20,
+			DurationMs:       10,
+			TimeoutMs:        1000,
+		},
+		{
+			Call: "tests/a.yaml: slow", NearLimit: []string{"time"}, MemoryBytes: 1 << 20, MemoryLimitBytes: 16 << 20,
+			DurationMs: 270, TimeoutMs: 300,
+		},
+		{
+			Call: "tests/a.yaml: heavy and slow", NearLimit: []string{"memory", "time"}, MemoryBytes: 15 << 20,
+			MemoryLimitBytes: 16 << 20, DurationMs: 300, TimeoutMs: 300,
+		},
+	}, run.report.Resources)
+	assert.Equal(t, 2, run.report.Warnings)
+	assert.True(t, run.report.Valid, "calls near their limits are warnings")
 }

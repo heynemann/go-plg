@@ -279,7 +279,8 @@ func TestValidateNamesThePinOrRequirementToChange(t *testing.T) {
 }
 
 // TestValidateRepoRefusesAnInvalidPlgYAML validates a repository whose plg.yaml breaks its rules, and a plugin of
-// it: both fail naming the problem. A plugin holding a file where a shared directory goes fails the shared step.
+// it: both fail naming the problem, the repository at its plg.yaml step, before any plugin. A plugin holding a file
+// where a shared directory goes fails the shared step.
 func TestValidateRepoRefusesAnInvalidPlgYAML(t *testing.T) {
 	t.Parallel()
 
@@ -287,7 +288,13 @@ func TestValidateRepoRefusesAnInvalidPlgYAML(t *testing.T) {
 
 	got := validate(nil, repo)
 	assert.Equal(t, 1, got.code)
-	assert.Empty(t, got.stdout)
+	assert.Equal(t, repo+"\n"+
+		"STEP      RESULT  DETAIL\n"+
+		"plg.yaml  FAIL    invalid plg.yaml: "+filepath.Join(repo, "plg.yaml")+": shared: stat "+
+		filepath.Join(repo, "nosuch")+": no such file or directory\n"+
+		"\n"+
+		"PLUGIN"+strings.Repeat(" ", len(repo)-len("PLUGIN"))+"  RESULT  DETAIL\n"+
+		repo+"  FAIL    failed at plg.yaml\n", got.stdout)
 	assert.Contains(t, got.stderr, "plg validate: invalid plg.yaml: "+filepath.Join(repo, "plg.yaml")+": shared: "+
 		"stat "+filepath.Join(repo, "nosuch")+": no such file or directory\n")
 
