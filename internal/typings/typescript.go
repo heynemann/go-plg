@@ -383,41 +383,45 @@ func (m *model) ts(n *node) string {
 // tsNumber is TypeScript's type of every integer and float kind.
 const tsNumber = "number"
 
-// tsScalars are the TypeScript types of the scalar wire kinds.
+// tsScalars are the TypeScript types of the scalar shapes; TestScalarTablesSpellEveryScalarShape holds it to
+// every one.
 //
 //nolint:gochecknoglobals // immutable lookup table
-var tsScalars = map[layout.Kind]string{
-	layout.Bool: "boolean", layout.String: "string", layout.Bytes: "Uint8Array | null", layout.Time: "plg.Time",
-	layout.Int: tsNumber, layout.Int8: tsNumber, layout.Int16: tsNumber, layout.Int32: tsNumber,
-	layout.Int64: tsNumber, layout.Uint: tsNumber, layout.Uint8: tsNumber, layout.Uint16: tsNumber,
-	layout.Uint32: tsNumber, layout.Uint64: tsNumber, layout.Float32: tsNumber, layout.Float64: tsNumber,
+var tsScalars = map[shape]string{
+	shapeBool: "boolean", shapeInteger: tsNumber, shapeFloat: tsNumber, shapeString: "string",
+	shapeBytes: "Uint8Array | null", shapeTime: "plg.Time",
 }
 
 // tsShape returns the type of n's wire kind, naming the types it holds.
 func (m *model) tsShape(n *node) string {
-	if scalar, ok := tsScalars[n.Kind]; ok {
-		return scalar
-	}
-
-	switch n.Kind { //nolint:exhaustive // the scalar kinds are tsScalars'
-	case layout.Slice:
+	switch shp := shapeOf(n.Kind); shp {
+	case shapeBool, shapeInteger, shapeFloat, shapeString, shapeBytes, shapeTime:
+		return tsScalars[shp]
+	case shapeSlice:
 		return tsArray(m.ts(n.Elem)) + " | null"
-	case layout.Map:
+	case shapeMap:
 		return "{ [key: string]: " + m.ts(n.Elem) + " } | null"
-	case layout.Pointer:
+	case shapePointer:
 		return tsNullable(m.ts(n.Elem))
-	default: // a struct
-		if len(n.Fields) == 0 {
-			return "{}"
-		}
-
-		fields := make([]string, len(n.Fields))
-		for i, field := range n.Fields {
-			fields[i] = tsProperty(field.Name) + ": " + m.ts(field.Node)
-		}
-
-		return "{ " + strings.Join(fields, "; ") + " }"
+	case shapeStruct:
+		return m.tsStruct(n)
+	default:
+		panic(noShape(shp))
 	}
+}
+
+// tsStruct returns the object type of the struct n.
+func (m *model) tsStruct(n *node) string {
+	if len(n.Fields) == 0 {
+		return "{}"
+	}
+
+	fields := make([]string, len(n.Fields))
+	for i, field := range n.Fields {
+		fields[i] = tsProperty(field.Name) + ": " + m.ts(field.Node)
+	}
+
+	return "{ " + strings.Join(fields, "; ") + " }"
 }
 
 // tsArray returns the array type of elements of type elem, whose only unions are "X | null".

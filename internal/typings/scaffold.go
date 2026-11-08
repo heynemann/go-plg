@@ -12,7 +12,6 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/heynemann/go-plg/internal/layout"
 	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/internal/testcase"
 )
@@ -167,29 +166,36 @@ func (m *model) tsSkeleton() []byte {
 
 // tsZero returns the zero value of n as a TypeScript expression.
 func (m *model) tsZero(n *node) string {
-	switch n.Kind { //nolint:exhaustive // the number kinds are the default
-	case layout.Bool:
+	switch shp := shapeOf(n.Kind); shp {
+	case shapeBool:
 		return falseLiteral
-	case layout.String:
-		return `""`
-	case layout.Time:
-		return "{ seconds: 0, nanos: 0 }"
-	case layout.Bytes, layout.Slice, layout.Map, layout.Pointer:
-		return "null"
-	case layout.Struct:
-		if len(n.Fields) == 0 {
-			return "{}"
-		}
-
-		fields := make([]string, len(n.Fields))
-		for i, field := range n.Fields {
-			fields[i] = tsProperty(field.Name) + ": " + m.tsZero(field.Node)
-		}
-
-		return "{ " + strings.Join(fields, ", ") + " }"
-	default:
+	case shapeInteger, shapeFloat:
 		return "0"
+	case shapeString:
+		return `""`
+	case shapeTime:
+		return "{ seconds: 0, nanos: 0 }"
+	case shapeBytes, shapeSlice, shapeMap, shapePointer:
+		return "null"
+	case shapeStruct:
+		return m.tsStructZero(n)
+	default:
+		panic(noShape(shp))
 	}
+}
+
+// tsStructZero returns the zero value of the struct n as a TypeScript expression.
+func (m *model) tsStructZero(n *node) string {
+	if len(n.Fields) == 0 {
+		return "{}"
+	}
+
+	fields := make([]string, len(n.Fields))
+	for i, field := range n.Fields {
+		fields[i] = tsProperty(field.Name) + ": " + m.tsZero(field.Node)
+	}
+
+	return "{ " + strings.Join(fields, ", ") + " }"
 }
 
 // luaSkeleton renders a Lua plugin's skeleton.
@@ -237,31 +243,38 @@ func (m *model) luaSkeleton() []byte {
 
 // luaZero returns the zero value of n as a Lua expression.
 func (m *model) luaZero(n *node) string {
-	switch n.Kind { //nolint:exhaustive // the integer kinds are the default
-	case layout.Bool:
+	switch shp := shapeOf(n.Kind); shp {
+	case shapeBool:
 		return falseLiteral
-	case layout.String:
-		return `""`
-	case layout.Float32, layout.Float64:
-		return "0.0"
-	case layout.Time:
-		return "{ seconds = 0, nanos = 0 }"
-	case layout.Bytes, layout.Slice, layout.Map, layout.Pointer:
-		return "nil"
-	case layout.Struct:
-		if len(n.Fields) == 0 {
-			return "{}"
-		}
-
-		fields := make([]string, len(n.Fields))
-		for i, field := range n.Fields {
-			fields[i] = luaKey(field.Name) + " = " + m.luaZero(field.Node)
-		}
-
-		return "{ " + strings.Join(fields, ", ") + " }"
-	default:
+	case shapeInteger:
 		return "0"
+	case shapeFloat:
+		return "0.0"
+	case shapeString:
+		return `""`
+	case shapeTime:
+		return "{ seconds = 0, nanos = 0 }"
+	case shapeBytes, shapeSlice, shapeMap, shapePointer:
+		return "nil"
+	case shapeStruct:
+		return m.luaStructZero(n)
+	default:
+		panic(noShape(shp))
 	}
+}
+
+// luaStructZero returns the zero value of the struct n as a Lua expression.
+func (m *model) luaStructZero(n *node) string {
+	if len(n.Fields) == 0 {
+		return "{}"
+	}
+
+	fields := make([]string, len(n.Fields))
+	for i, field := range n.Fields {
+		fields[i] = luaKey(field.Name) + " = " + m.luaZero(field.Node)
+	}
+
+	return "{ " + strings.Join(fields, ", ") + " }"
 }
 
 // goSkeleton renders a Go plugin's skeleton, in the package named after the plugin.
@@ -562,26 +575,28 @@ func (m *model) exampleCase(meth *method, zeroTime string) *yaml.Node {
 
 // yamlZero returns the zero value of n as a test case writes it, zeroTime being the skeleton's zero time.
 func (m *model) yamlZero(n *node, zeroTime string) *yaml.Node {
-	switch n.Kind { //nolint:exhaustive // the number kinds are the default
-	case layout.Bool:
+	switch shp := shapeOf(n.Kind); shp {
+	case shapeBool:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: falseLiteral}
-	case layout.String:
+	case shapeInteger:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "0"}
+	case shapeFloat:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: "0.0"}
+	case shapeString:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "", Style: yaml.DoubleQuotedStyle}
-	case layout.Time:
+	case shapeTime:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!timestamp", Value: zeroTime}
-	case layout.Bytes, layout.Slice, layout.Map, layout.Pointer:
+	case shapeBytes, shapeSlice, shapeMap, shapePointer:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}
-	case layout.Struct:
+	case shapeStruct:
 		fields := mapping(yaml.FlowStyle)
 		for _, field := range n.Fields {
 			fields.Content = append(fields.Content, str(field.Name), m.yamlZero(field.Node, zeroTime))
 		}
 
 		return fields
-	case layout.Float32, layout.Float64:
-		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: "0.0"}
 	default:
-		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "0"}
+		panic(noShape(shp))
 	}
 }
 

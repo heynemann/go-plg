@@ -179,57 +179,55 @@ func (m *model) luaType(n *node) string {
 	return m.luaShape(n)
 }
 
-// The Lua Language Server's types of the integer and float kinds.
-const (
-	luaInteger = "integer"
-	luaNumber  = "number"
-)
-
-// luaScalars are the Lua Language Server types of the scalar wire kinds.
+// luaScalars are the Lua Language Server types of the scalar shapes; TestScalarTablesSpellEveryScalarShape holds
+// it to every one.
 //
 //nolint:gochecknoglobals // immutable lookup table
-var luaScalars = map[layout.Kind]string{
-	layout.Bool: "boolean", layout.String: "string", layout.Bytes: "string|nil", layout.Time: "plg.Time",
-	layout.Int: luaInteger, layout.Int8: luaInteger, layout.Int16: luaInteger, layout.Int32: luaInteger,
-	layout.Int64: luaInteger, layout.Uint: luaInteger, layout.Uint8: luaInteger, layout.Uint16: luaInteger,
-	layout.Uint32: luaInteger, layout.Uint64: luaInteger, layout.Float32: luaNumber, layout.Float64: luaNumber,
+var luaScalars = map[shape]string{
+	shapeBool: "boolean", shapeInteger: "integer", shapeFloat: "number", shapeString: "string",
+	shapeBytes: "string|nil", shapeTime: "plg.Time",
 }
 
 // luaShape returns the type of n's wire kind, naming the types it holds.
 func (m *model) luaShape(n *node) string {
-	if scalar, ok := luaScalars[n.Kind]; ok {
-		return scalar
-	}
-
-	switch n.Kind { //nolint:exhaustive // the scalar kinds are luaScalars'
-	case layout.Slice:
+	switch shp := shapeOf(n.Kind); shp {
+	case shapeBool, shapeInteger, shapeFloat, shapeString, shapeBytes, shapeTime:
+		return luaScalars[shp]
+	case shapeSlice:
 		elem := m.luaType(n.Elem)
 		if strings.HasSuffix(elem, "|nil") {
 			elem = "(" + elem + ")"
 		}
 
 		return elem + "[]|nil"
-	case layout.Map:
+	case shapeMap:
 		return "table<string, " + m.luaType(n.Elem) + ">|nil"
-	case layout.Pointer:
+	case shapePointer:
 		elem := m.luaType(n.Elem)
 		if strings.HasSuffix(elem, "|nil") {
 			return elem
 		}
 
 		return elem + "|nil"
-	default: // a struct
-		if len(n.Fields) == 0 {
-			return "table"
-		}
-
-		fields := make([]string, len(n.Fields))
-		for i, field := range n.Fields {
-			fields[i] = luaKey(field.Name) + ": " + m.luaType(field.Node)
-		}
-
-		return "{ " + strings.Join(fields, ", ") + " }"
+	case shapeStruct:
+		return m.luaStruct(n)
+	default:
+		panic(noShape(shp))
 	}
+}
+
+// luaStruct returns the table type of the struct n.
+func (m *model) luaStruct(n *node) string {
+	if len(n.Fields) == 0 {
+		return "table"
+	}
+
+	fields := make([]string, len(n.Fields))
+	for i, field := range n.Fields {
+		fields[i] = luaKey(field.Name) + ": " + m.luaType(field.Node)
+	}
+
+	return "{ " + strings.Join(fields, ", ") + " }"
 }
 
 // luaKey returns a field name: as it is when it is an identifier (and no keyword), else as ["name"].

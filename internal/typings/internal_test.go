@@ -1,10 +1,12 @@
 package typings
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/heynemann/go-plg/internal/layout"
 	"github.com/heynemann/go-plg/internal/tscheck"
 )
 
@@ -52,4 +54,43 @@ func TestRelative(t *testing.T) {
 		assert.Equal(t, tc.want, got, tc.name)
 		assert.Equal(t, tc.plugin, plugin, tc.name)
 	}
+}
+
+// TestShapeOfClassifiesEveryKind gives every kind layout names a shape, so a new wire kind fails here instead of
+// being written as some other shape, and panics on a kind layout does not name.
+func TestShapeOfClassifiesEveryKind(t *testing.T) {
+	t.Parallel()
+
+	kind := layout.Kind(1)
+	for ; !strings.HasPrefix(kind.String(), "kind("); kind++ {
+		assert.NotPanics(t, func() { shapeOf(kind) }, "kind %s", kind)
+	}
+
+	assert.Equal(t, shapeInteger, shapeOf(layout.Uint16))
+	assert.Equal(t, shapeFloat, shapeOf(layout.Float32))
+	assert.Equal(t, shapeStruct, shapeOf(layout.Struct))
+	assert.PanicsWithValue(t, "typings: wire kind kind(0) has no shape", func() { shapeOf(0) })
+	assert.PanicsWithValue(t, "typings: wire kind "+kind.String()+" has no shape", func() { shapeOf(kind) })
+}
+
+// TestScalarTablesSpellEveryScalarShape: the TypeScript and Lua tables name every scalar shape (those before
+// shapeSlice), so a new one cannot be written as an empty type.
+func TestScalarTablesSpellEveryScalarShape(t *testing.T) {
+	t.Parallel()
+
+	for s := shapeBool; s < shapeSlice; s++ {
+		assert.NotEmpty(t, tsScalars[s], "shape %d", s)
+		assert.NotEmpty(t, luaScalars[s], "shape %d", s)
+	}
+
+	assert.Len(t, tsScalars, int(shapeSlice-shapeBool))
+	assert.Len(t, luaScalars, int(shapeSlice-shapeBool))
+}
+
+// TestNoShapeNamesTheValue: a switch over shapes given none panics naming the value.
+func TestNoShapeNamesTheValue(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "typings: 0 is no shape", noShape(0))
+	assert.Equal(t, "typings: 42 is no shape", noShape(42))
 }
