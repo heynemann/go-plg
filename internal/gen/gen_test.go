@@ -845,6 +845,13 @@ func TestGenerateErrors(t *testing.T) {
 			files: map[string]string{"c.go": fooer + "\ntype Barer interface{ ~int; Bar() }\n"},
 		},
 		{
+			name: "alias of an unnamed interface", ifaces: []string{"Barer"}, err: gen.ErrInterface,
+			msg: []string{"Barer is an alias of an unnamed interface"},
+			files: map[string]string{
+				"c.go": fooer + "\ntype Barer = interface{ Bar(ctx context.Context) error }\n",
+			},
+		},
+		{
 			name: "W field clashing with a method", ifaces: []string{"Barer"}, err: gen.ErrInterface,
 			msg:   []string{"Barer has methods Bar and WBar"},
 			files: map[string]string{"c.go": fooer + "\ntype Barer interface{ Bar(); WBar() }\n"},
