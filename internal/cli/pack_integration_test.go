@@ -274,7 +274,7 @@ func TestPackRefusesInvalidPluginsAndReplacedContracts(t *testing.T) {
 	assert.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
 
 	written := filepath.Join(parent, "luagood.plg")
-	assertEndsWith(t, got.stderr, "\nplg pack: wrote "+written+" ("+openPacked(t, written).Provenance().Digest+")\n")
+	assertEndsWith(t, got.stderr, "\nplg pack: wrote luagood.plg ("+openPacked(t, written).Provenance().Digest+")\n")
 	assert.Equal(t, []string{"luagood", "luagood.plg"}, artifactsIn(t, parent), "no temporary file is left")
 
 	got = packIn(environ, plugin, ".") // from inside the plugin
@@ -376,7 +376,8 @@ func TestPackRecordsTheGitCommit(t *testing.T) {
 // TestPackResolvesRelativePaths packs a plugin of an author repository committed to git, named relative to a
 // working directory given as ".", as `plg pack` run in a shell is: from the repository, a file added to the
 // plugin's directory makes it dirty (git's pathspecs name the plugin's directory, not one inside it); from inside
-// the plugin, `plg pack .` validates the plugin under its directory's name and writes <name>.plg, clean.
+// the plugin, `plg pack .` validates the plugin under its directory's name and writes <name>.plg, clean, in the
+// relative -o, which it names as given.
 //
 //nolint:paralleltest // t.Chdir: the working directory is the process's
 func TestPackResolvesRelativePaths(t *testing.T) {
@@ -406,16 +407,17 @@ func TestPackResolvesRelativePaths(t *testing.T) {
 	require.NoError(t, os.Remove(notes))
 	t.Chdir(filepath.Join("rules", "silver"))
 
-	out = t.TempDir()
-	got = packIn(environ, ".", "-o", out, ".")
+	dist := filepath.Join("..", "..", "..", "dist") // next to the repository
+	got = packIn(environ, ".", "-o", dist, ".")
 	require.Equal(t, 0, got.code, got.stdout+got.stderr)
 	assert.Contains(t, rows(got.stdout),
 		"manifest ok lua plugin silver implementing example.com/rewards/cohort.Provider@v1.2.0")
 	assert.Contains(t, rows(got.stdout), "typings ok plg.d.lua, .luarc.json up to date", "lib is shared")
 
-	clean := openPacked(t, filepath.Join(out, "silver.plg")).Provenance()
+	clean := openPacked(t, filepath.Join(filepath.Dir(repo), "dist", "silver.plg")).Provenance()
 	assert.False(t, clean.Dirty)
 	assert.Equal(t, head, clean.Commit)
+	assertEndsWith(t, got.stderr, "plg pack: wrote "+filepath.Join(dist, "silver.plg")+" ("+clean.Digest+")\n")
 }
 
 // TestPackUsageAndOutputFailures checks pack's operands and flags (validate's, but -near-limit, as the resource

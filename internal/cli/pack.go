@@ -91,7 +91,7 @@ func runPack(env *Env, args []string) outcome {
 		return outcome{code: exitFailure, msg: "plg pack: " + rep.invalid() + ": nothing packed\n"}
 	}
 
-	written, err := writeArtifacts(rep, plugins, out)
+	written, err := writeArtifacts(rep, plugins, out, *outDir)
 	if err != nil {
 		return failure("pack", err)
 	}
@@ -207,8 +207,9 @@ func (v *validation) keep(res *resolved) {
 	v.packed(&packed{report: v.report, files: v.snap, contract: res.mod, key: v.key(), root: v.root(), git: v.git})
 }
 
-// writeArtifacts writes the artifact of each plugin, <key>.plg in the directory out, and returns what it wrote.
-func writeArtifacts(rep *report, plugins []*packed, out string) (string, error) {
+// writeArtifacts writes the artifact of each plugin, <key>.plg in the directory out, and returns what it wrote,
+// naming the directory shown, as -o gave it.
+func writeArtifacts(rep *report, plugins []*packed, out, shown string) (string, error) {
 	err := os.MkdirAll(out, outDirMode)
 	if err != nil {
 		return "", fmt.Errorf("creating the output directory: %w", err)
@@ -229,7 +230,7 @@ func writeArtifacts(rep *report, plugins []*packed, out string) (string, error) 
 			return "", err
 		}
 
-		fmt.Fprintf(&written, "plg pack: wrote %s (%s)\n", name, record.Digest)
+		fmt.Fprintf(&written, "plg pack: wrote %s (%s)\n", filepath.Join(shown, plugin.key+".plg"), record.Digest)
 	}
 
 	return written.String(), nil
