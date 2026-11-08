@@ -107,6 +107,7 @@ type registerConfig struct {
 	http              *HTTPPolicy     // nil: HTTP refused
 	httpRoots         *x509.CertPool  // the https roots trusted; nil: the system's (set only by tests, see export_test.go)
 	goGuest           *guestreg.Guest // the WithGoGuest option's custom guest; nil runs the linked one
+	resolve           secretResolver  // the WithSecrets function; nil: none
 	ownership         Severity        // of a missing-ownership issue: a warning, an error with WithRequiredOwnership
 	storages          []Storage
 	languages         []Language         // enabled languages; empty enables every language
@@ -114,10 +115,12 @@ type registerConfig struct {
 	goGuests          [][]byte           // WithGoGuest options; at most one is valid
 	validations       []validationSpec   // WithValidation options; at most one is valid
 	policies          []ValidationPolicy // WithOnDemandValidationPolicy options; at most one is valid
+	secrets           []secretResolver   // WithSecrets options; at most one is valid
 	memoryLimit       uint64             // per-instance limit, whole pages
 	pollInterval      time.Duration      // zero: no polling
 	validationTimeout time.Duration      // WithValidationTimeout
 	createTimeout     time.Duration      // plg validate's: bounds each instance's Create, not its start; 0 does not
+	secretTTL         time.Duration      // how long a resolved secret serves reads; 0 resolves every read
 	poolMin           int
 	poolMax           int
 	concurrent        int // WithConcurrentCalls
@@ -150,6 +153,11 @@ func registerOptions(name string, opts []RegisterOption) (*registerConfig, error
 	}
 
 	err := cfg.customGoGuest()
+	if err != nil {
+		return nil, err
+	}
+
+	err = cfg.settleSecrets()
 	if err != nil {
 		return nil, err
 	}

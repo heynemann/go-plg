@@ -9,7 +9,7 @@ import (
 )
 
 // luaGlobals annotates what plg gives every Lua plugin besides Lua's own libraries (the Lua guest's glue):
-// plg's shared types, http and json.
+// plg's shared types, http, secrets and json.
 const luaGlobals = `---A time.Time: Unix seconds and nanoseconds (0 to 999999999), in UTC.
 ---@class plg.Time
 ---@field seconds integer
@@ -45,6 +45,14 @@ const luaGlobals = `---A time.Time: Unix seconds and nanoseconds (0 to 999999999
 ---HTTP requests through the service, under its HTTP policy: request returns nil and the reason when refused or failed.
 ---@type plg.HTTP
 http = {}
+
+---@class plg.Secrets
+---@field get fun(name: string): string
+
+---The secrets plugin.yaml declares (secrets: [...]), which the service resolves: get returns a secret's value and
+---raises an error when plugin.yaml does not declare it or it cannot be resolved.
+---@type plg.Secrets
+secrets = {}
 
 ---@class plg.JSON
 ---@field encode fun(value: any): string

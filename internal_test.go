@@ -1427,7 +1427,7 @@ func TestGuestOutputGuardsDoNotAllocate(t *testing.T) {
 	line := []byte("a line of guest output\n")
 	failures := 0
 	allocs := func(logger *slog.Logger) float64 {
-		out := guestout.New(logger, "test/k")
+		out := guestout.New(logger, "test/k", nil)
 		stdout := out.Stdout()
 
 		return testing.AllocsPerRun(100, func() {

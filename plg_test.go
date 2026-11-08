@@ -611,6 +611,28 @@ func TestRegisterArguments(t *testing.T) {
 			}}})},
 		},
 		{
+			name: "desc-secret-name", want: plg.ErrInvalidDescriptor, msg: `"k": secrets: a secret name is 1 to 64`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
+				Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+				Secrets: []string{"ok", "not ok"},
+			}}})},
+		},
+		{
+			name: "desc-secret-twice", want: plg.ErrInvalidDescriptor, msg: `a secret is declared twice: "a"`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
+				Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+				Secrets: []string{"a", "a"},
+			}}})},
+		},
+		{
+			name: "secrets-nil", opts: withEmpty(plg.WithSecrets(nil)), want: plg.ErrInvalidOption,
+			msg: "WithSecrets(nil)",
+		},
+		{
+			name: "secrets-twice", want: plg.ErrInvalidOption, msg: "WithSecrets given 2 times",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithSecrets(noSecret), plg.WithSecrets(noSecret)},
+		},
+		{
 			name: "go-guest-empty", opts: withEmpty(plg.WithGoGuest(nil)), want: plg.ErrInvalidOption,
 			msg: "WithGoGuest: the module is empty",
 		},
@@ -1023,3 +1045,6 @@ func TestMemoryStorage(t *testing.T) {
 	err = store.Put(&plg.Descriptor{Key: "broken"}, brokenFS{})
 	require.ErrorIs(t, err, errStorage)
 }
+
+// noSecret is a WithSecrets resolver for tests that never read a secret.
+func noSecret(context.Context, plg.PluginInfo, string) (string, error) { return "", nil }

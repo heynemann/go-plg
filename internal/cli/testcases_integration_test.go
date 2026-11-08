@@ -193,3 +193,42 @@ func TestValidatePassesWhenEveryCasePasses(t *testing.T) {
 	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
 	assert.Equal(t, "tests ok 10 passed", rows(got.stdout)[len(rows(got.stdout))-1])
 }
+
+// TestValidateFakesSecretsInTestCases validates the secrets plugin of each language, whose Coupon sends the secret
+// coupon_token to the coupon service, with the cases of testdata/validate/secretcases run in the language's real
+// guest: a faked value reaches the plugin, a fake of null fails its read, and a case reading a secret it does not
+// fake, or faking one plugin.yaml does not declare, fails.
+func TestValidateFakesSecretsInTestCases(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	testdata := filepath.Join("..", "..", "testdata", "validate")
+
+	for _, dir := range []string{"gosecrets", "luasecrets", "tssecrets"} {
+		plugin := filepath.Join(t.TempDir(), dir)
+		require.NoError(t, os.CopyFS(plugin, os.DirFS(filepath.Join(testdata, "plugins", dir))))
+		require.NoError(t, os.CopyFS(plugin, os.DirFS(filepath.Join(testdata, "secretcases"))))
+
+		got := validate(environ, plugin)
+		require.Equal(t, 1, got.code, "%s\n%s%s", dir, got.stdout, got.stderr)
+
+		printed := rows(got.stdout)
+		assert.Contains(t, printed, "test ok tests/secrets.yaml: the faked token reaches the coupon service", dir)
+		assert.Contains(t, printed, "test ok tests/secrets.yaml: a read faked as failing is the plugin's error", dir)
+
+		unfaked := following(got.stdout, "test FAIL tests/secrets.yaml: a read the case does not fake fails it: ")
+		assert.True(t, strings.HasPrefix(unfaked.row, "test FAIL tests/secrets.yaml: a read the case does not fake "+
+			`fails it: Coupon failed: plg: secret "coupon_token" could not be resolved`), "%s\n%s", dir, got.stdout)
+		assert.Equal(t, []string{
+			"expected result 10",
+			`got error "plg: secret \"coupon_token\" could not be resolved (the service's log says why)"`,
+			"secret coupon_token was read, but the case fakes no value for it under secrets:",
+		}, unfaked.details, dir)
+
+		assert.Equal(t, `test FAIL tests/secrets.yaml: a fake plugin.yaml does not declare fails the case: `+
+			`tests/secrets.yaml:33:14: secrets fakes "api_key", which plugin.yaml does not declare `+
+			`(secrets: [coupon_token])`,
+			following(got.stdout, "test FAIL tests/secrets.yaml: a fake plugin.yaml does not declare").row, dir)
+		assert.Equal(t, "tests FAIL test cases failed: 2 failed, 2 passed", printed[len(printed)-1], dir)
+	}
+}

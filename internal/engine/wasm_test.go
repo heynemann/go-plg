@@ -35,6 +35,7 @@ func signatureOf(export string) [2][]byte {
 		"take_result":    {{i32, i32}, nil},
 		"host_call":      {{i32, i32, i32}, {i32}},
 		"http_start":     {{i32, i32, i32}, {i32}},
+		"secret":         {{i32, i32}, {i32}},
 		"poll_oneoff":    {{i32, i32, i32, i32}, {i32}},
 		"clock_time_get": {{i32, i64, i32}, {i32}},
 		"_start":         {nil, nil},

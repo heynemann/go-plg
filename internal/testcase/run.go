@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -58,7 +59,7 @@ func runCase(ctx context.Context, contract *offline.Contract, files fs.FS, runne
 		return result
 	}
 
-	prepared, err := prepare(contract, &decoder{files: files}, file, tc)
+	prepared, err := prepare(contract, &decoder{files: files}, file, tc, runner.Secrets())
 	if err != nil {
 		result.Failure = err.Error()
 
@@ -103,7 +104,7 @@ func Invoke(ctx context.Context, contract *offline.Contract, files fs.FS, runner
 		tc.input, tc.pos = root, at(name, root)
 	}
 
-	prepared, err := prepare(contract, &decoder{files: files}, &File{Name: name}, tc)
+	prepared, err := prepare(contract, &decoder{files: files}, &File{Name: name}, tc, runner.Secrets())
 	if err != nil {
 		return "", err
 	}
@@ -130,9 +131,17 @@ type prepared struct {
 	validate bool // the case calls the plugin's Validate
 }
 
-// prepare decodes the values of tc, a case of file, into the contract's types.
-func prepare(contract *offline.Contract, dec *decoder, file *File, tc *Case) (*prepared, error) {
-	call := &prepared{call: tc.call, expect: tc.expect, state: &state{http: tc.http}}
+// prepare decodes the values of tc, a case of file, into the contract's types, and checks that it fakes only
+// secrets of declared, those plugin.yaml declares.
+func prepare(contract *offline.Contract, dec *decoder, file *File, tc *Case, declared []string) (*prepared, error) {
+	call := &prepared{call: tc.call, expect: tc.expect, state: &state{http: tc.http, secrets: tc.secrets}}
+
+	for _, name := range slices.Sorted(maps.Keys(tc.secrets)) {
+		if !slices.Contains(declared, name) {
+			return nil, errorAt(tc.fakes, "secrets fakes %q, which plugin.yaml does not declare (secrets: [%s])",
+				name, strings.Join(declared, ", "))
+		}
+	}
 
 	sig, err := call.resolve(contract)
 	if err != nil {

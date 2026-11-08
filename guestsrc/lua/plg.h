@@ -147,6 +147,7 @@ extern uint32_t plg_host_base;
 /* Globals (capi.c, json.c). */
 void plg_open_host(lua_State *L);
 void plg_open_http(lua_State *L);
+void plg_open_secrets(lua_State *L);
 int luaopen_plg_json(lua_State *L);
 
 /* Pushes the values of a status-OK body of method m's results: nothing, one value or an array table. */

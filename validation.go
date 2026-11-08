@@ -22,7 +22,8 @@ const defaultValidationTimeout = 10 * time.Second
 // function failed (returned an error or panicked) for a plugin, which then cannot be validated.
 const CodeValidationInput = "plg.validation.input"
 
-// PluginInfo describes the plugin version a [WithValidation] function is asked the validation input of.
+// PluginInfo describes a plugin version: the one a [WithValidation] function is asked the validation input of, or
+// a [WithSecrets] function a secret of.
 type PluginInfo struct {
 	Key      string
 	Version  string
@@ -468,6 +469,14 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 		if err != nil {
 			return nil, true, fmt.Errorf("%w: %w", ErrValidation,
 				c.validateFailed(ctx, launch, inst, fmt.Errorf("%w: issues: %w", engine.ErrABI, err)))
+		}
+
+		scrub := launch.secrets.redactor()
+
+		for i := range issues {
+			issue := &issues[i]
+			issue.Code, issue.Message, issue.Field = scrub.String(issue.Code), scrub.String(issue.Message),
+				scrub.String(issue.Field)
 		}
 
 		return issues, false, nil

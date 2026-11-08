@@ -81,6 +81,9 @@ type Plugin struct {
 type Options struct {
 	// Logger gets what the plugin writes and what plg logs while loading it.
 	Logger *slog.Logger
+	// Secrets answers the plugin's secret reads (test cases' fakes), with the context of the call or Create making
+	// the read, every read resolving afresh; nil fails every read (plg validate has no secrets outside test cases).
+	Secrets func(ctx context.Context, name string) (string, error)
 	// CacheDir is the guests' compilation cache directory; empty means plg's default.
 	CacheDir string
 	// GoGuest is the custom Go guest (plg.WithGoGuest) a Go plugin runs in; nil runs the linked one.
@@ -131,6 +134,8 @@ type Runner interface {
 	// and the call are each bounded by the Options' Timeout; the Host Funcs and call.HTTP's Transport get the
 	// context Run was given, through the contexts the instance's Create and call run under.
 	Run(ctx context.Context, call *Call) Outcome
+	// Secrets returns the names of the secrets the plugin's manifest declares.
+	Secrets() []string
 	// Close frees what the runner holds.
 	Close(ctx context.Context) error
 }

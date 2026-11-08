@@ -31,6 +31,7 @@ type manifest struct {
 	Language    Language     `yaml:"language"`
 	Entrypoint  string       `yaml:"entrypoint"`
 	Version     string       `yaml:"version"`
+	Secrets     []string     `yaml:"secrets"`
 }
 
 // manifestInt is a non-negative integer of a plugin.yaml. yaml's own decoding into an integer truncates a float
@@ -97,24 +98,19 @@ func decodeManifest(data []byte) (Descriptor, error) {
 
 // checkManifest checks the values of a decoded plugin.yaml and returns its descriptor, without a key.
 func checkManifest(parsed *manifest) (Descriptor, error) {
-	_, err := contractref.Parse(parsed.Implements)
+	err := checkManifestCode(parsed)
 	if err != nil {
-		return Descriptor{}, err //nolint:wrapcheck // it names the key and the value already
+		return Descriptor{}, err
 	}
 
-	switch parsed.Language {
-	case LanguageGo, LanguageLua, LanguageTypeScript:
-	default:
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestLanguage, parsed.Language)
-	}
-
-	if parsed.Entrypoint == "" || !fs.ValidPath(parsed.Entrypoint) {
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
+	err = checkSecretNames(parsed.Secrets)
+	if err != nil {
+		return Descriptor{}, err
 	}
 
 	desc := Descriptor{
 		Implements: parsed.Implements, Language: parsed.Language, Entrypoint: parsed.Entrypoint,
-		Version: parsed.Version,
+		Version: parsed.Version, Secrets: parsed.Secrets,
 	}
 
 	if parsed.MemoryLimit != nil {
@@ -136,4 +132,25 @@ func checkManifest(parsed *manifest) (Descriptor, error) {
 	}
 
 	return desc, nil
+}
+
+// checkManifestCode checks what a decoded plugin.yaml says of the plugin's code: the interface it implements, its
+// language and its entrypoint.
+func checkManifestCode(parsed *manifest) error {
+	_, err := contractref.Parse(parsed.Implements)
+	if err != nil {
+		return err //nolint:wrapcheck // it names the key and the value already
+	}
+
+	switch parsed.Language {
+	case LanguageGo, LanguageLua, LanguageTypeScript:
+	default:
+		return fmt.Errorf("%w, not %q", errManifestLanguage, parsed.Language)
+	}
+
+	if parsed.Entrypoint == "" || !fs.ValidPath(parsed.Entrypoint) {
+		return fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
+	}
+
+	return nil
 }

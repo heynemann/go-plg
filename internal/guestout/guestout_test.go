@@ -18,6 +18,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/guestout"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 func TestMain(m *testing.M) {
@@ -86,9 +87,14 @@ func (l *lines) texts(stream string) []string {
 }
 
 func newCapture() (*guestout.Capture, *lines) {
+	return newScrubbingCapture(nil)
+}
+
+// newScrubbingCapture returns a capture scrubbing the values secrets holds, and its records.
+func newScrubbingCapture(secrets *redact.Redactor) (*guestout.Capture, *lines) {
 	handler := &lines{}
 
-	return guestout.New(slog.New(handler), "fooer/p"), handler
+	return guestout.New(slog.New(handler), "fooer/p", secrets), handler
 }
 
 func write(t *testing.T, w io.Writer, chunks ...string) {
@@ -356,7 +362,7 @@ func TestOutputPastTheBudgetIsNotScanned(t *testing.T) {
 
 // BenchmarkStep is what every call pays for the capture when the guest writes nothing: Begin and End.
 func BenchmarkStep(b *testing.B) {
-	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 	ctx := b.Context()
 
 	b.ReportAllocs()
@@ -369,7 +375,7 @@ func BenchmarkStep(b *testing.B) {
 
 // BenchmarkStderrLine is one traceback-sized line written to stderr: kept in the tail and logged.
 func BenchmarkStderrLine(b *testing.B) {
-	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 	line := []byte("/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)\n")
 
 	b.ReportAllocs()
@@ -389,7 +395,7 @@ func BenchmarkStderrLine(b *testing.B) {
 func BenchmarkNewlineFreeWrite(b *testing.B) {
 	for _, mib := range []int{1, 8, 64} {
 		b.Run(fmt.Sprintf("%dMiB", mib), func(b *testing.B) {
-			capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+			capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 			data := bytes.Repeat([]byte("x"), mib<<20)
 
 			b.SetBytes(int64(len(data)))
@@ -405,4 +411,67 @@ func BenchmarkNewlineFreeWrite(b *testing.B) {
 			}
 		})
 	}
+}
+
+// secretValues returns a redactor holding the value tok-123456 of the secret api_key.
+func secretValues() *redact.Redactor {
+	secrets := &redact.Redactor{}
+	secrets.Add("api_key", "tok-123456")
+
+	return secrets
+}
+
+func TestSecretsAreScrubbedFromLinesAndTheTail(t *testing.T) {
+	t.Parallel()
+
+	capture, logs := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	write(t, capture.Stdout(), "token tok-", "123456 sent\n")
+	write(t, capture.Stderr(), "failed with tok-123456\n")
+	assert.Equal(t, []string{"token [secret api_key] sent"}, logs.texts("stdout"), "a value split across writes")
+	assert.Equal(t, []string{"failed with [secret api_key]"}, logs.texts("stderr"))
+	assert.Equal(t, "failed with [secret api_key]\n", capture.Guest())
+
+	capture.End(t.Context())
+}
+
+func TestCuttingALongLineNeverSplitsASecret(t *testing.T) {
+	t.Parallel()
+
+	capture, logs := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	// The value straddles MaxLine: a cut at MaxLine would leave "tok-12" and "3456" in two records.
+	head := strings.Repeat("a", guestout.MaxLine-6)
+	write(t, capture.Stdout(), head+"tok-123456"+strings.Repeat("b", 10)+"\n")
+	capture.End(t.Context())
+
+	got := logs.texts("stdout")
+	require.Len(t, got, 2)
+	assert.Equal(t, head+"[secret api_key]"+strings.Repeat("b", 10), got[0]+got[1])
+	assert.Less(t, len(got[0]), len(head)+1, "the cut moved before the value")
+
+	for _, piece := range got {
+		assert.NotContains(t, piece, "tok-")
+		assert.NotContains(t, piece, "3456")
+	}
+}
+
+func TestTheTailDropsTheEndOfACutSecret(t *testing.T) {
+	t.Parallel()
+
+	capture, _ := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	// The tail's first bytes would be "3456", the end of a value whose start fell out of it.
+	rest := strings.Repeat("x", guestout.TailSize-4)
+	write(t, capture.Stderr(), "tok-123456"+rest)
+
+	got := capture.Guest()
+	assert.NotContains(t, got, "3456")
+	assert.True(t, strings.HasSuffix(rest, got), "only the start is dropped")
+	assert.GreaterOrEqual(t, len(got), len(rest)-len("tok-123456"), "at most a value's length is dropped")
+
+	capture.End(t.Context())
 }

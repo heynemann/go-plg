@@ -32,7 +32,7 @@ type RuntimeOptions struct {
 
 // Runtime is a wazero runtime: every instance it creates has the same memory limit and is stopped
 // preemptively when the context of its current call ends. Its guests may import the plg host module
-// (http_roundtrip, host_call, take_result). It is safe for concurrent use.
+// (http_roundtrip, host_call, secret, take_result). It is safe for concurrent use.
 type Runtime struct {
 	rt     wazero.Runtime
 	logger *slog.Logger
@@ -174,6 +174,8 @@ type InstanceOptions struct {
 	HTTPRefuses func(n, size int) bool
 	// Host serves the instance's calls to its Host; nil means the plugin has no Host.
 	Host HostFunc
+	// Secret serves the instance's secret reads; nil refuses them all with [ErrNoSecrets].
+	Secret SecretFunc
 	// Mounts are the instance's only file system access.
 	Mounts []Mount
 }

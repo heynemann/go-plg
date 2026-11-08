@@ -30,15 +30,19 @@
 //	        headers: {Content-Type: application/json}
 //	        body: '{"tier":"gold"}'
 //	        times: 1
+//	    secrets:                     # fakes of the secrets plugin.yaml declares, by name: each read gets the
+//	      crm_token: t0k3n           #   value, or fails as a failing resolver's would (null); a name it does
+//	      backup_token: null         #   not give fails the read and the case
 //	    expect:                      # at most one of: the results (a list when there are several), the
 //	      result: true               #   substring of the error the plugin returns, or Validate's issues
 //	      # error: not found
 //	      # issues: [{severity: warning, code: rule.slow}]  # fields left out match anything
 //
 // A case fails when its call fails otherwise than expected (an error it did not expect, a panic, a trap, a
-// timeout), returns other results or issues than it expects, makes a Host call or HTTP request no stub matches
-// (the call itself gets an error then), or a stub with times answers another number of calls. Requests the
-// policy refuses never reach the stubs: the plugin gets the refusal, as it would in a service.
+// timeout), returns other results or issues than it expects, makes a Host call or HTTP request no stub matches, or
+// reads a secret it does not fake (the call itself gets an error then), or a stub with times answers another
+// number of calls. Requests the policy refuses never reach the stubs: the plugin gets the refusal, as it would in a
+// service.
 package testcase
 
 import (
@@ -81,14 +85,16 @@ type File struct {
 
 // Case is one test case.
 type Case struct {
-	err    error      // why the case is malformed
-	input  *yaml.Node // a mapping; nil without input
-	expect *expect
-	Name   string
-	call   string
-	host   []*hostDoc
-	http   []*httpStub
-	pos    position
+	err     error      // why the case is malformed
+	input   *yaml.Node // a mapping; nil without input
+	expect  *expect
+	secrets map[string]*string // the fakes by name; nil fails the read
+	Name    string
+	call    string
+	host    []*hostDoc
+	http    []*httpStub
+	pos     position
+	fakes   position // where secrets is
 }
 
 // hostDoc is a Host stub as written: its values decode once the Host's types are known.
@@ -293,7 +299,7 @@ func firstError(steps ...func() error) error {
 func parseCase(file string, node *yaml.Node) *Case {
 	tc := &Case{pos: at(file, node)}
 
-	keys, err := mapping(file, node, "a test case", "call", "expect", "host", "http", "input", "name")
+	keys, err := mapping(file, node, "a test case", "call", "expect", "host", "http", "input", "name", "secrets")
 	if err == nil {
 		err = tc.parse(file, keys)
 	}
@@ -334,11 +340,45 @@ func (tc *Case) parse(file string, keys map[string]*yaml.Node) error {
 		return err
 	}
 
+	if node := keys["secrets"]; node != nil {
+		tc.fakes = at(file, node)
+
+		tc.secrets, err = parseSecrets(file, node)
+		if err != nil {
+			return err
+		}
+	}
+
 	if node := keys["expect"]; node != nil {
 		tc.expect, err = parseExpect(file, node)
 	}
 
 	return err
+}
+
+// parseSecrets parses a case's secret fakes: a mapping of names to strings, or null for a failing read.
+func parseSecrets(file string, node *yaml.Node) (map[string]*string, error) {
+	if node.Kind != yaml.MappingNode {
+		return nil, errorAt(at(file, node), "secrets is a mapping of secret names to values, not %s", describe(node))
+	}
+
+	fakes := make(map[string]*string, len(node.Content)/2)
+
+	for i := 0; i < len(node.Content); i += 2 {
+		name, value := node.Content[i].Value, node.Content[i+1]
+
+		switch {
+		case value.Kind == yaml.ScalarNode && value.Tag == nullTag:
+			fakes[name] = nil
+		case value.Kind == yaml.ScalarNode && value.Tag == strTag:
+			fakes[name] = &value.Value
+		default:
+			return nil, errorAt(at(file, value), "secrets: %s is a string, or null for a read that fails, not %s",
+				name, describe(value))
+		}
+	}
+
+	return fakes, nil
 }
 
 // parseHost parses a Host stub.

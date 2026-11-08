@@ -161,6 +161,12 @@ func TestFSStorageParsesManifests(t *testing.T) {
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "1.10"},
 		},
 		{
+			manifest: implementsLine + "language: go\nentrypoint: .\nsecrets: [stripe_key, db.password, A-1]\n",
+			want: plg.Descriptor{
+				Language: plg.LanguageGo, Entrypoint: ".", Secrets: []string{"stripe_key", "db.password", "A-1"},
+			},
+		},
+		{
 			manifest: implementsLine + "language: go\nentrypoint: .\nversion: 2026-11-06\n",
 			want:     plg.Descriptor{Language: plg.LanguageGo, Entrypoint: ".", Version: "2026-11-06"},
 		},
@@ -331,10 +337,23 @@ func TestFSStorageRejectsMalformedManifests(t *testing.T) {
 			"#",
 			plg.MaxManifestSize,
 		),
-		"no implements":      "language: go\nentrypoint: .\n",
-		"implements type":    "implements: [" + ruleImplements + "]\nlanguage: go\nentrypoint: .\n",
-		"implements mapping": "implements: {rule: " + ruleImplements + "}\nlanguage: go\nentrypoint: .\n",
-		"implements case":    "Implements: " + ruleImplements + "\nlanguage: go\nentrypoint: .\n",
+		"no implements":         "language: go\nentrypoint: .\n",
+		"implements type":       "implements: [" + ruleImplements + "]\nlanguage: go\nentrypoint: .\n",
+		"implements mapping":    "implements: {rule: " + ruleImplements + "}\nlanguage: go\nentrypoint: .\n",
+		"implements case":       "Implements: " + ruleImplements + "\nlanguage: go\nentrypoint: .\n",
+		"secrets type":          implementsLine + "language: go\nentrypoint: .\nsecrets: stripe_key\n",
+		"secret name type":      implementsLine + "language: go\nentrypoint: .\nsecrets: [{a: b}]\n",
+		"empty secret name":     implementsLine + "language: go\nentrypoint: .\nsecrets: ['']\n",
+		"secret starting digit": implementsLine + "language: go\nentrypoint: .\nsecrets: [1key]\n",
+		"secret with a space":   implementsLine + "language: go\nentrypoint: .\nsecrets: ['a key']\n",
+		"secret name too long": implementsLine + "language: go\nentrypoint: .\nsecrets: [" + strings.Repeat(
+			"k",
+			plg.MaxSecretName+1,
+		) + "]\n",
+		"secret declared twice": implementsLine + "language: go\nentrypoint: .\nsecrets: [a, b, a]\n",
+		"too many secrets": implementsLine + "language: go\nentrypoint: .\nsecrets: [" + secretList(
+			plg.MaxSecrets+1,
+		) + "]\n",
 	}
 
 	for name, manifest := range tests {
@@ -1057,6 +1076,11 @@ func FuzzFSStorageManifest(f *testing.F) {
 		"language: go\nentrypoint: .\n",
 		"a: &a [*a]\n",
 		"version: 2026-01-01\nlanguage: go\nentrypoint: '.'\nimplements: x.y/z.W@v0.0.0-20260101000000-abcdefabcdef\n",
+		implementsLine + "language: lua\nentrypoint: main.lua\nsecrets: [stripe_key, db.password]\n",
+		implementsLine + "language: lua\nentrypoint: main.lua\nsecrets: []\n",
+		implementsLine + "language: lua\nentrypoint: main.lua\nsecrets: [a, a]\n",
+		implementsLine + "language: lua\nentrypoint: main.lua\nsecrets: [9lives, '']\n",
+		implementsLine + "language: lua\nentrypoint: main.lua\nsecrets: key\n",
 		`null`,
 		``,
 	} {
@@ -1082,6 +1106,12 @@ func FuzzFSStorageManifest(f *testing.F) {
 		assert.True(t, desc.Entrypoint != "" && fs.ValidPath(desc.Entrypoint), "entrypoint %q", desc.Entrypoint)
 		assert.True(t, desc.MemoryLimit == 0 || desc.MemoryLimit >= 64<<10 && desc.MemoryLimit <= 4<<30,
 			"memoryLimit %d is zero or from one wasm page to 4 GiB, as Register requires", desc.MemoryLimit)
+		assert.LessOrEqual(t, len(desc.Secrets), plg.MaxSecrets)
+
+		for i, name := range desc.Secrets {
+			assert.Regexp(t, `^[A-Za-z][A-Za-z0-9_.-]{0,63}$`, name, "a secret name")
+			assert.NotContains(t, desc.Secrets[:i], name, "a secret is declared once")
+		}
 
 		// Re-encoding the descriptor's fields gives the same plugin (an empty version stays empty: Register
 		// hashes the files it loads).
@@ -1091,6 +1121,10 @@ func FuzzFSStorageManifest(f *testing.F) {
 		}
 		if desc.MemoryLimit != 0 {
 			fields["memoryLimit"] = desc.MemoryLimit
+		}
+
+		if desc.Secrets != nil {
+			fields["secrets"] = desc.Secrets
 		}
 
 		reencoded, err := yaml.Marshal(fields)
@@ -1122,4 +1156,14 @@ func BenchmarkFSStorageList(b *testing.B) {
 			}
 		})
 	}
+}
+
+// secretList returns n distinct secret names, comma-separated, for a plugin.yaml's flow sequence.
+func secretList(n int) string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("s%d", i)
+	}
+
+	return strings.Join(names, ", ")
 }

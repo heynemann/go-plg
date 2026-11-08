@@ -45,6 +45,14 @@
 ---@type plg.HTTP
 http = {}
 
+---@class plg.Secrets
+---@field get fun(name: string): string
+
+---The secrets plugin.yaml declares (secrets: [...]), which the service resolves: get returns a secret's value and
+---raises an error when plugin.yaml does not declare it or it cannot be resolved.
+---@type plg.Secrets
+secrets = {}
+
 ---@class plg.JSON
 ---@field encode fun(value: any): string
 ---@field decode fun(text: string): any

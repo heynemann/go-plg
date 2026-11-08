@@ -241,3 +241,80 @@ func TestHostCallViolationsBreakTheInstance(t *testing.T) {
 }
 
 var errRefused = errors.New("refused")
+
+// secretGuest imports secret (function 0) and take_result (function 1); its plg_call reads the secret named by the
+// four request bytes, takes the answer to answerAt and returns it, answerLen bytes, as the call's result.
+func secretGuest(answerLen uint32) fakeGuest {
+	bodies := abiOK(0, 1)
+	bodies["plg_call"] = slices.Concat(i32Const(answerAt), i32Const(0), i32Const(4), call(0), call(1),
+		packed(answerAt, answerLen))
+
+	return fakeGuest{data: hostData(), bodies: bodies, imports: []string{"secret", "take_result"}}
+}
+
+func TestSecretReadsReachTheSecretFunc(t *testing.T) {
+	t.Parallel()
+
+	answer := append([]byte{byte(wire.StatusOK)}, wire.AppendMessage(nil, "v")...)
+
+	var reads int
+
+	secret := func(ctx context.Context, dst, name []byte) []byte {
+		assert.Equal(t, "call ctx", ctx.Value(ctxKey{}), "the read runs with the call's context")
+		assert.Equal(t, hostData(), name)
+
+		reads++
+
+		return append(dst, answer...)
+	}
+
+	inst, err := instantiateWith(t, secretGuest(uint32(len(answer))), //nolint:gosec // G115: tiny
+		&engine.InstanceOptions{Secret: secret})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(t.Context(), ctxKey{}, "call ctx")
+
+	for range 2 {
+		res, err := inst.Call(ctx, 0, nil)
+		require.NoError(t, err)
+		assert.Equal(t, wire.StatusOK, res.Status)
+		assert.Equal(t, answer[1:], res.Body, "take_result copied the answer into guest memory")
+	}
+
+	assert.Equal(t, 2, reads)
+	assert.False(t, inst.Broken())
+	require.NoError(t, inst.Close(t.Context()))
+}
+
+func TestSecretReadsRefusedWithoutSecretFunc(t *testing.T) {
+	t.Parallel()
+
+	refusal := wire.AppendMessage([]byte{byte(wire.StatusError)}, engine.ErrNoSecrets.Error())
+	inst := mustInstantiate(t, secretGuest(uint32(len(refusal)))) //nolint:gosec // G115: tiny
+
+	res, err := inst.Call(t.Context(), 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, wire.StatusError, res.Status)
+	assert.Equal(t, engine.ErrNoSecrets.Error(), res.Message)
+	assert.False(t, inst.Broken())
+}
+
+func TestSecretNameOutOfRangeBreaksTheInstance(t *testing.T) {
+	t.Parallel()
+
+	g := secretGuest(1)
+	g.bodies["plg_call"] = slices.Concat(i32Const(engine.PageSize-2), i32Const(10), call(0), drop(), packed(0, 1))
+
+	inst, err := instantiateWith(t, g, &engine.InstanceOptions{
+		Secret: func(context.Context, []byte, []byte) []byte {
+			t.Error("a name out of range never reaches the SecretFunc")
+
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = inst.Call(t.Context(), 0, nil)
+	require.ErrorIs(t, err, engine.ErrABI)
+	assert.True(t, inst.Broken())
+}

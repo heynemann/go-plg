@@ -110,8 +110,9 @@ func newContract() *offline.Contract {
 // runner is an [offline.Runner] standing in for a guest: it calls the plugin's code, play, with the context and
 // the call a case gives it, and returns what play returns.
 type runner struct {
-	play  func(ctx context.Context, call *offline.Call) offline.Outcome
-	calls []*offline.Call
+	play     func(ctx context.Context, call *offline.Call) offline.Outcome
+	calls    []*offline.Call
+	declared []string // the secrets the plugin declares
 }
 
 func (r *runner) Run(ctx context.Context, call *offline.Call) offline.Outcome {
@@ -125,6 +126,8 @@ func (r *runner) Run(ctx context.Context, call *offline.Call) offline.Outcome {
 }
 
 func (*runner) Close(context.Context) error { return nil }
+
+func (r *runner) Secrets() []string { return r.declared }
 
 // returning plays a plugin returning results.
 func returning(results ...any) func(context.Context, *offline.Call) offline.Outcome {
@@ -1035,6 +1038,102 @@ func TestHostStubsAnswerThePluginsHostCalls(t *testing.T) {
 		t.Parallel()
 
 		_, err := tier(t.Context(), newContract(), "x")
+		assert.EqualError(t, err, "plg validate: no test case is running")
+	})
+}
+
+// TestSecretFakesAnswerThePluginsReads runs cases whose plugin reads secrets, and holds what each read got, and
+// the problems and errors that fail a case: a read of a secret the case does not fake, a fake of a secret
+// plugin.yaml does not declare, a fake that is neither a string nor null.
+func TestSecretFakesAnswerThePluginsReads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, yaml string
+		failure    string
+		reads      []string
+		answers    []string
+		details    []string
+	}{
+		{
+			name:  "values and a failing read",
+			yaml:  "secrets: {api_key: s3cret, backup: null}",
+			reads: []string{"api_key", "backup", "api_key"},
+			answers: []string{
+				"s3cret",
+				"error: plg validate: the test case fakes this secret's read failing",
+				"s3cret",
+			},
+		},
+		{
+			name: "an empty value", yaml: "secrets: {api_key: ''}", reads: []string{"api_key"}, answers: []string{""},
+		},
+		{
+			name: "a read without a fake", yaml: "secrets: {api_key: s3cret}", reads: []string{"backup"},
+			answers: []string{"error: plg validate: the test case fakes no such secret: backup"},
+			failure: "the stubs were not used as the case declares",
+			details: []string{"secret backup was read, but the case fakes no value for it under secrets:"},
+		},
+		{
+			name: "no secrets", reads: []string{"api_key"},
+			answers: []string{"error: plg validate: the test case fakes no such secret: api_key"},
+			failure: "the stubs were not used as the case declares",
+			details: []string{"secret api_key was read, but the case fakes no value for it under secrets:"},
+		},
+		{
+			name: "an undeclared fake", yaml: "secrets: {api_key: a, zeta: z, other: o}",
+			failure: `tests/t.yaml:2:52: secrets fakes "other", which plugin.yaml does not declare ` +
+				`(secrets: [api_key, backup])`,
+		},
+		{
+			name: "a fake not a string", yaml: "secrets: {api_key: 42}",
+			failure: `tests/t.yaml:2:62: secrets: api_key is a string, or null for a read that fails, not int "42"`,
+		},
+		{
+			name: "secrets not a mapping", yaml: "secrets: [api_key]",
+			failure: `tests/t.yaml:2:52: secrets is a mapping of secret names to values, not a list`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var answers []string
+
+			yaml := "- {name: x, call: Spin, input: {mode: a}"
+			if tc.yaml != "" {
+				yaml += ", " + tc.yaml
+			}
+
+			files := cases(yaml + "}\n")
+			plugin := &runner{declared: []string{"api_key", "backup"}, play: func(ctx context.Context,
+				_ *offline.Call,
+			) offline.Outcome {
+				for _, name := range tc.reads {
+					got, err := testcase.Secret(ctx, name)
+					if err != nil {
+						got = "error: " + err.Error()
+					}
+
+					answers = append(answers, got)
+				}
+
+				return offline.Outcome{}
+			}}
+
+			results := testcase.Run(t.Context(), newContract(), files, plugin, testcase.Load(files)[0])
+
+			assert.Equal(t, tc.answers, answers)
+			assert.Equal(t, tc.failure, results[0].Failure)
+			assert.Equal(t, tc.details, results[0].Details)
+		})
+	}
+
+	t.Run("outside a case", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := testcase.Secret(t.Context(), "api_key")
 		assert.EqualError(t, err, "plg validate: no test case is running")
 	})
 }

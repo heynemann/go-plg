@@ -686,7 +686,10 @@ func (v *validation) tests(ctx context.Context, contract *offline.Contract, mani
 		stubbed.Host = &host
 	}
 
-	runner, err := offline.Open(ctx, &stubbed, plugin, opts)
+	faking := *opts
+	faking.Secrets = testcase.Secret // the running case's fakes
+
+	runner, err := offline.Open(ctx, &stubbed, plugin, &faking)
 	if err != nil {
 		return v.failed("tests", err)
 	}

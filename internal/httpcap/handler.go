@@ -33,6 +33,10 @@ type Hooks struct {
 	// it, which the request is made with and whose span context its traceparent header carries, and the function
 	// ending it, or nil when it traces nothing.
 	Trace func(ctx context.Context) (context.Context, SpanEnd)
+	// Scrub, when not nil, scrubs what a request's log record and report say of it beyond its method and sizes
+	// (its URL and why it was refused or failed), such as the plugin's secrets; what the plugin is told is not
+	// scrubbed.
+	Scrub func(string) string
 }
 
 // SpanEnd ends a request's span with the request's report.
@@ -68,9 +72,9 @@ type Report struct {
 // shape of engine.HTTPFunc). It appends the encoded answer to dst; req is the encoded request and n counts the
 // requests of the current call. Each request is reported to hooks.Done (and its span ended) once answered; a
 // panic in the capability (or net/http) is passed to hooks.Panicked and answered with [ErrInternal].
-func (c *Client) Handler(key string, hooks Hooks) func(ctx context.Context, dst, req []byte, n int) []byte {
+func (c *Client) Handler(key string, hooks *Hooks) func(ctx context.Context, dst, req []byte, n int) []byte {
 	return func(ctx context.Context, dst, req []byte, n int) []byte {
-		return c.serve(ctx, key, &hooks, dst, req, n)
+		return c.serve(ctx, key, hooks, dst, req, n)
 	}
 }
 
@@ -133,14 +137,21 @@ func (c *Client) answer(ctx context.Context, key string, hooks *Hooks, ended Spa
 	head := len(dst)
 
 	out, err := c.do(ctx, &xch, dst, req, n)
+	if hooks.Scrub != nil {
+		xch.target = hooks.Scrub(xch.target)
+	}
+
 	if err != nil {
+		reason := message(err)
+		err = scrubbed(hooks.Scrub, err)
+
 		c.log(ctx, key, hooks, &xch, err)
 		report(ctx, hooks, ended, &Report{
 			Err: err, Method: xch.method, URL: xch.target, Duration: time.Since(start), Sent: xch.sent,
 			Outcome: outcome(err),
 		})
 
-		return httpabi.AppendFailure(out[:head], message(err))
+		return httpabi.AppendFailure(out[:head], reason)
 	}
 
 	xch.received = len(out) - head
@@ -152,6 +163,31 @@ func (c *Client) answer(ctx context.Context, key string, hooks *Hooks, ended Spa
 
 	return out
 }
+
+// scrubbed returns err with its message scrubbed by scrub (nil: nothing to scrub): err itself when that changes
+// nothing, else an error with the scrubbed message wrapping err.
+func scrubbed(scrub func(string) string, err error) error {
+	if scrub == nil {
+		return err
+	}
+
+	if msg := scrub(err.Error()); msg != err.Error() {
+		return &scrubbedError{error: err, msg: msg}
+	}
+
+	return err
+}
+
+// scrubbedError is an error whose message is scrubbed; it wraps the original.
+type scrubbedError struct {
+	error
+
+	msg string
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+
+func (e *scrubbedError) Unwrap() error { return e.error }
 
 // outcome classifies a request's failure: in transit (a timeout and a too large response included) or refused
 // by the policy.

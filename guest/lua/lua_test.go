@@ -68,7 +68,7 @@ func TestTheArtifactSpeaksTheGuestABIAndImportsNothingElse(t *testing.T) {
 	}
 
 	slices.Sort(plgImports)
-	assert.Equal(t, []string{"host_call", "http_roundtrip", "http_start", "take_result"}, plgImports)
+	assert.Equal(t, []string{"host_call", "http_roundtrip", "http_start", "secret", "take_result"}, plgImports)
 }
 
 // TestTheArtifactNeedsExceptionHandling pins why every plg runtime enables wazero's experimental exception

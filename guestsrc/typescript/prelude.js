@@ -1,10 +1,10 @@
 // The TypeScript guest's prelude, embedded in the artifact by glue.c and evaluated before the plugin: a function
-// taking the glue's natives (write, http, utf8Decode, utf8Encode) that installs console, fetch, Headers and
-// Response as globals. The natives stay private to this closure.
+// taking the glue's natives (write, http, utf8Decode, utf8Encode, secret) that installs console, fetch, Headers,
+// Response and secrets as globals. The natives stay private to this closure.
 (function (natives) {
   "use strict";
 
-  const { write, http, utf8Decode, utf8Encode } = natives;
+  const { write, http, utf8Decode, utf8Encode, secret } = natives;
 
   function show(value) {
     if (typeof value === "string") return value;
@@ -226,4 +226,6 @@
   define("Headers", Headers);
   define("Response", Response);
   define("fetch", fetch);
+  // secrets.get(name) returns the value of a secret plugin.yaml declares, or throws an Error with the host's reason.
+  define("secrets", Object.freeze({ get: (name) => secret(name) }));
 });

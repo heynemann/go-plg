@@ -19,17 +19,22 @@ var (
 	errNoHostStub = errors.New("plg validate: no host stub of the test case matches")
 	// errNoHTTPStub fails a request no stub of the running case matches.
 	errNoHTTPStub = errors.New("plg validate: no http stub of the test case matches")
-	// errNoCase fails a Host call or request made outside a test case.
+	// errNoSecretFake fails a read of a secret the running case does not fake.
+	errNoSecretFake = errors.New("plg validate: the test case fakes no such secret")
+	// errFailingSecret fails a read of a secret the running case fakes as failing (null).
+	errFailingSecret = errors.New("plg validate: the test case fakes this secret's read failing")
+	// errNoCase fails a Host call, request or secret read made outside a test case.
 	errNoCase = errors.New("plg validate: no test case is running")
 )
 
 // stateKey is the context key of the running case's [state].
 type stateKey struct{}
 
-// state is a running case's stubs and what happened to them. The plugin's Host calls and requests reach it from
-// the goroutine running the call, while Run waits for it, so its counts are atomic.
+// state is a running case's stubs and fakes and what happened to them. The plugin's Host calls, requests and secret
+// reads reach it from the goroutine running the call, while Run waits for it, so its counts are atomic.
 type state struct {
-	unmatched atomic.Pointer[[]string] // the Host calls and requests no stub matched, in order
+	unmatched atomic.Pointer[[]string] // the Host calls, requests and secret reads no stub matched, in order
+	secrets   map[string]*string       // the secrets' fakes; nil fails the read
 	host      []*hostStub
 	http      []*httpStub
 }
@@ -41,6 +46,29 @@ func stateOf(ctx context.Context) (*state, error) {
 	}
 
 	return nil, errNoCase
+}
+
+// Secret answers a read of the secret name, for [offline.Options]' Secrets, from the fakes of the case running under
+// ctx: the value; or an error, recording a problem that fails the case, for a secret it does not fake (or a read
+// outside a case); or [errFailingSecret] for a secret it fakes as failing (null).
+func Secret(ctx context.Context, name string) (string, error) {
+	running, err := stateOf(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	fake, ok := running.secrets[name]
+
+	switch {
+	case !ok:
+		running.miss("secret " + name + " was read, but the case fakes no value for it under secrets:")
+
+		return "", fmt.Errorf("%w: %s", errNoSecretFake, name)
+	case fake == nil:
+		return "", errFailingSecret
+	default:
+		return *fake, nil
+	}
 }
 
 // miss records a Host call or request no stub matched.

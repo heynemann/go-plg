@@ -10,6 +10,7 @@ import (
 	"github.com/tetratelabs/wazero/api"
 
 	"github.com/heynemann/go-plg/internal/httpabi"
+	"github.com/heynemann/go-plg/internal/wire"
 )
 
 // Host imports: the wasm module and function names guests import.
@@ -25,6 +26,10 @@ const (
 	// importTake is take_result(ptr, len u32): the guest has the pending result, exactly len bytes, copied to
 	// ptr. Any mismatch breaks the instance.
 	importTake = "take_result"
+	// importSecret is secret(ptr, len u32) u32: the guest reads the secret whose name is the len bytes at ptr; the
+	// host keeps the status-prefixed answer (wire.StatusOK and the value, or wire.StatusError and why, each a
+	// wire message) as the pending result and returns its length.
+	importSecret = "secret"
 )
 
 // keepPending bounds the pending-result buffer an instance keeps between host calls; larger ones are dropped
@@ -33,6 +38,9 @@ const keepPending = 64 << 10
 
 // ErrHTTPDisabled is the refusal instances created without an [HTTPFunc] answer every request with.
 var ErrHTTPDisabled = errors.New("plg: HTTP is not enabled for this plugin")
+
+// ErrNoSecrets is the refusal instances created without a [SecretFunc] answer every secret read with.
+var ErrNoSecrets = errors.New("plg: secrets are not available to this plugin")
 
 // ErrStopped fails what an instance does once its runtime closes ([Runtime.Close]): the initialization, call or
 // step in progress (its context, which the host function it waits in has, ends with ErrStopped as the cause) and
@@ -53,6 +61,13 @@ type HTTPFunc func(ctx context.Context, dst, req []byte, n int) []byte
 // serves every instance created with it, so it must be safe for concurrent use.
 type HostFunc func(ctx context.Context, dst []byte, method uint32, args []byte) ([]byte, error)
 
+// SecretFunc serves a guest's secret: it appends the status-prefixed answer to a read of the secret name to dst
+// (wire.StatusOK and the value, otherwise wire.StatusError and why, each a wire message). name aliases guest
+// memory and is valid only until it returns. ctx is the context of the plg_init, plg_call or step in progress,
+// which the instance's stop ends too. One SecretFunc serves every instance created with it, so it must be safe
+// for concurrent use.
+type SecretFunc func(ctx context.Context, dst, name []byte) []byte
+
 // hostState is what the host imports know about one instance. Only the goroutine calling the instance touches
 // it, a guest calling its imports synchronously, except for its stop (stage, stopped and the cancel the stage
 // hands over), which [Runtime.Close] triggers from another goroutine.
@@ -60,6 +75,7 @@ type hostState struct {
 	http        HTTPFunc
 	refuses     func(n, size int) bool // see InstanceOptions.HTTPRefuses
 	host        HostFunc
+	secret      SecretFunc
 	runtime     *Runtime                // the instance's, told when a guest run its stop found leaves
 	cancel      context.CancelCauseFunc // ends the context of the guest run in progress (stage hostBusy)
 	calls       map[uint32]int          // the multiplexed calls in flight: the requests each started with http_start
@@ -84,7 +100,8 @@ const (
 
 func newHostState(opts *InstanceOptions, rt *Runtime) *hostState {
 	return &hostState{
-		http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host, runtime: rt, stopped: make(chan struct{}),
+		http: opts.HTTP, refuses: opts.HTTPRefuses, host: opts.Host, secret: opts.Secret, runtime: rt,
+		stopped: make(chan struct{}),
 	}
 }
 
@@ -169,6 +186,9 @@ func (r *Runtime) instantiateHostModule(ctx context.Context, rt wazero.Runtime) 
 		NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(r.httpStart), []api.ValueType{i32, i32, i32}, []api.ValueType{i32}).
 		Export(importHTTPStart).
+		NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(r.secret), []api.ValueType{i32, i32}, []api.ValueType{i32}).
+		Export(importSecret).
 		Instantiate(ctx)
 	if err != nil { // only a programming error in the definitions above, on a fresh runtime
 		panic(fmt.Sprintf("engine: instantiating the %s host module: %v", hostModule, err))
@@ -228,6 +248,27 @@ func (r *Runtime) hostCall(ctx context.Context, mod api.Module, stack []uint64) 
 
 	state.pending, state.ready = answer, true
 	stack[0] = api.EncodeU32(uint32(len(answer))) //nolint:gosec // G115: answers are bounded far below 4 GiB
+}
+
+// secret serves secret. As in httpRoundTrip, ABI violations panic, which traps the call and breaks the instance.
+// The read runs under the call's context, which the instance's stop ends; an instance created without a
+// [SecretFunc] answers every read with [ErrNoSecrets].
+func (r *Runtime) secret(ctx context.Context, mod api.Module, stack []uint64) {
+	state := r.state(mod)
+
+	name, ok := mod.Memory().Read(api.DecodeU32(stack[0]), api.DecodeU32(stack[1]))
+	if !ok {
+		panic(fmt.Errorf("%w: %s name out of range", ErrABI, importSecret))
+	}
+
+	if state.secret == nil {
+		state.pending = wire.AppendMessage(append(state.pending[:0], byte(wire.StatusError)), ErrNoSecrets.Error())
+	} else {
+		state.pending = state.secret(ctx, state.pending[:0], name)
+	}
+
+	state.ready = true
+	stack[0] = api.EncodeU32(uint32(len(state.pending))) //nolint:gosec // G115: answers are bounded far below 4 GiB
 }
 
 // takeResult serves take_result.

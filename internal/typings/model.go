@@ -306,8 +306,8 @@ func reservedName(name string) bool {
 var (
 	// The globals the declarations declare (TypeScript's and Lua's), and the names that cannot name a parameter
 	// in strict mode.
-	globals = setOf("plg", "host", "console", "fetch", "Headers", "Response", "http", "json", "globalThis",
-		"arguments", "eval", "self")
+	globals = setOf("plg", "host", "console", "fetch", "Headers", "Response", "http", "json", "secrets",
+		"globalThis", "arguments", "eval", "self")
 	tsKeywords = setOf("break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
 		"do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import", "in",
 		"instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var",

@@ -116,6 +116,10 @@ type Descriptor struct {
 	// Version identifies the plugin's revision. When it is empty, Register uses a content hash of the files it
 	// loads (see [FSStorage]).
 	Version string
+	// Secrets names the secrets the plugin may read, which the Register's [WithSecrets] resolves: each 1 to
+	// [MaxSecretName] ASCII letters, digits, '_', '-' or '.', starting with a letter, at most [MaxSecrets], none
+	// twice. Reading another name fails. Register keeps it: do not modify it once listed.
+	Secrets []string
 	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit. It can only
 	// lower that limit.
 	MemoryLimit uint64
@@ -180,7 +184,7 @@ func (s *MemoryStorage) Delete(key string) {
 // List returns the stored plugins, sorted by key.
 func (s *MemoryStorage) List(context.Context) ([]Descriptor, error) {
 	descs := make([]Descriptor, 0, s.plugins.Size())
-	for _, p := range s.plugins.All() {
+	for _, p := range s.plugins.All() { //nolint:gocritic // rangeValCopy: xsync's iterator yields values
 		descs = append(descs, p.desc)
 	}
 

@@ -59,6 +59,13 @@ declare namespace plg {
     warn(...data: unknown[]): void;
     error(...data: unknown[]): void;
   }
+
+  /** The secrets plugin.yaml declares (secrets: [...]), which the service resolves. */
+  interface Secrets {
+    /** Returns the value of the secret name; throws an Error when plugin.yaml does not declare it or it cannot be
+     * resolved. */
+    get(name: string): string;
+  }
 }
 
 declare class Headers implements Iterable<[string, string]> {
@@ -94,6 +101,8 @@ declare class Response {
 declare function fetch(input: string | { url: string }, init?: plg.RequestInit): Promise<Response>;
 
 declare const console: plg.Console;
+
+declare const secrets: plg.Secrets;
 
 /** A text file the plugin imports: its contents. */
 declare module "*.txt" {

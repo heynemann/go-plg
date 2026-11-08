@@ -21,6 +21,10 @@ const offlineStorage = "plg validate"
 // errStubHost fails every call of a Host method under plg validate.
 var errStubHost = errors.New("plg validate runs plugins without the service's Host")
 
+// errStubSecrets fails every secret read under plg validate outside a test case.
+var errStubSecrets = errors.New("plg validate runs plugins without the service's secrets; test cases fake them " +
+	"(secrets)")
+
 //nolint:gochecknoinits // plg validate reaches plg's unexported loading code through offline.Check and offline.Open
 func init() {
 	offline.Check = checkOffline
@@ -110,14 +114,16 @@ func checkOffline(ctx context.Context, spec *offline.Contract, plugin *offline.P
 }
 
 // offlineOptions are the Register options of a plg validate check: its storage, its limits (a pool of one instance
-// by default: the check runs one), its ownership rule and its Go guest.
+// by default: the check runs one), its ownership rule, its Go guest and its secrets.
 func offlineOptions(opts *offline.Options) []RegisterOption {
 	low, high := 1, 1
 	if opts.Limits.PoolMax != 0 {
 		low, high = opts.Limits.PoolMin, opts.Limits.PoolMax
 	}
 
-	options := []RegisterOption{WithStorage(NewMemoryStorage(offlineStorage)), WithPool(low, high)}
+	options := []RegisterOption{
+		WithStorage(NewMemoryStorage(offlineStorage)), WithPool(low, high), WithSecrets(offlineSecrets(opts.Secrets)),
+	}
 
 	if opts.Limits.Memory != 0 {
 		options = append(options, WithMemoryLimit(opts.Limits.Memory))
@@ -132,6 +138,15 @@ func offlineOptions(opts *offline.Options) []RegisterOption {
 	}
 
 	return options
+}
+
+// offlineSecrets returns the WithSecrets resolver answering reads with read, or failing them all without it.
+func offlineSecrets(read func(ctx context.Context, name string) (string, error)) secretResolver {
+	if read == nil {
+		return func(context.Context, PluginInfo, string) (string, error) { return "", errStubSecrets }
+	}
+
+	return func(ctx context.Context, _ PluginInfo, name string) (string, error) { return read(ctx, name) }
 }
 
 // offlineContract prepares the contract plg validate described, checking its methods as Register checks an

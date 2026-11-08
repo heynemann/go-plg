@@ -34,6 +34,7 @@ IMPORT("host_call") uint32_t plg_host_call(uint32_t method, uint32_t ptr, uint32
 IMPORT("http_roundtrip") uint32_t plg_http_roundtrip(uint32_t ptr, uint32_t len);
 IMPORT("take_result") void plg_take_result(uint32_t ptr, uint32_t len);
 IMPORT("http_start") uint32_t plg_http_start(uint32_t call, uint32_t ptr, uint32_t len);
+IMPORT("secret") uint32_t plg_secret(uint32_t ptr, uint32_t len);
 
 // The prelude: a function expression taking the natives object (prelude.js).
 static const char prelude[] = {
@@ -1151,6 +1152,26 @@ static JSValue native_write(JSContext *c, JSValueConst this_val, int argc, JSVal
   return JS_UNDEFINED;
 }
 
+// secret(name) returns the value of the secret name, which plugin.yaml declares, or throws an Error with the host's
+// reason. No plugin code runs between the read and the decoding of its answer.
+static JSValue native_secret(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+  (void)this_val;
+  size_t n;
+  const char *name = JS_ToCStringLen(c, &n, argc ? argv[0] : JS_UNDEFINED);
+  if (!name) return JS_EXCEPTION;
+  uint32_t size = plg_secret((uint32_t)(uintptr_t)name, (uint32_t)n);
+  JS_FreeCString(c, name);
+  if (!take(size)) return JS_ThrowOutOfMemory(c);
+  rd_t r = {answer.p, answer.len, 0};
+  uint8_t status;
+  const char *s;
+  uint32_t sn;
+  if (!rd_u8(&r, &status) || !rd_str(&r, &s, &sn) || r.off != r.len)
+    return JS_ThrowInternalError(c, "plg: secrets.get: malformed answer");
+  if (status == ST_OK) return JS_NewStringLen(c, s, sn);
+  return JS_Throw(c, error_value("Error", s, sn));
+}
+
 // ---- multiplexed steps: state ----
 
 // In a multiplexed step (plg_start, plg_resume), fetch hands its request to the host with http_start and gets a
@@ -1332,7 +1353,8 @@ static bool setup(void) {
   return true;
 }
 
-// globals installs the host object and runs the prelude, which installs console, fetch, Headers and Response.
+// globals installs the host object and runs the prelude, which installs console, fetch, Headers, Response and
+// secrets.
 static bool globals(void) {
   JSValue g = JS_GetGlobalObject(ctx);
   JSValue host = JS_NewObject(ctx);
@@ -1348,7 +1370,8 @@ static bool globals(void) {
        JS_SetPropertyStr(ctx, natives, "write", JS_NewCFunction(ctx, native_write, "write", 2)) >= 0 &&
        JS_SetPropertyStr(ctx, natives, "http", JS_NewCFunction(ctx, native_http, "http", 4)) >= 0 &&
        JS_SetPropertyStr(ctx, natives, "utf8Decode", JS_NewCFunction(ctx, native_decode, "utf8Decode", 1)) >= 0 &&
-       JS_SetPropertyStr(ctx, natives, "utf8Encode", JS_NewCFunction(ctx, native_encode, "utf8Encode", 1)) >= 0;
+       JS_SetPropertyStr(ctx, natives, "utf8Encode", JS_NewCFunction(ctx, native_encode, "utf8Encode", 1)) >= 0 &&
+       JS_SetPropertyStr(ctx, natives, "secret", JS_NewCFunction(ctx, native_secret, "secret", 1)) >= 0;
   JSValue fn = ok ? JS_Eval(ctx, prelude, sizeof prelude - 1, "plg:prelude", JS_EVAL_TYPE_GLOBAL) : JS_EXCEPTION;
   JSValue r = JS_IsException(fn) ? JS_EXCEPTION : JS_Call(ctx, fn, JS_UNDEFINED, 1, (JSValueConst *)&natives);
   ok = ok && !JS_IsException(r);

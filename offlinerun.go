@@ -96,6 +96,11 @@ func (r *offlineRunner) Run(ctx context.Context, call *offline.Call) offline.Out
 	return r.call(ctx, launch, r.contr.methods[call.Method], call.Args)
 }
 
+// Secrets implements [offline.Runner].
+func (r *offlineRunner) Secrets() []string {
+	return r.desc.Secrets
+}
+
 // Close implements [offline.Runner].
 func (r *offlineRunner) Close(ctx context.Context) error {
 	for _, launch := range r.prepared {
@@ -139,6 +144,7 @@ func (r *offlineRunner) prepare(ctx context.Context, policy *offline.HTTP, src *
 	}
 
 	cfg.createTimeout = r.timeout
+	cfg.secretTTL = 0 // each case fakes its own values: none may serve another case's reads
 
 	if policy != nil {
 		cfg.httpTransport = policy.Transport

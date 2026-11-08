@@ -122,7 +122,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 
 	var reports []httpcap.Report
 
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: panicked,
 		Done:     func(_ context.Context, r httpcap.Report) { reports = append(reports, r) },
 	})
@@ -354,7 +354,7 @@ func TestRequestLogsCarryTheHooksAttr(t *testing.T) {
 	client := httpcap.Disabled(slog.New(slog.NewJSONHandler(&logs, nil)))
 	client.Close()
 
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: unexpectedPanic(t),
 		Done:     func(context.Context, httpcap.Report) {},
 		Attr:     slog.Group("owner", slog.String("team", "payments")),
@@ -459,7 +459,7 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan []byte)
 	reports := make(chan httpcap.Report, 1)
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: unexpectedPanic(t),
 		Done:     func(_ context.Context, r httpcap.Report) { reports <- r },
 	})
@@ -564,7 +564,7 @@ func TestRequestsCarryTheirSpanContext(t *testing.T) {
 
 	var ended []httpcap.Report
 
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: unexpectedPanic(t),
 		Done:     func(context.Context, httpcap.Report) {},
 		Trace: func(ctx context.Context) (context.Context, httpcap.SpanEnd) {
@@ -616,7 +616,7 @@ func benchClient(b *testing.B) benchTarget {
 
 	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}}
 
-	return benchTarget{handler: client.Handler("bench/p", hooks), req: request(http.MethodGet, srv.URL, nil, "")}
+	return benchTarget{handler: client.Handler("bench/p", &hooks), req: request(http.MethodGet, srv.URL, nil, "")}
 }
 
 // BenchmarkRoundTrip is the host side of one plugin request (checks, request, response encoding) against a
@@ -644,4 +644,43 @@ func BenchmarkRoundTripParallel(b *testing.B) {
 			dst = target.handler(b.Context(), dst[:0], target.req, 1)
 		}
 	})
+}
+
+// TestScrubHidesSecretsFromLogsAndReports: the Scrub hook rewrites the URL and the failure a request's log record
+// and report carry, keeping the failure's identity; the plugin's own answer is not scrubbed.
+func TestScrubHidesSecretsFromLogsAndReports(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(t, nil)
+	client, logs := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
+
+	var reports []httpcap.Report
+
+	handler := client.Handler("web/p", &httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(_ context.Context, r httpcap.Report) { reports = append(reports, r) },
+		Scrub:    func(s string) string { return strings.ReplaceAll(s, "tok9", "[secret k]") },
+	})
+
+	out := handler(t.Context(), nil, request("GET", srv.URL+"/tok9", nil, ""), 1)
+	_, err := httpabi.DecodeResponse(out)
+	require.NoError(t, err)
+
+	out = handler(t.Context(), nil, request("GET", "http://tok9.example/", nil, ""), 2)
+	_, err = httpabi.DecodeResponse(out)
+
+	hostErr, ok := errors.AsType[*httpabi.HostError](err)
+	require.True(t, ok, "%v", err)
+	assert.Contains(t, hostErr.Message, "tok9", "the plugin is told what it sent")
+
+	require.Len(t, reports, 2)
+	assert.Equal(t, srv.URL+"/[secret k]", reports[0].URL)
+	assert.Equal(t, "http://[secret k].example/", reports[1].URL)
+	require.ErrorIs(t, reports[1].Err, httpcap.ErrHostNotAllowed, "the scrubbed error keeps its identity")
+	assert.Contains(t, reports[1].Err.Error(), "[secret k]")
+	assert.NotContains(t, reports[1].Err.Error(), "tok9")
+
+	assert.NotContains(t, logs.String(), "tok9")
+	assert.Contains(t, logs.String(), `"url":"`+srv.URL+`/[secret k]"`)
+	assert.Equal(t, int64(1), srv.hits.Load(), "the request carried the real value")
 }

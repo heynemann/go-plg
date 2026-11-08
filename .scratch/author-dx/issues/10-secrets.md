@@ -4,9 +4,9 @@
 
 **Blocked by:** 04 (Test cases)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Integration tests in all three languages: declared read, undeclared refused, resolver error, rotation after the cache expires (synctest), redaction of a secret printed by the plugin, returned in an error and in a panic, and test-case fakes
-- [ ] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Integration tests in all three languages: declared read, undeclared refused, resolver error, rotation after the cache expires (synctest), redaction of a secret printed by the plugin, returned in an error and in a panic, and test-case fakes
+- [x] Guest artifacts rebuilt with `make guests` and committed; `make verify-guests` clean
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: verified on the PR)

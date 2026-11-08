@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/heynemann/go-plg/internal/goguest"
+	"github.com/heynemann/go-plg/internal/secretabi"
 )
 
 // guest is the instance's single guest. wasm exports are free functions, so it has to be package state; the
@@ -24,9 +25,11 @@ import (
 //nolint:gochecknoglobals,unused // see above; reached only through the //go:wasmexport functions
 var guest = goguest.New(os.Stdout, os.Stderr, callHost)
 
-// init makes the standard net/http client go through the host: plugins call http.Get and friends as usual.
+// init makes the standard net/http client go through the host, so plugins call http.Get and friends as usual, and
+// plugin.Secret read the host's secrets.
 func init() { //nolint:gochecknoinits // a reactor has no other hook that runs before the plugin is loaded
 	http.DefaultTransport = goguest.Transport{Exchange: exchange}
+	secretabi.Read = readSecret
 }
 
 // httpRoundTrip hands the encoded request at ptr to the host, which makes the request and keeps its encoded
@@ -49,6 +52,24 @@ func exchange(req []byte) []byte {
 	takeResult(ptr(resp), size)
 
 	return resp
+}
+
+// secretImport hands the secret name at ptr to the host, which keeps its status-prefixed answer for takeResult;
+// it returns the answer's length.
+//
+//go:wasmimport plg secret
+func secretImport(ptr, size uint32) uint32
+
+// readSecret reads the secret name from the host.
+func readSecret(name string) (string, error) {
+	addr := uint32(uintptr(unsafe.Pointer(unsafe.StringData(name)))) //nolint:gosec // G103,G115: wasm32 address
+	size := secretImport(addr, uint32(len(name)))                    //nolint:gosec // G115: wasm32 lengths fit 32 bits
+	runtime.KeepAlive(name)
+
+	answer := make([]byte, size)
+	takeResult(ptr(answer), size)
+
+	return goguest.SecretAnswer(answer) //nolint:wrapcheck // the host's reason reaches the plugin as is
 }
 
 // hostCall hands the encoded arguments at ptr of a call to the Host method with the given index to the host,

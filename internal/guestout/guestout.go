@@ -1,6 +1,7 @@
 // Package guestout captures a guest instance's stdout and stderr. Complete lines go to slog, tagged with the
 // plugin key and the stream (and the trace and span IDs of the step's span), within a budget per step; the last
-// bytes of stderr are kept so that a failure can report what the guest wrote, such as its traceback.
+// bytes of stderr are kept so that a failure can report what the guest wrote, such as its traceback. Both are
+// scrubbed of the plugin's secrets ([redact.Redactor]).
 //
 // A Capture belongs to one instance and, like the instance, is used by one goroutine at a time.
 package guestout
@@ -12,6 +13,8 @@ import (
 	"log/slog"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 // Bounds.
@@ -31,7 +34,8 @@ type Capture struct {
 	logger *slog.Logger
 	// ctx is the context of the step in progress, from Begin to End: the guest writes inside a step's host
 	// function, which hands its writer no context, and the records are logged with the step's.
-	ctx     context.Context //nolint:containedctx // the step's, see above; nil between steps
+	ctx     context.Context  //nolint:containedctx // the step's, see above; nil between steps
+	secrets *redact.Redactor // scrubs lines and the tail; nil scrubs nothing
 	key     string
 	tail    []byte // ring of the last TailSize bytes of stderr, allocated on the first write
 	stdout  stream
@@ -51,9 +55,10 @@ type stream struct {
 	level   slog.Level
 }
 
-// New returns the capture of an instance of the plugin with the given key.
-func New(logger *slog.Logger, key string) *Capture {
-	capture := &Capture{logger: logger, key: key}
+// New returns the capture of an instance of the plugin with the given key, scrubbing what it reports of secrets'
+// values (nil: none).
+func New(logger *slog.Logger, key string, secrets *redact.Redactor) *Capture {
+	capture := &Capture{logger: logger, key: key, secrets: secrets}
 	capture.stdout = stream{capture: capture, name: "stdout", level: slog.LevelInfo}
 	capture.stderr = stream{capture: capture, name: "stderr", level: slog.LevelWarn, keep: true}
 
@@ -88,7 +93,8 @@ func (c *Capture) End(ctx context.Context) {
 	c.ctx = nil
 }
 
-// Guest returns what stderr received since the step began: its last [TailSize] bytes at most.
+// Guest returns what stderr received since the step began: its last [TailSize] bytes at most, scrubbed. When the
+// step wrote more than that, a start that may be the end of a secret's value is left out.
 func (c *Capture) Guest() string {
 	n := min(c.written-c.mark, TailSize)
 	if n == 0 {
@@ -99,7 +105,11 @@ func (c *Capture) Guest() string {
 	k := copy(out, c.tail[(c.written-n)%TailSize:])
 	copy(out[k:], c.tail)
 
-	return string(out)
+	if c.written-c.mark > TailSize {
+		out = out[c.secrets.Trim(out):]
+	}
+
+	return c.secrets.String(string(out))
 }
 
 // keepTail appends data to the ring of stderr's last bytes.
@@ -122,11 +132,13 @@ func (c *Capture) keepTail(data []byte) {
 }
 
 // Write logs every complete line of data and keeps the rest for the next write. It never fails. The lines are
-// logged with the context of the step in progress (see [Capture.Begin]).
+// logged with the context of the step in progress (see [Capture.Begin]). A line longer than [MaxLine] is logged in
+// pieces, cut where no secret's value is split.
 //
 // Its cost is linear in len(data) at most, since the guest's write runs in a host function that no deadline
 // interrupts: a newline is searched for only within the line being filled, and once the step's budget and its
-// truncation notice are spent the rest of the step is dropped unread (stderr's tail is still kept).
+// truncation notice are spent the rest of the step is dropped unread (stderr's tail is still kept). A cut keeps
+// less than half a piece for the next one.
 func (s *stream) Write(data []byte) (int, error) {
 	if s.keep {
 		s.capture.keepTail(data)
@@ -143,9 +155,12 @@ func (s *stream) Write(data []byte) (int, error) {
 
 		if end < 0 && len(rest) > room {
 			s.line = append(s.line, rest[:room]...)
-			s.emit(ctx)
-
 			rest = rest[room:]
+
+			cut := s.capture.secrets.Cut(s.line)
+			s.emit(ctx, s.line[:cut])
+
+			s.line = s.line[:copy(s.line, s.line[cut:])]
 
 			continue
 		}
@@ -157,8 +172,9 @@ func (s *stream) Write(data []byte) (int, error) {
 		}
 
 		s.line = append(s.line, rest[:end]...)
-		s.emit(ctx)
+		s.emit(ctx, s.line)
 
+		s.line = s.line[:0]
 		rest = rest[end+1:]
 	}
 
@@ -167,15 +183,14 @@ func (s *stream) Write(data []byte) (int, error) {
 
 func (s *stream) flush(ctx context.Context) {
 	if len(s.line) > 0 {
-		s.emit(ctx)
+		s.emit(ctx, s.line)
+
+		s.line = s.line[:0]
 	}
 }
 
-// emit logs the buffered line within the step's budget, with ctx, the step's context, and the IDs of its span.
-func (s *stream) emit(ctx context.Context) {
-	line := s.line
-	s.line = s.line[:0]
-
+// emit logs line, scrubbed, within the step's budget, with ctx, the step's context, and the IDs of its span.
+func (s *stream) emit(ctx context.Context, line []byte) {
 	if s.logged >= StepBudget {
 		if !s.dropped {
 			s.dropped = true
@@ -189,7 +204,10 @@ func (s *stream) emit(ctx context.Context) {
 	s.logged += len(line) + 1
 
 	attrs := [...]slog.Attr{
-		slog.String("key", s.capture.key), slog.String("stream", s.name), slog.String("line", string(line)), {}, {},
+		slog.String("key", s.capture.key), slog.String("stream", s.name),
+		slog.String("line", s.capture.secrets.String(string(line))),
+		{},
+		{},
 	}
 	n := 3
 

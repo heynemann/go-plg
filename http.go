@@ -7,6 +7,7 @@ import (
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 // HTTPPolicy lets the plugins of one Register call make HTTP requests, which the host makes on their behalf.
@@ -92,15 +93,21 @@ func httpClient(cfg *registerConfig, logger *slog.Logger) (*httpcap.Client, erro
 }
 
 // httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
-// Register call's policy, its panics reported, its requests counted in meters and traced in spans. A
-// validation's requests ([IsValidation]) are logged with validation=true.
+// Register call's policy, its panics reported, its requests counted in meters and traced in spans, the logged
+// and traced URLs and errors scrubbed of the version's secrets. A validation's requests ([IsValidation]) are
+// logged with validation=true.
 func (c *Container) httpHandler(reg *registration, key string, lang Language, owner *ownerTags,
-	meters *pluginMeters, spans *pluginSpans,
+	meters *pluginMeters, spans *pluginSpans, secrets *redact.Redactor,
 ) engine.HTTPFunc {
-	return reg.http.Handler(key, httpcap.Hooks{
+	hooks := &httpcap.Hooks{
 		Panicked: c.httpPanicked(key, lang, owner), Done: c.httpDone(key, lang, meters), Attr: owner.log,
 		Mark: validationMark, Trace: spans.httpRequest,
-	})
+	}
+	if secrets != nil {
+		hooks.Scrub = secrets.String
+	}
+
+	return reg.http.Handler(key, hooks)
 }
 
 // validationMark is the attribute an HTTP request is logged with when it is a validation's.

@@ -35,6 +35,7 @@ HTTP allowlist).
 - [Limits, pools and the memory budget](#limits-pools-and-the-memory-budget)
 - [HTTP](#http)
 - [Calling back into the service: the Host interface](#calling-back-into-the-service-the-host-interface)
+- [Secrets](#secrets)
 - [Reloading and polling](#reloading-and-polling)
 - [Stability guarantees and `PanicError`](#stability-guarantees-and-panicerror)
 - [Logs, metrics and traces](#logs-metrics-and-traces)
@@ -604,6 +605,7 @@ cases:
     input: {code: NOPE}
     http:                        # HTTP stubs: method (GET by default) and URL; status, headers, body; times
       - {url: "https://coupons.example.com/codes/NOPE", status: 404}
+    secrets: {coupon_token: t0k3n} # fakes of plugin.yaml's secrets; null makes the read fail
     expect:
       error: unknown coupon NOPE # a substring of the error the plugin returned or threw
 ```
@@ -616,6 +618,8 @@ cases:
   calls a stub must answer (`times: 0`: never). **http:** a request no stub matches fails the case; the policy is
   enforced first, so a host it refuses never reaches a stub. Stubs never dial, so the private-network protection
   has nothing to check.
+- **secrets:** each secret the call (or `Create`) reads must be faked; a read the case does not fake, or a fake of
+  a name `plugin.yaml` does not declare, fails the case. Every read gets the case's value (no cache across cases).
 - **expect:** `result` (a list when the method has several results), `error` (panics, traps and timeouts never
   match it), or `issues` (Validate's; fields left out match anything).
 
@@ -830,7 +834,8 @@ Built in:
   memoryLimit: 67108864
   ```
 
-  An optional `owner` block says who owns the plugin (see [Ownership](#ownership)).
+  An optional `owner` block says who owns the plugin (see [Ownership](#ownership)), and an optional `secrets` list
+  names the secrets it reads (see [Secrets](#secrets)).
 
   `implements` (see [Declaring the interface](#declaring-the-interface-implements)), `language` (`go`, `lua` or
   `typescript`) and `entrypoint` are required; `version` is optional (without it,
@@ -1189,6 +1194,50 @@ Go plugins receive it in `Create(customers pricing.Customers)`; Lua and TypeScri
 runs). An error it returns reaches the plugin with the same message; a panic in it is recovered and reaches the
 plugin as an error, and the service keeps running. `impl` is called concurrently by a plugin's instances, so it
 must be safe for concurrent use, and it must not wait on a call to the same plugin (that instance is busy).
+
+## Secrets
+
+Plugins calling third-party APIs get their credentials from the service instead of their code. A plugin declares
+the names it reads in its `plugin.yaml`:
+
+```yaml
+secrets: [coupon_token, stripe_key]   # 1 to 64 letters, digits, _ - . each; at most 64
+```
+
+and the registration resolves them, from a vault, the environment or anything else:
+
+```go
+plg.Register[pricing.Rule](ctx, c, "pricing", plg.WithStorage(s),
+	plg.WithSecrets(func(ctx context.Context, info plg.PluginInfo, name string) (string, error) {
+		return vault.Read(ctx, "plg/"+info.Owner.Team.Name+"/"+name)
+	}))
+```
+
+```go
+token, err := plugin.Secret(ctx, "coupon_token") // Go: github.com/heynemann/go-plg/plugin
+```
+```lua
+local token = secrets.get("coupon_token")        -- Lua: raises an error when the read fails
+```
+```ts
+const token = secrets.get("coupon_token");       // TypeScript: throws an Error when the read fails
+```
+
+- **Only declared names.** Reading a name `plugin.yaml` does not declare fails without calling the resolver;
+  changing the list reloads the plugin even at the same version.
+- **Resolved on access, cached briefly.** The resolver runs on the plugin's read, with the plugin call's `ctx`
+  (Create's, or validation's) and the version's `PluginInfo`. A value serves that version's reads for 30 seconds,
+  then the next read resolves it again: rotated secrets reach plugins without a reload.
+- **Clear failures, nothing leaked.** Without `WithSecrets`, when the resolver fails or panics (a `PanicError` in
+  `PhaseCallback`, method `WithSecrets`), or returns more than `plg.MaxSecretSize` (64 KiB), the read fails. The
+  plugin is told the secret could not be resolved; why goes to the service's log only.
+- **Scrubbed.** plg replaces every value it resolved for a version (its newest 8 per secret) with
+  `[secret <name>]` in what it reports of the plugin: guest output, returned errors, panic values and stderr,
+  Validate issues, and HTTP log records and spans. It matches exact values: an encoded or sliced secret is not
+  caught. What a successful call returns is the service's and is not scrubbed.
+
+`plg validate` reads fail outside test cases; test cases fake them with `secrets:` (see
+[Test cases](#test-cases-testsyaml)).
 
 ## Reloading and polling
 

@@ -71,6 +71,9 @@ const contentVersionPrefix = "sha256:"
 //     links: {repository: ..., docs: ..., runbook: ..., issues: ...}
 //     labels: {tier: "1"}
 //
+//   - secrets (optional): the names of the secrets the plugin may read, [WithSecrets]'s, such as
+//     [stripe_key, crm.token]; see [Descriptor.Secrets].
+//
 // A plugin.yaml must be a regular file (a link to one is followed only where the tree allows it) of at most
 // [MaxManifestSize] bytes, in the strict subset of YAML [ParseManifest] describes: keys are case sensitive and
 // unknown keys are errors, so a misspelt key is not silently ignored. A plugin.yaml is never read: a directory

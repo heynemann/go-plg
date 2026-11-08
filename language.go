@@ -88,7 +88,8 @@ type launcher struct {
 	output  *slog.Logger
 	panics  *panicReporter
 	owner   *ownerTags
-	spans   *pluginSpans // the version's spans; nil traces nothing
+	spans   *pluginSpans   // the version's spans; nil traces nothing
+	secrets *pluginSecrets // the version's secrets, whose values the results' messages and output are scrubbed of
 	opts    engine.InstanceOptions
 	key     string
 	lang    Language
@@ -104,7 +105,7 @@ type launcher struct {
 //
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
 func (l *launcher) start(ctx context.Context) (instance, error) {
-	out := guestout.New(l.output, l.key)
+	out := guestout.New(l.output, l.key, l.secrets.redactor())
 	opts := l.opts
 	opts.Stdout, opts.Stderr = out.Stdout(), out.Stderr()
 
@@ -149,6 +150,7 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 func (l *launcher) create(ctx context.Context, inst *engine.Instance, out *guestout.Capture) error {
 	res, err := inst.Init(ctx, l.payload)
 	out.End(ctx)
+	l.scrub(&res)
 
 	switch {
 	case errors.Is(err, engine.ErrStopped):
@@ -206,6 +208,23 @@ func guestFailure(res engine.Result) any {
 	return fmt.Errorf("%w %s: %s", errGuestStatus, res.Status, res.Message)
 }
 
+// scrub scrubs the plugin version's secrets from the message of res, a guest's answer, unless it succeeded: the
+// message is the plugin's error, panic value or reason, which plg reports.
+func (l *launcher) scrub(res *engine.Result) {
+	if res.Status != wire.StatusOK {
+		res.Message = l.secrets.redactor().String(res.Message)
+	}
+}
+
+// scrubStep scrubs the results of a multiplexed step as [launcher.scrub] does.
+func (l *launcher) scrubStep(step *engine.Step) {
+	l.scrub(&step.Failure)
+
+	for i := range step.Done {
+		l.scrub(&step.Done[i].Result)
+	}
+}
+
 // guestInstance is a guest instance and the capture of its output: each step (call, close) begins and ends a
 // capture step, so that a failure reports what the guest wrote to stderr meanwhile.
 type guestInstance struct {
@@ -221,6 +240,7 @@ func (g *guestInstance) Start(ctx context.Context, call, method uint32, args []b
 
 	step, err := g.Instance.Start(ctx, call, method, args)
 	g.out.End(ctx)
+	g.launcher.scrubStep(&step)
 
 	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
@@ -231,6 +251,7 @@ func (g *guestInstance) Resume(ctx context.Context, request uint32, answer []byt
 
 	step, err := g.Instance.Resume(ctx, request, answer)
 	g.out.End(ctx)
+	g.launcher.scrubStep(&step)
 
 	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
@@ -240,6 +261,7 @@ func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (e
 
 	res, err := g.Instance.Call(ctx, method, args)
 	g.out.End(ctx)
+	g.launcher.scrub(&res)
 
 	return res, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
@@ -260,6 +282,8 @@ func (g *guestInstance) Close(ctx context.Context) error {
 	value := any(err)
 
 	if closeErr, ok := errors.AsType[*engine.CloseError](err); ok {
+		closeErr.Message = g.launcher.secrets.redactor().String(closeErr.Message)
+
 		if closeErr.Status == wire.StatusError {
 			return err //nolint:wrapcheck // the pool wraps close errors with the instance
 		}

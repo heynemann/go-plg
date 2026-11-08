@@ -454,7 +454,7 @@ func (c *Container) storageCall(ctx context.Context, key, method string, call fu
 }
 
 // checkDescriptor checks that a descriptor has a key, an entrypoint and a well-formed Implements, which it returns
-// parsed, a memory limit from one page to 4 GiB if any, and an owner within the limits.
+// parsed, a memory limit from one page to 4 GiB if any, an owner within the limits and valid secret names.
 func checkDescriptor(storeName string, desc *Descriptor) (contractref.Ref, error) {
 	if desc.Key == "" || desc.Entrypoint == "" {
 		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %+v without a key or an entrypoint",
@@ -478,14 +478,21 @@ func checkDescriptor(storeName string, desc *Descriptor) (contractref.Ref, error
 			desc.Key, err)
 	}
 
+	err = checkSecretNames(desc.Secrets)
+	if err != nil {
+		return contractref.Ref{}, fmt.Errorf("%w: storage %s lists %q: %w", ErrInvalidDescriptor, storeName,
+			desc.Key, err)
+	}
+
 	return ref, nil
 }
 
-// sameDescriptor reports whether a and b describe the same plugin version: every field, the owner included.
+// sameDescriptor reports whether a and b describe the same plugin version: every field, the owner and the secrets
+// included.
 func sameDescriptor(a, b *Descriptor) bool {
 	return a.Key == b.Key && a.Implements == b.Implements && a.Language == b.Language &&
 		a.Entrypoint == b.Entrypoint && a.Version == b.Version && a.MemoryLimit == b.MemoryLimit &&
-		a.owner().equal(b.owner())
+		a.owner().equal(b.owner()) && slices.Equal(a.Secrets, b.Secrets)
 }
 
 // loadAll reserves the listed plugins' worst-case memory in the container's budget and loads them; on failure
@@ -744,23 +751,33 @@ func checkLoad(reg *registration, src *source, report *Report) error {
 	return report.blocking()
 }
 
-// newLauncher returns the launcher of a plugin version's instances, which start from spec.
+// newLauncher returns the launcher of a plugin version's instances, which start from spec and read the secrets
+// the version declares.
 func (c *Container) newLauncher(reg *registration, key string, src *source, owner *ownerTags, spec launchSpec,
 	mod *engine.Module, meters *pluginMeters, spans *pluginSpans,
 ) *launcher {
+	output := c.panics.pluginLogger(key, src.desc.Language, owner)
+	info := PluginInfo{
+		Owner: *src.desc.owner(), Key: key, Version: src.desc.Version, Language: src.desc.Language,
+		Storage: src.storeName,
+	}
+	secrets := newPluginSecrets(reg.cfg, &info, src.desc.Secrets, c.panics, output, owner)
+
 	return &launcher{
 		mod:           mod,
-		output:        c.panics.pluginLogger(key, src.desc.Language, owner),
+		output:        output,
 		panics:        c.panics,
 		owner:         owner,
 		spans:         spans,
+		secrets:       secrets,
 		payload:       spec.payload,
 		createTimeout: reg.cfg.createTimeout,
 		opts: engine.InstanceOptions{
 			Mounts:      spec.mounts,
-			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters, spans),
+			HTTP:        c.httpHandler(reg, key, src.desc.Language, owner, meters, spans, secrets.redact),
 			HTTPRefuses: reg.http.Refuses,
 			Host:        reg.host.handler(key, src.desc.Language, owner, c.panics, spans),
+			Secret:      secrets.serve,
 		},
 		key:  key,
 		lang: src.desc.Language,

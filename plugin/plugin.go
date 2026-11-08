@@ -1,6 +1,7 @@
-// Package plugin is what Go plugins import from plg itself: the [Issue] their optional Validate method returns.
-// It is compiled into the Go guest's symbol tables (custom guests built by `plg build-guest` included), so a
-// plugin imports it by its import path, though its source is not part of the plugin:
+// Package plugin is what Go plugins import from plg itself: the [Issue] their optional Validate method returns and
+// [Secret], which reads the secrets their plugin.yaml declares. It is compiled into the Go guest's symbol tables
+// (custom guests built by `plg build-guest` included), so a plugin imports it by its import path, though its
+// source is not part of the plugin:
 //
 //	import "github.com/heynemann/go-plg/plugin"
 //
