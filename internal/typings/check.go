@@ -3,7 +3,6 @@ package typings
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"path"
 	"regexp"
 	"strconv"
@@ -22,16 +21,15 @@ const (
 	checkFile   = "check.ts"
 )
 
-// CheckTypeScript type-checks a TypeScript plugin, the directory plugin whose entrypoint is the file entrypoint,
-// against the typings, with the compiler options of their tsconfig.json: the plugin's own files (each against
-// the declarations), and that what its Create returns implements the interface. The plugin's typings must be
-// these (see [Typings.Stale]). The compiler reads a copy of the plugin's regular TypeScript, JavaScript and JSON
-// files: symbolic links are not followed, so a file they lead to, in or out of the plugin, is not read, and a
-// plugin over plg's limits (plg.MaxPluginSize and the others) fails with plg.ErrPluginTooLarge before any
-// file is read, as its load would. Diagnostics name the plugin's files relative to its directory, in the
-// compiler's order; those about what Create returns come last, placed at the plugin's export of Create (else at
-// the entrypoint's start), their message starting with "Create: ".
-func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker, plugin fs.FS,
+// CheckTypeScript type-checks a TypeScript plugin, whose files are plugin and whose entrypoint is the file
+// entrypoint, against the typings, with the compiler options of their tsconfig.json: the plugin's own files (each
+// against the declarations), and that what its Create returns implements the interface. The plugin's typings must
+// be these (see [Typings.Stale]). plugin is the in-memory copy of the plugin's files a storage takes as it loads
+// them (plg validate's snapshot), so the compiler reads only what loading the plugin would: no symbolic link, and
+// nothing of a plugin over plg's limits, which fails before it is checked. Diagnostics name the plugin's files
+// relative to its directory, in the compiler's order; those about what Create returns come last, placed at the
+// plugin's export of Create (else at the entrypoint's start), their message starting with "Create: ".
+func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker, plugin *memfs.FS,
 	entrypoint string,
 ) ([]tscheck.Diagnostic, error) {
 	if t.Language != LanguageTypeScript {
@@ -43,13 +41,8 @@ func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker,
 		return nil, err
 	}
 
-	files, err := regularFiles(ctx, plugin)
-	if err != nil {
-		return nil, err
-	}
-
 	diags, err := checker.Check(ctx, pluginMount, checkMount+"/"+TSConfigFile,
-		engine.Mount{FS: files, GuestPath: pluginMount}, engine.Mount{FS: project, GuestPath: checkMount})
+		engine.Mount{FS: plugin, GuestPath: pluginMount}, engine.Mount{FS: project, GuestPath: checkMount})
 	if err != nil {
 		return nil, fmt.Errorf("typings: %w", err)
 	}
@@ -69,7 +62,7 @@ func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker,
 		}
 
 		if source == nil {
-			source, _ = fs.ReadFile(files, entrypoint) //nolint:errcheck // without it the position is 1:1
+			source, _ = plugin.ReadFile(entrypoint) //nolint:errcheck // without it the position is 1:1
 		}
 
 		diag.File, diag.Message = entrypoint, "Create: "+diag.Message

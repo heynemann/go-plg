@@ -144,24 +144,33 @@ func packedDirs(dir string) ([]string, error) {
 	return inputs, nil
 }
 
-// snapshot, for plg pack, copies the plugin's files once as a storage loads them (plg.NewFSStorage's copy:
-// regular files, links inside the plugin left out, within the limits of a plugin's files) and reads the git state
-// of what they were copied from at that moment; validation then reads that copy, which is what is packed, so a
-// file changed on disk meanwhile is neither validated nor packed. A failure fails the plugin's pack step.
+// snapshot copies the plugin's files once as a storage loads them (plg.NewFSStorage's copy: regular files, links
+// inside the plugin left out, within the limits of a plugin's files, so a plugin over them fails with
+// plg.ErrPluginTooLarge as its load would, before any file is read whole). Every step after it reads that copy,
+// never the directory: what is type-checked, loaded and tested is one set of files, and for plg pack what is
+// packed, so a file changed on disk meanwhile is neither validated nor packed. plg pack also reads the git state
+// of what they were copied from at that moment. A failure fails the plugin's files step (pack's for plg pack).
 func (v *validation) snapshot(ctx context.Context) bool {
-	if v.packed == nil {
-		return true
+	step := "files"
+	if v.packed != nil {
+		step = "pack"
 	}
 
 	opened, err := plg.NewFSStorage(filepath.Dir(v.filesDir)).Open(ctx,
 		&plg.Descriptor{Key: filepath.Base(v.filesDir)})
 	if err != nil {
-		return v.failed("pack", err)
+		return v.failed(step, err)
 	}
 
 	files, ok := opened.(*memfs.FS)
 	if !ok { // unreachable: FSStorage's Open returns its copy
-		return v.failed("pack", fmt.Errorf("%w: %T", errNotCopied, opened))
+		return v.failed(step, fmt.Errorf("%w: %T", errNotCopied, opened))
+	}
+
+	v.files = files
+
+	if v.packed == nil {
+		return true
 	}
 
 	inputs := []string{v.dir}
@@ -173,23 +182,22 @@ func (v *validation) snapshot(ctx context.Context) bool {
 		inputs = append(inputs, v.repo.File())
 	}
 
-	state, err := gitState(ctx, v.env, inputs)
+	v.git, err = gitState(ctx, v.env, inputs)
 	if err != nil {
 		return v.failed("pack", err)
 	}
 
-	v.files, v.snap, v.git = files, files, state
-
 	return true
 }
 
-// checkSnapshot fails when the snapshot's plugin.yaml is not manifest, the plugin.yaml validation read before it.
+// checkSnapshot fails, for plg pack, when the snapshot's plugin.yaml is not manifest, the plugin.yaml validation
+// read before it.
 func (v *validation) checkSnapshot(manifest []byte) bool {
-	if v.snap == nil {
+	if v.packed == nil {
 		return true
 	}
 
-	data, err := v.snap.ReadFile("plugin.yaml")
+	data, err := v.files.ReadFile("plugin.yaml")
 	if err != nil || !bytes.Equal(data, manifest) {
 		return v.failed("pack", errManifestChanged)
 	}
@@ -199,7 +207,7 @@ func (v *validation) checkSnapshot(manifest []byte) bool {
 
 // keep passes the plugin plg pack validated on, with the files validation read.
 func (v *validation) keep(res *resolved) {
-	v.packed(&packed{report: v.report, files: v.snap, contract: res.mod, key: v.key(), root: v.root(), git: v.git})
+	v.packed(&packed{report: v.report, files: v.files, contract: res.mod, key: v.key(), root: v.root(), git: v.git})
 }
 
 // writeArtifacts writes the artifact of each plugin, <key>.plg in the directory out, and returns what it wrote,

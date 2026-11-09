@@ -174,12 +174,11 @@ type validation struct {
 	// contract module then fails, and what changes from one run to the next (the resource report, whether a
 	// custom guest was in the cache) is left out of the report.
 	packed func(*packed)
-	files  fs.FS
-	// filesDir is the directory of files: dir, or the temporary copy with the shared directories.
+	// files is the snapshot of the plugin's files every step after shared reads (see snapshot).
+	files *memfs.FS
+	// filesDir is the directory files was copied from: dir, or the temporary copy with the shared directories.
 	filesDir string
-	// snap and git are plg pack's snapshot of the plugin's files, which files then is, and the git state of what
-	// it was copied from.
-	snap       *memfs.FS
+	// git is, for plg pack, the git state of what files was copied from.
 	git        gitCommit
 	dir        string
 	arg        string

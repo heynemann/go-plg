@@ -4,8 +4,10 @@ package cli_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/cli"
 	"github.com/heynemann/go-plg/internal/testproxy"
 )
@@ -340,6 +343,55 @@ func TestValidateUsage(t *testing.T) {
 		assert.Equal(t, 2, got.code, tc.args)
 		assert.True(t, strings.HasPrefix(got.stderr, tc.want), "%v: %s", tc.args, got.stderr)
 		assert.Empty(t, got.stdout, tc.args)
+	}
+}
+
+// TestValidateRefusesPluginsOverTheLimits validates copies of a Lua and a Go plugin, one with a sparse source over
+// plg.MaxPluginFileSize (data.lua, data.go, which the syntax and sandbox steps would read), one with more than
+// plg.MaxPluginEntries entries: each fails at the files step with plg.ErrPluginTooLarge naming the entry, as its
+// load would, before any later step, and without reading the large file.
+//
+//nolint:paralleltest // runtime.MemStats.TotalAlloc over one run measures only it while no other test runs
+func TestValidateRefusesPluginsOverTheLimits(t *testing.T) {
+	for _, tc := range []struct{ plugin, source string }{{"luagood", "data.lua"}, {"gogood", "data.go"}} {
+		t.Run(tc.plugin+" with a sparse file", func(t *testing.T) {
+			dir := pluginCopy(t, tc.plugin)
+			big := filepath.Join(dir, tc.source)
+			require.NoError(t, os.WriteFile(big, nil, 0o600))
+			require.NoError(t, os.Truncate(big, 4*plg.MaxPluginFileSize))
+
+			var before, after runtime.MemStats
+
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+
+			got := validate(nil, dir)
+
+			runtime.ReadMemStats(&after)
+
+			assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+			assert.Contains(t, got.stdout, fmt.Sprintf("files     FAIL    plg: plugin directory %s: copying the "+
+				"plugin's files: %v: %s is over %d bytes\n", tc.plugin, plg.ErrPluginTooLarge, tc.source,
+				plg.MaxPluginFileSize))
+			assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(plg.MaxPluginFileSize/4), "nothing is read")
+		})
+
+		t.Run(tc.plugin+" with too many entries", func(t *testing.T) {
+			dir := pluginCopy(t, tc.plugin)
+			many := filepath.Join(dir, "many")
+			require.NoError(t, os.Mkdir(many, 0o750))
+
+			for i := range plg.MaxPluginEntries {
+				require.NoError(t, os.WriteFile(filepath.Join(many, fmt.Sprintf("f%05d", i)), nil, 0o600))
+			}
+
+			got := validate(nil, dir)
+			assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+			assert.Contains(t, got.stdout, fmt.Sprintf("files     FAIL    plg: plugin directory %s: copying the "+
+				"plugin's files: %v: many/f", tc.plugin, plg.ErrPluginTooLarge))
+			assert.Contains(t, got.stdout, fmt.Sprintf("over %d entries", plg.MaxPluginEntries))
+			assert.NotContains(t, got.stdout, "contract ", "no later step runs")
+		})
 	}
 }
 

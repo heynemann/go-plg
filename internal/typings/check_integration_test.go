@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/memfs"
 	"github.com/heynemann/go-plg/internal/tscheck"
@@ -39,27 +40,25 @@ func checker(t *testing.T) *tscheck.Checker {
 }
 
 // golden returns the golden directory's files, with plugin.ts replaced by source unless it is empty.
-func golden(t *testing.T, source string) fs.FS {
+func golden(t *testing.T, source string) *memfs.FS {
 	t.Helper()
 
 	dir := os.DirFS(filepath.Join("testdata", "golden"))
-	if source == "" {
-		return dir
-	}
 
 	entries, err := fs.ReadDir(dir, ".")
 	require.NoError(t, err)
 
 	var files memfs.Builder
 
-	require.NoError(t, files.Add("plugin.ts", []byte(source)))
-
 	for _, entry := range entries {
-		if entry.Name() != "plugin.ts" {
-			data, readErr := fs.ReadFile(dir, entry.Name())
-			require.NoError(t, readErr)
-			require.NoError(t, files.Add(entry.Name(), data))
+		data, readErr := fs.ReadFile(dir, entry.Name())
+		require.NoError(t, readErr)
+
+		if source != "" && entry.Name() == "plugin.ts" {
+			data = []byte(source)
 		}
+
+		require.NoError(t, files.Add(entry.Name(), data))
 	}
 
 	built, err := files.Build()
@@ -119,19 +118,21 @@ func TestCheckTypeScriptRefusesLuaTypings(t *testing.T) {
 	require.ErrorIs(t, err, typings.ErrLanguage)
 }
 
-// TestTypeCheckFollowsNoLinks type-checks a plugin directory on disk whose plugin.ts imports ./leak, a link to a
-// file outside the plugin: the compiler reads none of it, so the import is unresolved and nothing of the file it
-// leads to reaches a diagnostic.
+// TestTypeCheckFollowsNoLinks type-checks the snapshot a storage takes of a plugin directory on disk whose
+// plugin.ts imports ./leak, a link to another of its files (a link out of the plugin fails the snapshot itself):
+// the snapshot leaves the link out, so the import is unresolved and nothing of the file it leads to reaches a
+// diagnostic.
 func TestTypeCheckFollowsNoLinks(t *testing.T) {
 	t.Parallel()
 
 	typ, err := typings.Generate(typings.LanguageTypeScript, everything(t), nil)
 	require.NoError(t, err)
 
-	outside := filepath.Join(t.TempDir(), "secret.ts")
-	require.NoError(t, os.WriteFile(outside, []byte("export const leaked = theSecretValue;\n"), 0o600))
+	dir := filepath.Join(t.TempDir(), "plugin")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "secret"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret", "value.txt"),
+		[]byte("export const leaked = theSecretValue;\n"), 0o600))
 
-	dir := t.TempDir()
 	goldens := os.DirFS(filepath.Join("testdata", "golden"))
 
 	entries, err := fs.ReadDir(goldens, ".")
@@ -148,9 +149,15 @@ func TestTypeCheckFollowsNoLinks(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, entry.Name()), data, 0o600))
 	}
 
-	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "leak.ts")))
+	require.NoError(t, os.Symlink(filepath.Join("secret", "value.txt"), filepath.Join(dir, "leak.ts")))
 
-	diags, err := typ.CheckTypeScript(t.Context(), checker(t), os.DirFS(dir), "plugin.ts")
+	opened, err := plg.NewFSStorage(filepath.Dir(dir)).Open(t.Context(), &plg.Descriptor{Key: "plugin"})
+	require.NoError(t, err)
+
+	snapshot, ok := opened.(*memfs.FS)
+	require.True(t, ok)
+
+	diags, err := typ.CheckTypeScript(t.Context(), checker(t), snapshot, "plugin.ts")
 	require.NoError(t, err)
 	require.Len(t, diags, 1, diags)
 	assert.Equal(t, "plugin.ts:1:24: Cannot find module './leak' or its corresponding type declarations. (TS2307)",
@@ -202,7 +209,7 @@ func TestClashingNamesTypeCheck(t *testing.T) {
 
 	check := checker(t)
 
-	plugin := func(tiers string) fs.FS {
+	plugin := func(tiers string) *memfs.FS {
 		var files memfs.Builder
 
 		for _, file := range typ.Files {

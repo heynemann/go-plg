@@ -181,10 +181,10 @@ func settings(repo *authorrepo.Repo, file string) string {
 	return strings.Join(described, "; ")
 }
 
-// shared sets the plugin's files: its directory, or, when its author repository has shared directories, a
-// temporary copy of it with them copied in, which cleanup removes.
+// shared sets the plugin's files to a snapshot (see snapshot) of its directory, or, when its author repository has
+// shared directories, of a temporary copy of it with them copied in, which cleanup removes.
 func (v *validation) shared(ctx context.Context, desc *plg.Descriptor) (func(), bool) {
-	v.files, v.filesDir = os.DirFS(v.dir), v.dir
+	v.filesDir = v.dir
 
 	if v.repo == nil || len(v.repo.Shared) == 0 {
 		return func() {}, v.snapshot(ctx)
@@ -223,7 +223,7 @@ func (v *validation) shared(ctx context.Context, desc *plg.Descriptor) (func(), 
 
 	v.report.row("shared", resultOK, detail)
 
-	v.files, v.filesDir = os.DirFS(dir), dir
+	v.filesDir = dir
 
 	if !v.snapshot(ctx) {
 		cleanup()

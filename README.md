@@ -547,6 +547,12 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
 - **manifest:** `plugin.yaml` is read with `plg.ParseManifest`; the plugin's key is its directory's name. Its
   ownership is checked here: a missing owner is a warning issue, or fails the step when the author repository sets
   `requireOwnership`.
+- **files:** the plugin's files are copied once into memory, as a [storage](#storages) loads them (regular files,
+  symbolic links inside the plugin left out, within plg's limits: `plg.MaxPluginFileSize` and the others), from
+  the composed copy when the author repository has shared directories. Every later step (sandbox, types, syntax,
+  typings, load, test cases) reads that copy and never the directory, so they all see the same files, and a plugin
+  over the limits fails here with `plg.ErrPluginTooLarge`, as its load would, before any file is read whole. The
+  row shows only when the step fails (`plg pack` reports it as its `pack` step).
 - **contract:** the contract module is resolved at the version `implements` pins, through the local `go` command
   (`go mod download -json`), so `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `.netrc` credentials and the Go module cache
   work as for any Go build: once the module is in the cache, validating needs no network (`GOPROXY=off` works). The
@@ -585,9 +591,8 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
   against the interface even when nothing in the plugin says so: a method returning a string where the contract
   wants a bool fails with `plugin.ts:13:17: Create: Argument of type '() => Tiers' is not assignable to …` at the
   export of `Create` (annotating `Create(): cohort.Provider`, or a class with `implements cohort.Provider`, puts
-  the error on the method itself). The compiler reads a copy of the plugin's TypeScript, JavaScript and JSON files
-  (symbolic links not followed); a plugin over plg's [limits](#storages) (`plg.MaxPluginFileSize` and the others)
-  fails the step with `plg.ErrPluginTooLarge` before any file is read, as its load would.
+  the error on the method itself). The compiler reads the plugin's files from the `files` step's copy, so it
+  follows no symbolic link.
 - **guest** (Go plugins of a contract with `//plg:guest-packages`): the custom Go guest with those packages, built
   as `plg build-guest` builds one, from the plugin's module (its `go.mod` and `go.sum`, local `replace`s made
   absolute; the module must provide the non-standard packages). The guest's plg is the version the `plg` command was
