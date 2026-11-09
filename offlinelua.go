@@ -146,18 +146,41 @@ func luaSyntaxChunk(files fs.FS) ([]byte, error) {
 	return []byte(chunk.String()), nil
 }
 
-// luaLongString returns s as a Lua long string, exactly: the level of its brackets is the first that s never
+// luaLongString returns text as a Lua long string, exactly: the level of its brackets is the first that text never
 // closes (where it ends included), and the newline after the opening bracket, which Lua skips, keeps a first
-// newline of s.
-func luaLongString(s string) string {
-	level := ""
+// newline of text. One pass over text finds the levels it closes: a "]" followed by k "=" and a "]", or by k "=" and
+// its end (the closing bracket appended would complete it).
+func luaLongString(text string) string {
+	var closed []bool
 
-	for {
-		closing := "]" + level + "]"
-		if strings.Index(s+closing, closing) == len(s) {
-			return "[" + level + "[\n" + s + closing
+	for i := 0; i < len(text); i++ {
+		if text[i] != ']' {
+			continue
 		}
 
-		level += "="
+		j := i + 1
+		for j < len(text) && text[j] == '=' {
+			j++
+		}
+
+		if j == len(text) || text[j] == ']' {
+			k := j - i - 1
+			for len(closed) <= k {
+				closed = append(closed, false)
+			}
+
+			closed[k] = true
+		}
+
+		i = j - 1
 	}
+
+	level := 0
+	for level < len(closed) && closed[level] {
+		level++
+	}
+
+	eq := strings.Repeat("=", level)
+
+	return "[" + eq + "[\n" + text + "]" + eq + "]"
 }

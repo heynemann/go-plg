@@ -4712,12 +4712,39 @@ func TestLuaLongStringHoldsAnyText(t *testing.T) {
 		{"x]=", ""},
 		{"x]=]", "=="},
 		{"\nfirst", ""},
+		{"]", "="},
+		{"]=", ""},
+		{"]]=", "=="},
+		{"x]==", ""},
+		{"]==]]]x]=", "==="},
+		{"]]]=]]", "=="},
 	} {
 		got := luaLongString(tc.text)
 		assert.Equal(t, "["+tc.level+"[\n"+tc.text+"]"+tc.level+"]", got, "%q", tc.text)
 		assert.Equal(t, len(got)-len(tc.level)-2, strings.Index(got, "]"+tc.level+"]"), "%q: closed at its end only",
 			tc.text)
 	}
+}
+
+// TestLuaLongStringIsOnePass embeds a text closing every level up to k (k²/2 bytes): it gets level k+1, built
+// without a copy of the text per level tried.
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestLuaLongStringIsOnePass(t *testing.T) {
+	const k = 2000
+
+	var text strings.Builder
+
+	for level := range k + 1 {
+		text.WriteString("]" + strings.Repeat("=", level) + "]")
+	}
+
+	s := text.String()
+	level := strings.Repeat("=", k+1)
+	assert.Equal(t, "["+level+"[\n"+s+"]"+level+"]", luaLongString(s))
+
+	// The level's "=", the levels seen, and the result: never a copy of the text per level.
+	assert.LessOrEqual(t, testing.AllocsPerRun(5, func() { _ = luaLongString(s) }), 15.0)
 }
 
 // TestOfflineOwnershipIsTheLoadsRule returns the missing-ownership issue a load adds: a warning, an error when
