@@ -139,10 +139,12 @@ $(GOLANGCI_LINT):
 # Then fill the go build cache with what every custom Go guest build shares (`plg build-guest`, and plg validate
 # of a plugin naming guest packages: the root package's TestMain, internal/buildguest, internal/cli, cmd/plg),
 # built as internal/buildguest builds it: the yaegi command for this machine (-trimpath) and the default guest's
-# packages for wasip1 (-trimpath -buildvcs=false -buildmode=c-shared). CI's build cache is cold (setup-go's
-# cache is keyed by go.sum and holds the modules), so each of those tests compiled them itself, several at once,
-# while the root package ran: 60 CPU-seconds once here, after which the root package's TestMain takes 5 s
-# instead of 26 s (65 CPU-seconds) and internal/buildguest's tests 8 s instead of 44 s, on 4 CPUs.
+# packages for wasip1 (-trimpath -buildvcs=false -buildmode=c-shared). CI's build cache is stale, not empty:
+# setup-go restores it with the modules under a key from go.sum and the Go version only, saved by the first job
+# to end once that key is new and never again until it changes, so it holds what that job built from the tree
+# of its day and lacks what it did not build or what changed since; each of those tests compiled that itself,
+# several at once, while the root package ran: 60 CPU-seconds once here, after which the root package's TestMain
+# takes 5 s instead of 26 s (65 CPU-seconds) and internal/buildguest's tests 8 s instead of 44 s, on 4 CPUs.
 warm:
 	go run ./cmd/plg warm -validate
 	go build -trimpath -o /dev/null github.com/traefik/yaegi/cmd/yaegi
