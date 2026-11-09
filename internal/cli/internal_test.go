@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -95,7 +99,7 @@ func TestWatchTicksReportsChangedFiles(t *testing.T) {
 // TestWatchTicksStopsAtThePluginLimits: plg dev's watcher watches up to as many entries (files and directories,
 // the watched directories not counted) as a plugin can hold, plg.MaxPluginEntries, under the watched paths
 // together. A tick that finds one more sends ErrPluginTooLarge naming it, and the watcher stops; a watcher started
-// on that many fails at once.
+// on that many fails at once. The one more is the only entry of the last directory read, so it is the one named.
 func TestWatchTicksStopsAtThePluginLimits(t *testing.T) {
 	t.Parallel()
 
@@ -104,10 +108,10 @@ func TestWatchTicksStopsAtThePluginLimits(t *testing.T) {
 	repo := filepath.Join(dir, "plg.yaml")
 
 	require.NoError(t, os.MkdirAll(filepath.Join(plugin, "tests"), 0o750))
-	require.NoError(t, os.Mkdir(shared, 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(shared, "later"), 0o750))
 	require.NoError(t, os.WriteFile(repo, []byte("plugins: [plugin]\nshared: [lib]\n"), 0o600))
 
-	for i := range plg.MaxPluginEntries - 2 { // with tests and plg.yaml
+	for i := range plg.MaxPluginEntries - 3 { // with tests, plg.yaml and lib/later
 		parent := filepath.Join(plugin, "tests")
 		if i%2 == 1 {
 			parent = shared
@@ -122,7 +126,7 @@ func TestWatchTicksStopsAtThePluginLimits(t *testing.T) {
 	changes, err := watchTicks(t.Context(), paths, ticks)
 	require.NoError(t, err, "as many entries as a plugin holds are watched")
 
-	over := filepath.Join(shared, "over")
+	over := filepath.Join(shared, "later", "over")
 	require.NoError(t, os.WriteFile(over, nil, 0o600))
 
 	ticks <- time.Time{}
@@ -140,6 +144,74 @@ func TestWatchTicksStopsAtThePluginLimits(t *testing.T) {
 	changes, err = watchTicks(t.Context(), paths, ticks)
 	require.EqualError(t, err, want)
 	assert.Nil(t, changes)
+}
+
+// TestWatchReadsADirectoryUpToThePluginLimits: plg dev's watcher reads a directory in batches, counting each entry
+// as it is read, so a directory with more entries than a plugin can hold is read up to the one that goes over,
+// plg.MaxPluginEntries + 1 entries, not whole, and fails naming it.
+func TestWatchReadsADirectoryUpToThePluginLimits(t *testing.T) {
+	t.Parallel()
+
+	huge := t.TempDir()
+	for i := range plg.MaxPluginEntries + 4*watchBatch {
+		require.NoError(t, os.WriteFile(filepath.Join(huge, fmt.Sprintf("f%05d", i)), nil, 0o600))
+	}
+
+	read := 0
+	stamped := stamps{files: map[string]fileStamp{}, open: func(name string) (dirReader, error) {
+		dir, err := openDir(name)
+		if err != nil {
+			return nil, err
+		}
+
+		return countingDir{dirReader: dir, read: &read}, nil
+	}}
+
+	err := stamped.root(huge)
+	require.ErrorIs(t, err, plg.ErrPluginTooLarge)
+	assert.Regexp(t, fmt.Sprintf(`^plg: plugin files too large: %sf\d{5} brings the files plg dev watches over %d `+
+		`entries$`, regexp.QuoteMeta(huge+string(filepath.Separator)), plg.MaxPluginEntries), err.Error())
+	assert.Equal(t, plg.MaxPluginEntries+1, read, "the directory was read up to the entry that went over")
+}
+
+// countingDir is a directory that counts the entries read from it.
+type countingDir struct {
+	dirReader
+
+	read *int
+}
+
+func (d countingDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	entries, err := d.dirReader.ReadDir(n)
+	*d.read += len(entries)
+
+	return entries, err //nolint:wrapcheck // the directory's own error, io.EOF at its end
+}
+
+// TestWatchLeavesOutWhatItCannotRead: plg dev's watcher leaves out a watched path that is not there and a
+// directory it cannot open (here, opened as one that is gone), with the files under it, and watches the rest.
+func TestWatchLeavesOutWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	closed, kept, gone := filepath.Join(dir, "closed"), filepath.Join(dir, "kept.lua"), filepath.Join(dir, "gone")
+
+	require.NoError(t, os.Mkdir(closed, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(closed, "hidden.lua"), nil, 0o600))
+	require.NoError(t, os.WriteFile(kept, nil, 0o600))
+
+	stamped := stamps{files: map[string]fileStamp{}, open: func(name string) (dirReader, error) {
+		if name == closed {
+			name = gone
+		}
+
+		return openDir(name)
+	}}
+
+	require.NoError(t, stamped.root(gone))
+	require.NoError(t, stamped.root(dir))
+	assert.Equal(t, []string{kept}, slices.Collect(maps.Keys(stamped.files)))
+	assert.Equal(t, 2, stamped.entries, "closed and kept.lua")
 }
 
 // TestPollWatchReportsAChange runs plg dev's default watcher, which polls on its own ticker: a file created under the

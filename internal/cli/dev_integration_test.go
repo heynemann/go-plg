@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -361,22 +362,23 @@ func TestDevFailsWhenItsWatcherDoes(t *testing.T) {
 
 // TestDevWatchesNoMoreThanAPluginHolds runs plg dev, with its default watcher, on a plugin directory holding more
 // entries than a plugin can (plg.MaxPluginEntries): it fails before validating, naming the entry that brings the
-// files over.
+// files over, whichever the directory's read gave last.
 func TestDevWatchesNoMoreThanAPluginHolds(t *testing.T) {
 	t.Parallel()
 
 	plugin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("language: lua\n"), 0o600))
 
-	for i := range plg.MaxPluginEntries { // before plugin.yaml, in lexical order
+	for i := range plg.MaxPluginEntries {
 		require.NoError(t, os.WriteFile(filepath.Join(plugin, fmt.Sprintf("f%05d", i)), nil, 0o600))
 	}
 
 	ran := plgInEnv(nil, plugin, "dev")
 	assert.Equal(t, 1, ran.code)
 	assert.Empty(t, ran.stdout, "nothing was validated")
-	assert.Equal(t, fmt.Sprintf("plg dev: plg: plugin files too large: %s brings the files plg dev watches over %d "+
-		"entries\n", filepath.Join(plugin, "plugin.yaml"), plg.MaxPluginEntries), ran.stderr)
+	assert.Regexp(t, fmt.Sprintf(`^plg dev: plg: plugin files too large: %s(f\d{5}|plugin\.yaml) brings the files `+
+		`plg dev watches over %d entries\n$`, regexp.QuoteMeta(plugin+string(filepath.Separator)),
+		plg.MaxPluginEntries), ran.stderr)
 }
 
 // TestDevStopsAtTheEndOfItsInput runs plg dev with its default watcher on a plugin in a repository that does not

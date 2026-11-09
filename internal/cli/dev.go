@@ -459,37 +459,113 @@ type fileStamp struct {
 // directories and others, the directories paths name not counted) are more than a plugin can hold,
 // plg.MaxPluginEntries, it stops looking and fails with plg.ErrPluginTooLarge, naming the entry that went over.
 func snapshot(paths []string) (map[string]fileStamp, error) {
-	stamped := stamps{files: map[string]fileStamp{}}
+	stamped := stamps{files: map[string]fileStamp{}, open: openDir}
 
 	for _, root := range paths {
-		var over error
-
-		//nolint:errcheck,gosec // the walk function only returns fs.SkipAll, which WalkDir does not
-		filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil || path == root && entry.IsDir() {
-				return nil //nolint:nilerr // an unreadable file is left out, the walk goes on
-			}
-
-			over = stamped.add(path, entry)
-			if over != nil {
-				return fs.SkipAll
-			}
-
-			return nil
-		})
-
-		if over != nil {
-			return nil, over
+		err := stamped.root(root)
+		if err != nil {
+			return nil, err
 		}
 	}
 
 	return stamped.files, nil
 }
 
-// stamps is a snapshot being taken: the files stamped and the entries counted so far.
+// watchBatch is how many entries snapshot reads from a directory at once, at most.
+const watchBatch = 256
+
+// dirReader is a directory open for reading its entries.
+type dirReader interface {
+	ReadDir(n int) ([]fs.DirEntry, error)
+	Close() error
+}
+
+// openDir opens the directory name for reading its entries.
+//
+//nolint:ireturn // the directory as stamps opens it, which a test counts the reads of
+func openDir(name string) (dirReader, error) {
+	dir, err := os.Open(name) //nolint:gosec // a directory plg dev watches, which the author named
+	if err != nil {
+		return nil, err //nolint:wrapcheck // left out by the caller, whatever it says
+	}
+
+	return dir, nil
+}
+
+// stamps is a snapshot being taken: the files stamped and the entries counted so far, and how it opens a directory.
 type stamps struct {
 	files   map[string]fileStamp
+	open    func(name string) (dirReader, error)
 	entries int
+}
+
+// root stamps the file root, counted, or the files under the directory root, which is not.
+func (s *stamps) root(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil //nolint:nilerr // an unreadable path is left out
+	}
+
+	if !info.IsDir() {
+		return s.add(root, fs.FileInfoToDirEntry(info))
+	}
+
+	return s.dir(root)
+}
+
+// dir stamps the files under the directory name, then, in lexical order, those under its directories.
+func (s *stamps) dir(name string) error {
+	dirs, err := s.read(name)
+	if err != nil {
+		return err
+	}
+
+	slices.Sort(dirs)
+
+	for _, dir := range dirs {
+		err = s.dir(dir)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// read stamps the entries of the directory name and returns the paths of its directories. It reads the entries in
+// batches of at most watchBatch, and one more than the entries left, each counted as it is read, so that reading a
+// directory with more entries than a plugin can hold stops at the one that goes over. A directory it cannot open
+// is left out, and so are the entries it cannot read.
+func (s *stamps) read(name string) ([]string, error) {
+	dir, err := s.open(name)
+	if err != nil {
+		return nil, nil // an unreadable directory is left out
+	}
+
+	defer dir.Close() //nolint:errcheck // read only: closing cannot lose data
+
+	var dirs []string
+
+	for {
+		batch, err := dir.ReadDir(min(watchBatch, plg.MaxPluginEntries-s.entries+1))
+
+		for _, entry := range batch {
+			path := filepath.Join(name, entry.Name())
+
+			over := s.add(path, entry)
+			if over != nil {
+				return nil, over
+			}
+
+			if entry.IsDir() {
+				dirs = append(dirs, path)
+			}
+		}
+
+		if err != nil || len(batch) == 0 { // io.EOF at the end; an entry it cannot read leaves the rest out
+			return dirs, nil
+		}
+	}
 }
 
 // add counts the entry at path and stamps it if it is a file, failing with plg.ErrPluginTooLarge when it brings the
