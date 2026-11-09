@@ -1,6 +1,10 @@
 // Package s3storage is a [plg.Storage] over an S3 bucket (or any S3-compatible store, such as MinIO), built on
-// aws-sdk-go-v2. It keeps plg's built-in layout under a key prefix: one "directory" per plugin, named after the
-// plugin's key, holding the plugin's files and a plugin.yaml manifest read by [plg.ParseManifest]:
+// aws-sdk-go-v2. It keeps one of two layouts under a key prefix.
+//
+// # Plugin directories
+//
+// By default, plg's built-in layout: one "directory" per plugin, named after the plugin's key, holding the
+// plugin's files and a plugin.yaml manifest read by [plg.ParseManifest]:
 //
 //	plugins/bulk/plugin.yaml
 //	plugins/bulk/bulk.go
@@ -20,6 +24,30 @@
 // plugin's objects, at most [DefaultMaxPluginSize] bytes together unless [WithMaxPluginSize] says otherwise. List and
 // Open stop paging through a listing, failing with [plg.ErrPluginTooLarge], as soon as it brings a plugin directory
 // over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of object paths together.
+//
+// # Artifacts
+//
+// With [WithArtifacts], the artifacts `plg pack` writes, one object per plugin directly under the prefix, named
+// after the plugin's key with the .plg extension, as a CI job publishes them:
+//
+//	plugins/bundle.plg
+//	plugins/vip.plg
+//
+// Other objects (another extension, such as a vip.plg.new being uploaded, a name starting with a dot, or anything
+// in a "directory" under the prefix) are ignored. List downloads each artifact whose ETag it has not seen, opens it
+// with [plg.OpenArtifact] and describes it by its plugin.yaml, versioned by its provenance's digest (the version
+// Register would give it) unless the plugin.yaml names one; while an artifact's ETag stays the same, a poll
+// downloads nothing. Open downloads the artifact again and returns the [*plg.Artifact] itself, so [plg.Info] and
+// [plg.AdminHandler] show its provenance. Either refuses an artifact over the storage's maximum plugin size
+// ([DefaultMaxPluginSize] unless [WithMaxPluginSize] says otherwise) before reading any of it, as its listing or
+// its download states its size.
+//
+// A plugin.yaml that does not parse fails List, naming the artifact, with [plg.ErrInvalidManifest]. An artifact
+// that cannot be opened ([plg.ErrInvalidArtifact], [plg.ErrPluginTooLarge], or over the maximum size) fails it too,
+// with that error, unless an earlier version of it listed fine: then List describes it by that version's
+// plugin.yaml with a version of its own (from its ETag), and Open fails with the error. Register then rejects that
+// one plugin, its last good version serves on, and the rejection (an [plg.EventRejected] event, [plg.Info], the
+// admin JSON) names its key and its owner, while the other plugins reload as usual.
 package s3storage
 
 import (
@@ -62,15 +90,18 @@ const (
 // Storage is a [plg.Storage] over the plugins under a prefix of an S3 bucket. It is safe for concurrent use.
 type Storage struct {
 	client Client
-	// manifests caches each parsed plugin.yaml by its object key, with the ETag it was parsed at.
+	// manifests caches each parsed plugin.yaml by the key of the object it was read from (the plugin.yaml, or the
+	// artifact holding it), with that object's ETag.
 	manifests     *xsync.Map[string, manifest]
 	bucket        string
 	prefix        string
 	maxPluginSize int64
 	pageSize      int32
+	// artifacts selects the artifact layout ([WithArtifacts]).
+	artifacts bool
 }
 
-// manifest is a parsed plugin.yaml and the ETag of the object it was read from.
+// manifest is a parsed plugin.yaml, as List describes the plugin, and the ETag of the object it was read from.
 type manifest struct {
 	etag string
 	desc plg.Descriptor
@@ -81,8 +112,8 @@ var _ plg.Storage = (*Storage)(nil)
 // Option configures a [Storage].
 type Option func(*Storage)
 
-// WithPrefix sets the key prefix the plugin directories are under, such as "plugins/" (a missing final slash is
-// added); the default is the bucket's root.
+// WithPrefix sets the key prefix the plugin directories (or artifacts) are under, such as "plugins/" (a missing
+// final slash is added); the default is the bucket's root.
 func WithPrefix(prefix string) Option {
 	return func(s *Storage) {
 		if prefix != "" && !strings.HasSuffix(prefix, "/") {
@@ -93,12 +124,21 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
-// WithMaxPluginSize sets how many bytes of a plugin's objects Open downloads at most; a larger plugin fails to
-// open. The default is [DefaultMaxPluginSize]. Register refuses more than [plg.MaxPluginSize] bytes (and an object
-// over [plg.MaxPluginFileSize]) whatever this is, so a larger n only downloads plugins that cannot load.
+// WithMaxPluginSize sets how many bytes of a plugin's objects Open downloads at most (with [WithArtifacts], of its
+// artifact, which List downloads too); a larger plugin fails to open. The default is [DefaultMaxPluginSize].
+// Register refuses more than [plg.MaxPluginSize] bytes (and an object, or an artifact's file, over
+// [plg.MaxPluginFileSize]) whatever this is, so a larger n only downloads plugins that cannot load.
 func WithMaxPluginSize(n int64) Option {
 	return func(s *Storage) {
 		s.maxPluginSize = n
+	}
+}
+
+// WithArtifacts makes the storage serve the .plg artifacts `plg pack` writes, one object per plugin under the
+// prefix, instead of plugin directories (see the package documentation).
+func WithArtifacts() Option {
+	return func(s *Storage) {
+		s.artifacts = true
 	}
 }
 
@@ -134,8 +174,13 @@ type object struct {
 // List lists the prefix and returns its plugins, sorted by key. It fails with [plg.ErrInvalidManifest], naming
 // the plugin, if a plugin directory has no plugin.yaml or a malformed one, and with [plg.ErrPluginTooLarge] as soon
 // as the listing brings a plugin directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of
-// object paths, which Register would refuse to copy (see [Storage.Open]).
+// object paths, which Register would refuse to copy (see [Storage.Open]). With [WithArtifacts], it lists the
+// artifacts instead, as the package documentation says.
 func (s *Storage) List(ctx context.Context) ([]plg.Descriptor, error) {
+	if s.artifacts {
+		return s.listArtifacts(ctx)
+	}
+
 	dirs, err := s.listDirs(ctx)
 	if err != nil {
 		return nil, err
@@ -189,7 +234,7 @@ func listingVersion(objects []object) string {
 }
 
 var (
-	errPluginKey  = errors.New("a plugin key is a directory name")
+	errPluginKey  = errors.New("a plugin key names one directory or artifact under the prefix")
 	errObjectPath = errors.New("object key is not a valid path inside the plugin")
 )
 
@@ -198,11 +243,16 @@ var (
 // storage's maximum plugin size together. Its listing stops, failing with [plg.ErrPluginTooLarge], as soon as it
 // brings the directory over [plg.MaxPluginEntries] objects or [plg.MaxPluginPathBytes] bytes of object paths
 // together, before anything is downloaded: Register would refuse the plugin's files, and a listing of S3 has no end
-// of its own.
+// of its own. With [WithArtifacts], it downloads and opens the plugin's artifact instead, returning the
+// [*plg.Artifact], as the package documentation says.
 func (s *Storage) Open(ctx context.Context, desc *plg.Descriptor) (fs.FS, error) {
 	dir := desc.Key
 	if dir == "" || dir == "." || dir == ".." || strings.Contains(dir, "/") {
 		return nil, fmt.Errorf("%w %q: %w", plg.ErrInvalidDescriptor, dir, errPluginKey)
+	}
+
+	if s.artifacts {
+		return s.openArtifact(ctx, dir)
 	}
 
 	var listed listing
@@ -351,11 +401,18 @@ type downloaded struct {
 	data []byte
 }
 
-// download returns the content of the object at key, of at most limit bytes, and its ETag.
+// download returns the content of the object at key, of at most limit bytes, and its ETag. An object whose
+// download states more is refused before any of it is read.
 func (s *Storage) download(ctx context.Context, key string, limit int64) (downloaded, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
 	if err != nil {
 		return downloaded{}, fmt.Errorf("getting %s: %w", key, err)
+	}
+
+	if aws.ToInt64(out.ContentLength) > limit {
+		tooLarge := fmt.Errorf("%s: %w: over %d bytes", key, errTooLarge, limit)
+
+		return downloaded{}, errors.Join(tooLarge, out.Body.Close())
 	}
 
 	data, err := io.ReadAll(io.LimitReader(out.Body, limit+1))
