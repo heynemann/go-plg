@@ -4,6 +4,7 @@ package cli_test
 
 import (
 	"encoding/xml"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/testproxy"
 )
 
@@ -134,8 +136,9 @@ func readJUnit(t *testing.T, name string) junitReport {
 // file's suite for the plugin has a failed test case named after it, its first, whose message is the step's
 // detail, and the JSON report names it as the plugin's failed step, with that detail (and the issue it holds, if
 // any). plg validate exits 1 each time. A repository whose plg.yaml is invalid is reported the same way, its one
-// suite and plugin the repository failing at plg.yaml. (The guest step fails in TestValidateReportFromTheCommand,
-// which can take away the user cache directory.)
+// suite and plugin the repository failing at plg.yaml. The files step fails on a plugin with a sparse file over
+// plg.MaxPluginFileSize. (The guest step fails in TestValidateReportFromTheCommand, which can take away the user
+// cache directory.)
 func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 	t.Parallel()
 
@@ -154,6 +157,11 @@ func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 
 	owned := copyRepo(t, "plugins: [unowned]\nrequireOwnership: true\n", map[string]string{})
 
+	tooLarge := pluginCopy(t, "luagood")
+	big := filepath.Join(tooLarge, "data.lua")
+	require.NoError(t, os.WriteFile(big, nil, 0o600))
+	require.NoError(t, os.Truncate(big, 2*plg.MaxPluginFileSize)) // sparse: nothing is read
+
 	tests := []struct {
 		step, detail, plugin, issue string
 	}{
@@ -165,6 +173,10 @@ func TestValidateReportsEachStepsFailureInEveryFormat(t *testing.T) {
 			filepath.Join(owned, "unowned"), "plg.ownership.missing",
 		},
 		{"shared", "cannot copy a shared directory into the plugin: ", filepath.Join(clashing, "rules", "silver"), ""},
+		{
+			"files", fmt.Sprintf("%v: data.lua is over %d bytes", plg.ErrPluginTooLarge, plg.MaxPluginFileSize),
+			tooLarge, "",
+		},
 		{
 			"contract",
 			"no module provides the contract package example.com/nosuch/cohort at v1.0.0",
