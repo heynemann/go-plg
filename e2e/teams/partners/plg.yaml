@@ -1,0 +1,8 @@
+# The partners team's author repository: the accounts piloting partner rewards, as a cohort in Lua, and the
+# partner vouchers' deliverer in TypeScript, validated and packed by ci.sh. The deliverer is broken on purpose for
+# large rewards (it never returns), the hang the platform's end-to-end tests stop and attribute to this team. The
+# platform requires every plugin to name its owner.
+plugins:
+  - pilot
+  - voucher
+requireOwnership: true

@@ -85,36 +85,91 @@ type Calls struct {
 func (t *Telemetry) Calls(tb testing.TB) map[Calls]int64 {
 	tb.Helper()
 
+	return t.Measured(tb, "plg.plugin.calls")
+}
+
+// Measured returns how many measurements plg's instrument of the name (one of the call instruments, with the
+// attributes of Calls: plg.plugin.calls, plg.plugin.call.errors, plg.plugin.call.duration) recorded so far, by
+// what they are attributed to: a counter's sum, a histogram's count.
+func (t *Telemetry) Measured(tb testing.TB, name string) map[Calls]int64 {
+	tb.Helper()
+
 	counts := map[Calls]int64{}
 
-	for _, scope := range t.Metrics(tb).ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != "plg.plugin.calls" {
-				continue
-			}
-
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			require.True(tb, ok, "plg.plugin.calls is an int64 sum")
-
-			for _, point := range sum.DataPoints {
-				counts[callsOf(point.Attributes)] += point.Value
-			}
-		}
-	}
+	t.points(tb, name, func(attrs attribute.Set, n int64) { counts[callsOf(attrs)] += n })
 
 	return counts
 }
 
-func callsOf(attrs attribute.Set) Calls {
-	value := func(key attribute.Key) string {
-		v, _ := attrs.Value(key)
+// Panics is a count of plg.PanicErrors (plg.plugin.panics) by what plg attributes it to.
+type Panics struct {
+	// Key is the plugin's key.
+	Key string
+	// Phase is where the panic happened (call, create, …).
+	Phase string
+	// Team, Org and Company are the plugin's owner's.
+	Team, Org, Company string
+}
 
-		return v.AsString()
+// Panics returns plg's panic counts (plg.plugin.panics) recorded so far.
+func (t *Telemetry) Panics(tb testing.TB) map[Panics]int64 {
+	tb.Helper()
+
+	counts := map[Panics]int64{}
+
+	t.points(tb, "plg.plugin.panics", func(attrs attribute.Set, n int64) {
+		counts[Panics{
+			Key: value(attrs, "key"), Phase: value(attrs, "phase"),
+			Team: value(attrs, "team"), Org: value(attrs, "org"), Company: value(attrs, "company"),
+		}] += n
+	})
+
+	return counts
+}
+
+// points calls visit with each data point of plg's instrument of the name recorded so far: its attributes, and a
+// counter's sum or a histogram's count.
+func (t *Telemetry) points(tb testing.TB, name string, visit func(attrs attribute.Set, n int64)) {
+	tb.Helper()
+
+	for _, scope := range t.Metrics(tb).ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name == name {
+				visitPoints(tb, &metric, visit)
+			}
+		}
 	}
+}
 
+// visitPoints calls visit with each data point of metric, a counter of int64 or a histogram of float64.
+func visitPoints(tb testing.TB, metric *metricdata.Metrics, visit func(attrs attribute.Set, n int64)) {
+	tb.Helper()
+
+	switch data := metric.Data.(type) {
+	case metricdata.Sum[int64]:
+		for _, point := range data.DataPoints {
+			visit(point.Attributes, point.Value)
+		}
+	case metricdata.Histogram[float64]:
+		for _, point := range data.DataPoints {
+			visit(point.Attributes, int64(point.Count)) //nolint:gosec // G115: a count of calls
+		}
+	default:
+		require.Failf(tb, "unexpected instrument", "%s is a %T", metric.Name, metric.Data)
+	}
+}
+
+// value returns the string attribute key's value; "" when absent.
+func value(attrs attribute.Set, key attribute.Key) string {
+	v, _ := attrs.Value(key)
+
+	return v.AsString()
+}
+
+func callsOf(attrs attribute.Set) Calls {
 	return Calls{
-		Key: value("key"), Method: value("method"), Outcome: value("outcome"),
-		Team: value("team"), Org: value("org"), Company: value("company"),
+		Key: value(attrs, "key"), Method: value(attrs, "method"), Outcome: value(attrs, "outcome"),
+		Team: value(attrs, "team"), Org: value(attrs, "org"), Company: value(attrs, "company"),
 	}
 }
 

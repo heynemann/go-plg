@@ -1,0 +1,11 @@
+implements: example.com/rewards/eligibility.Condition@v1.0.0
+language: typescript
+entrypoint: plugin.ts
+owner:
+  maintainers:
+    - {name: Noor Haddad, email: noor@example.com, handle: "@noor"}
+  team: {name: insights, department: data}
+  org: rewards
+  company: Example Shop
+  contact: {oncall: insights-oncall, channel: "#insights", email: insights@example.com}
+  links: {repository: https://git.example.com/rewards/insights, runbook: https://git.example.com/rewards/insights/loyal-ts.md}

@@ -21,10 +21,20 @@ import (
 const (
 	WalletToken = "wlt-9fQ2mZ7xK4" //nolint:gosec // G101: the fake wallet's made-up token
 	VendorToken = "vnd-3Lp8wR1sT6" //nolint:gosec // G101: the fake vendor's made-up token
+	// WatchlistToken is the fraud team's watchlist API's token, which its watchlist condition reads (and leaks).
+	WatchlistToken = "wch-7Hd4Kx2Mq9" //nolint:gosec // G101: a made-up token
 )
 
 // DefaultUsers is how many users a rig's directory holds unless Options say otherwise.
 const DefaultUsers = 1000
+
+// maxRigs is how many rigs a test binary runs at once. Each holds MinIO, its teams' CI and a platform whose pools
+// of guest instances take hundreds of MB under the race detector: the 15 scenarios at once, as go test runs
+// parallel tests on a 28-CPU machine, peaked at 14.9 GB. Parallel tests beyond it wait in NewRig for a slot.
+const maxRigs = 4
+
+// rigSlots holds a token per running rig, which its test's cleanup takes back last.
+var rigSlots = make(chan struct{}, maxRigs) //nolint:gochecknoglobals // the test binary's, shared by its tests' rigs
 
 // Vault resolves the plugins' secrets by their owning team: the value of "<team>/<secret name>", so a team reads
 // only its own secrets whatever names another team's plugin.yaml declares. It is immutable, hence safe for
@@ -98,9 +108,16 @@ type Rig struct {
 }
 
 // NewRig sets up a rig for tb, shaped by opts (nil: the defaults): MinIO, the teams' CI and their artifacts
-// published, the fakes and the platform, every piece stopped when tb ends.
+// published, the fakes and the platform, every piece stopped when tb ends. It waits while maxRigs rigs run.
 func NewRig(tb testing.TB, opts *Options) *Rig {
 	tb.Helper()
+
+	select {
+	case rigSlots <- struct{}{}:
+		tb.Cleanup(func() { <-rigSlots })
+	case <-tb.Context().Done():
+		require.FailNow(tb, "the test ended waiting for a rig")
+	}
 
 	options := withDefaults(opts)
 
@@ -109,7 +126,7 @@ func NewRig(tb testing.TB, opts *Options) *Rig {
 	rig.Vendor = NewVendor(tb, VendorToken, rig.Users)
 	rig.Vault = Vault{
 		CRM + "/vendor_api_url": rig.Vendor.URL(), CRM + "/vendor_api_token": VendorToken,
-		Payments + "/wallet_api_token": WalletToken,
+		Payments + "/wallet_api_token": WalletToken, Fraud + "/watchlist_token": WatchlistToken,
 	}
 	rig.S3 = containertest.StartMinIO(tb)
 	rig.Bucket = containertest.NewBucket(tb, rig.S3)
@@ -121,30 +138,41 @@ func NewRig(tb testing.TB, opts *Options) *Rig {
 		rig.Published = append(rig.Published, Publish(tb, rig.S3, rig.Bucket, team.CI(tb, rig.Environ))...)
 	}
 
+	rig.Platform = rig.NewPlatform(tb, &options)
+
+	return rig
+}
+
+// NewPlatform starts another platform on the rig's bucket and fakes, with its vault, directory and telemetry,
+// shaped by opts (nil: the defaults): its Limits, PollInterval and Configure (which may replace the directory or
+// the telemetry); its Teams and Users are the rig's and left out. The platform is closed when tb ends.
+func (r *Rig) NewPlatform(tb testing.TB, opts *Options) *platform.Platform {
+	tb.Helper()
+
+	options := withDefaults(opts)
 	cfg := platform.Config{
-		Storages:       Storages(rig.S3, rig.Bucket),
-		Users:          rig.Users,
-		TracerProvider: rig.Telemetry.TracerProvider,
-		MeterProvider:  rig.Telemetry.MeterProvider,
-		Secrets:        rig.Vault.Resolver(),
+		Storages:       Storages(r.S3, r.Bucket),
+		Users:          r.Users,
+		TracerProvider: r.Telemetry.TracerProvider,
+		MeterProvider:  r.Telemetry.MeterProvider,
+		Secrets:        r.Vault.Resolver(),
 		Logger:         slog.New(slog.NewTextHandler(tb.Output(), &slog.HandlerOptions{Level: slog.LevelWarn})),
-		WalletURL:      rig.Wallet.URL(),
-		HTTP:           plg.HTTPPolicy{AllowedHosts: []string{rig.Vendor.Host()}, BlockPrivateNetworks: new(false)},
+		WalletURL:      r.Wallet.URL(),
+		HTTP:           plg.HTTPPolicy{AllowedHosts: []string{r.Vendor.Host()}, BlockPrivateNetworks: new(false)},
 		Limits:         options.Limits,
 		PollInterval:   options.PollInterval,
 	}
+
 	if options.Configure != nil {
 		options.Configure(&cfg)
 	}
 
-	var err error
-
-	rig.Platform, err = platform.New(&cfg)
+	started, err := platform.New(&cfg)
 	require.NoError(tb, err)
 
-	tb.Cleanup(func() { require.NoError(tb, rig.Platform.Close(context.WithoutCancel(tb.Context()))) })
+	tb.Cleanup(func() { require.NoError(tb, started.Close(context.WithoutCancel(tb.Context()))) })
 
-	return rig
+	return started
 }
 
 // withDefaults returns opts (nil: none) with the defaults of what it leaves unset.

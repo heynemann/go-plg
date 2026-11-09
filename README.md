@@ -2230,9 +2230,10 @@ serves them in every guest.
   a paged `List`, the platform's user directory as its Host `cohort.Users`), `eligibility.Condition` (validated
   against the platform's `Limits`) and `delivery.Deliverer` (a reward carries its idempotency key). The teams'
   CI resolves them through an offline module proxy at v1.0.0, v1.1.0 (a field added) and v2.0.0.
-- [`e2e/teams`](e2e/teams): three author repositories (`growth` in Go, `crm` in Lua calling a vendor's API with
-  its token, `payments` in TypeScript crediting a wallet API with its token and the reward's idempotency key),
-  each with its `plg.yaml`, test cases, typings and `ci.sh`.
+- [`e2e/teams`](e2e/teams): author repositories (`growth` in Go, `crm` in Lua calling a vendor's API with its token,
+  `payments` in TypeScript crediting a wallet API with its token and the reward's idempotency key; and the
+  scenarios' `insights`, `fraud`, `partners`, `marketplace` and `nextgen`, two of whose plugins are broken on
+  purpose), each with its `plg.yaml`, test cases, typings and `ci.sh`.
 - [`e2e/platform`](e2e/platform): the campaign engine, a Go package to read as a way to build such a platform:
   one registration per contract (required ownership, validation, secrets, HTTP, pools, polling), and
   `Platform.Run`, which pages through a campaign's cohort, asks its conditions about each member, a bounded number
@@ -2240,6 +2241,13 @@ serves them in every guest.
 - [`e2e/harness`](e2e/harness): the tests' rig: MinIO, the teams' CI with the `plg` built from this checkout, the
   artifacts published under `s3storage.WithArtifacts`, the platform with an in-process OpenTelemetry SDK, fake
   wallet and vendor APIs, and an oracle computing in Go what each campaign must do.
+- The scenarios ([`e2e/*_test.go`](e2e)): correctness (exactly-once crediting through timeouts and 503s, cohorts
+  at page boundaries, conditions combining with AND, one rule's Go, Lua and TypeScript ports agreeing, a failing
+  plugin's errors counted against it), extensibility (a new team's condition live on the next poll, a platform
+  built with the contracts' v1.1.0 release serving v1.0.0 pins, a v2 plugin skipped visibly, a hot swap during a
+  campaign changing later members only) and operability (one trace per campaign down to the wallet, metrics by
+  owner, panics and hangs isolated and shown to their teams by `plg status` and `plg events`, a version failing
+  validation keeping the last good one serving, no secret in logs, spans, events or admin answers).
 
 `make complex-e2e` lints the module and runs its scenarios with `-race`, then its load test without it (Docker,
 `git` and `sh` required); it is not part of `make check`. The load test (`e2e/load_test.go`) runs a fixed amount of

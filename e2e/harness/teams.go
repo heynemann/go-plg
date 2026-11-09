@@ -30,7 +30,27 @@ const (
 	Payments = "payments"
 )
 
-// Teams are every team of e2e/teams.
+// The teams of e2e/teams the scenarios add to the default ones, each publishing its plugins only where a rig's
+// Options name it.
+const (
+	// Insights owns the everyone cohort (Go: the whole directory, a page of cohort.MaxPageSize users at a time)
+	// and one loyalty rule in each language: the loyal-go, loyal-lua and loyal-ts conditions.
+	Insights = "insights"
+	// Fraud owns conditions screening members: screening (Lua, failing for users in Mexico), velocity (Go,
+	// panicking for users without orders) and watchlist (Go, carelessly printing and reporting its secret).
+	Fraud = "fraud"
+	// Partners owns the pilot cohort (Lua, a fixed list) and the voucher deliverer (TypeScript, which never
+	// returns from a reward of 1000 points or more).
+	Partners = "partners"
+	// Marketplace owns the north-america condition (TypeScript), which a scenario publishes while the platform
+	// runs.
+	Marketplace = "marketplace"
+	// NextGen owns the batch-spend condition (Lua), written against v2.0.0 of the contracts.
+	NextGen = "nextgen"
+)
+
+// Teams are the teams a rig publishes by default: the foundation's three, whose plugins every campaign of the
+// smoke test uses.
 func Teams() []string {
 	return []string{Growth, CRM, Payments}
 }

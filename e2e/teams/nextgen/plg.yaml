@@ -1,0 +1,6 @@
+# The nextgen team's author repository: an eligibility condition written against the rewards contracts' next
+# major version, v2.0.0 (conditions decide on a batch of subjects), in Lua, validated and packed by ci.sh. A
+# platform built with v1 cannot call it and skips it. The platform requires every plugin to name its owner.
+plugins:
+  - batch-spend
+requireOwnership: true

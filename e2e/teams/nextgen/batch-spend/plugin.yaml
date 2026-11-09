@@ -1,0 +1,11 @@
+implements: example.com/rewards/v2/eligibility.Condition@v2.0.0
+language: lua
+entrypoint: plugin.lua
+owner:
+  maintainers:
+    - {name: Kai Lindqvist, email: kai@example.com, handle: "@kai"}
+  team: {name: nextgen, department: platform-engineering}
+  org: rewards
+  company: Example Shop
+  contact: {oncall: nextgen-oncall, channel: "#nextgen", email: nextgen@example.com}
+  links: {repository: https://git.example.com/rewards/nextgen, runbook: https://git.example.com/rewards/nextgen/batch-spend.md}

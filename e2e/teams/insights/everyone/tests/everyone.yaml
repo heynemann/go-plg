@@ -1,0 +1,51 @@
+# The directory is the platform's Host (cohort.Users), stubbed: each case says what it answers.
+cases:
+  - name: a page holds every user of the directory's page, and its next cursor
+    call: List
+    input:
+      cursor: ""
+    host:
+      - method: Page
+        args: {cursor: "", limit: 500}
+        result:
+          users:
+            - {id: u000001, country: BR, tier: gold, spendCents: 12000, orders: 4}
+            - {id: u000002, country: PT, tier: bronze, spendCents: 300, orders: 1}
+          next: u000002
+        times: 1
+    expect:
+      result: {users: [u000001, u000002], next: u000002}
+  - name: the last page has no next cursor
+    call: List
+    input:
+      cursor: u000002
+    host:
+      - {method: Page, args: {cursor: u000002, limit: 500}, result: {users: [], next: ""}}
+    expect:
+      result: {users: [], next: ""}
+  - name: the directory's failure is the listing's
+    call: List
+    input:
+      cursor: ""
+    host:
+      - {method: Page, args: {cursor: "", limit: 500}, error: directory unavailable}
+    expect:
+      error: directory unavailable
+  - name: a user the directory knows is a member
+    call: IsMember
+    input:
+      user: u000002
+    host:
+      - method: Lookup
+        args: {id: u000002}
+        result: {id: u000002, country: PT, tier: bronze, spendCents: 300, orders: 1}
+    expect:
+      result: true
+  - name: an unknown user is not
+    call: IsMember
+    input:
+      user: nobody
+    host:
+      - {method: Lookup, args: {id: nobody}, result: {id: "", country: "", tier: "", spendCents: 0, orders: 0}}
+    expect:
+      result: false

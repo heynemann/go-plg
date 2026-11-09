@@ -1,0 +1,25 @@
+cases:
+  - name: a user in Mexico qualifies
+    call: Eligible
+    input:
+      subject: {campaign: spring, user: {id: u000001, country: MX, tier: gold, spendCents: 0, orders: 0}}
+    expect:
+      result: {eligible: true, reason: lives in MX}
+  - name: a user in Brazil does not
+    call: Eligible
+    input:
+      subject: {campaign: spring, user: {id: u000002, country: BR, tier: gold, spendCents: 0, orders: 0}}
+    expect:
+      result: {eligible: false, reason: "lives in BR, outside North America"}
+  - name: a platform serving both countries accepts the condition
+    call: Validate
+    input:
+      in: {countries: [MX, US, BR], maxSpendCents: 0, maxOrders: 0}
+    expect:
+      issues: []
+  - name: a platform not serving the United States rejects it
+    call: Validate
+    input:
+      in: {countries: [MX, BR], maxSpendCents: 0, maxOrders: 0}
+    expect:
+      issues: [{severity: error, code: north-america.country, message: "targets US, which the platform does not serve"}]
