@@ -132,7 +132,7 @@ func TestReadmeAuthorGuide(t *testing.T) {
 
 	out = sh(t, checkout, environ, guide["repo"], "")
 	assert.Contains(t, out, "typings    ok      plg.d.ts, tsconfig.json already up to date")
-	assert.Contains(t, out, "\ntests      ok      3 passed\n")
+	assert.Contains(t, out, "\ntests      ok      8 passed\n")
 
 	dist := filepath.Join(checkout, "examples", "rules", "dist")
 

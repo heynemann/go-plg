@@ -7,8 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/examples/plugins"
@@ -21,18 +22,34 @@ const (
 	exitUsage  = 2
 )
 
+// process is what run takes from the process it runs in, besides the command line.
+type process struct {
+	// stderr receives the log.
+	stderr io.Writer
+	// tracerProvider is where the service's spans and its rules' go (main: the global provider).
+	tracerProvider trace.TracerProvider
+	// lookupEnv reads the environment (main: os.LookupEnv): the admin token's default and the rules' secrets.
+	lookupEnv func(string) (string, bool)
+}
+
 // run parses the command line, then serves until ctx ends; it returns the process's exit code.
-func run(ctx context.Context, args []string, stderr io.Writer) int {
+func run(ctx context.Context, args []string, proc process) int {
 	flags := flag.NewFlagSet("service", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(proc.stderr)
+
+	defaultToken, _ := proc.lookupEnv("PRICING_ADMIN_TOKEN")
 
 	addr := flags.String("addr", "localhost:8080", "address to listen on")
 	dir := flags.String("plugins", "", "directory of plugins to serve instead of the embedded ones")
 	artifacts := flags.String("artifacts", "",
 		"directory of .plg artifacts (plg pack's) to serve instead of the embedded plugins")
 	poll := flags.Duration("poll", 0, "how often to reload -plugins or -artifacts (0: never)")
-	adminToken := flags.String("admin-token", os.Getenv("PRICING_ADMIN_TOKEN"),
+	adminToken := flags.String("admin-token", defaultToken,
 		"bearer token of the /admin endpoints (default $PRICING_ADMIN_TOKEN; empty: no admin endpoints)")
+	couponAPI := flags.String("coupon-api", "",
+		"host[:port] of the coupon API the rules may call (empty: rules make no HTTP requests)")
+	couponAPIPrivate := flags.Bool("coupon-api-private", false,
+		"let the coupon API be on a private network: a loopback, private or link-local address")
 
 	err := flags.Parse(args)
 	if err != nil {
@@ -43,7 +60,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	logger := slog.New(slog.NewTextHandler(proc.stderr, nil))
 
 	if *dir != "" && *artifacts != "" {
 		logger.ErrorContext(ctx, "-plugins and -artifacts are exclusive")
@@ -53,8 +70,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 
 	storage, closeStorage, err := storageFor(*dir, *artifacts)
 	if err == nil {
-		err = listenAndServe(ctx, *addr, config{
+		err = listenAndServe(ctx, *addr, &config{
 			storage: storage, poll: *poll, logger: logger, adminToken: *adminToken,
+			tracerProvider: proc.tracerProvider, lookupEnv: proc.lookupEnv,
+			couponAPI: *couponAPI, couponAPIPrivate: *couponAPIPrivate,
 		})
 		err = errors.Join(err, closeStorage())
 	}
@@ -90,7 +109,7 @@ func storageFor(dir, artifacts string) (plg.Storage, func() error, error) {
 	}
 }
 
-func listenAndServe(ctx context.Context, addr string, cfg config) error {
+func listenAndServe(ctx context.Context, addr string, cfg *config) error {
 	var lc net.ListenConfig
 
 	listener, err := lc.Listen(ctx, "tcp", addr)
@@ -104,8 +123,16 @@ func listenAndServe(ctx context.Context, addr string, cfg config) error {
 // config is what serve needs besides its listener.
 type config struct {
 	storage plg.Storage
-	logger  *slog.Logger
+	// tracerProvider is where the spans of the quote requests and of the rules' calls go.
+	tracerProvider trace.TracerProvider
+	logger         *slog.Logger
+	// lookupEnv reads the environment the rules' secrets come from (see envSecrets).
+	lookupEnv func(string) (string, bool)
 	// adminToken is the bearer token the admin endpoints require; empty, they are not served.
 	adminToken string
-	poll       time.Duration
+	// couponAPI is the host (host[:port]) of the coupon API the rules may call; empty, they make no HTTP request.
+	couponAPI string
+	poll      time.Duration
+	// couponAPIPrivate lets couponAPI be on a private network.
+	couponAPIPrivate bool
 }

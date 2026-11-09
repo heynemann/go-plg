@@ -26,7 +26,7 @@ const maxUploadBytes = 16 << 20
 //   - POST /admin/check/{key}: dry-runs a candidate rule (plg.Check) before anyone enables it. The body is a zip
 //     archive of the plugin's directory, its plugin.yaml at the root; the answer is the load's report, whether
 //     the candidate would load or not.
-func mountAdmin(mux *http.ServeMux, container *plg.Container, cfg config) {
+func mountAdmin(mux *http.ServeMux, container *plg.Container, cfg *config) {
 	admin := func(next http.Handler) http.Handler { return requireToken(cfg.adminToken, next) }
 
 	mux.Handle("/admin/plg/", admin(http.StripPrefix("/admin/plg", plg.AdminHandler(container))))
