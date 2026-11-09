@@ -32,18 +32,25 @@ type applied struct {
 // the reward's Idempotency-Key header and a JSON Credit. It applies each key once (201 and the credit's id) and
 // answers a repeat with 200 and the first credit's id, so exactly-once crediting is observable in Credits. It can
 // be told to fail the next requests with 503 (FailNext) or to apply the next ones and then hold the answer until
-// the caller gives up (HangNext), past the deliverer's timeout. Safe for concurrent use.
+// the caller gives up (HangNext), past the deliverer's timeout, and to do either to a steady fraction of its
+// requests (FailOneIn, HangOneIn), as a loaded API does. Safe for concurrent use.
 type Wallet struct {
-	server   *httptest.Server
-	credits  *xsync.Map[string, applied]
-	done     chan struct{}
-	token    string
-	requests atomic.Int64
-	repeats  atomic.Int64
-	refused  atomic.Int64
-	failing  atomic.Int64
-	hanging  atomic.Int64
-	ids      atomic.Int64
+	server      *httptest.Server
+	credits     *xsync.Map[string, applied]
+	done        chan struct{}
+	token       string
+	requests    atomic.Int64
+	repeats     atomic.Int64
+	refused     atomic.Int64
+	failing     atomic.Int64
+	hanging     atomic.Int64
+	ids         atomic.Int64
+	failOneIn   atomic.Int64
+	hangOneIn   atomic.Int64
+	failCount   atomic.Int64 // the requests FailOneIn counts
+	hangCount   atomic.Int64 // the requests HangOneIn counts
+	held        atomic.Int64
+	unavailable atomic.Int64
 }
 
 // NewWallet starts a wallet requiring token, closed when tb ends.
@@ -88,6 +95,20 @@ func (w *Wallet) HangNext(n int) {
 	w.hanging.Store(int64(n))
 }
 
+// FailOneIn makes one request in every n fail with 503 without applying anything (the n-th, the 2n-th, … from
+// now), until it is set to 0: the steady trickle of failures a loaded API answers, which retries absorb.
+func (w *Wallet) FailOneIn(n int) {
+	w.failCount.Store(0)
+	w.failOneIn.Store(int64(n))
+}
+
+// HangOneIn makes one in every n requests that apply a credit (or find it applied) hold its answer until the
+// caller gives up, as HangNext does (the n-th, the 2n-th, … from now), until it is set to 0.
+func (w *Wallet) HangOneIn(n int) {
+	w.hangCount.Store(0)
+	w.hangOneIn.Store(int64(n))
+}
+
 // Credits returns the credits applied, by idempotency key.
 func (w *Wallet) Credits() map[string]Credit {
 	credits := make(map[string]Credit, w.credits.Size())
@@ -112,6 +133,14 @@ func (w *Wallet) CreditsOf(campaign string) map[string]Credit {
 	return credits
 }
 
+// Forget drops the credits applied for the campaign of the ID, once a test has checked them, so that a long test's
+// wallet holds only the campaigns it has not checked yet. A repeat of a forgotten key is applied anew.
+func (w *Wallet) Forget(campaign string) {
+	w.credits.DeleteMatching(func(_ string, credit applied) (bool, bool) {
+		return credit.credit.Campaign == campaign, false
+	})
+}
+
 // Traceparent returns the traceparent header of the request that applied the credit of key ("" for none).
 func (w *Wallet) Traceparent(key string) string {
 	credit, _ := w.credits.Load(key)
@@ -127,6 +156,16 @@ func (w *Wallet) Requests() int64 {
 // Repeats is how many requests repeated a key already applied, and were answered without applying it again.
 func (w *Wallet) Repeats() int64 {
 	return w.repeats.Load()
+}
+
+// Held is how many requests the wallet held until their caller gave up (HangNext, HangOneIn).
+func (w *Wallet) Held() int64 {
+	return w.held.Load()
+}
+
+// Unavailable is how many requests the wallet failed with 503 (FailNext, FailOneIn).
+func (w *Wallet) Unavailable() int64 {
+	return w.unavailable.Load()
 }
 
 // Refused is how many requests the wallet refused for a missing or wrong token.
@@ -164,7 +203,8 @@ func (w *Wallet) credit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	if take(&w.failing) {
+	if take(&w.failing) || oneIn(&w.failOneIn, &w.failCount) {
+		w.unavailable.Add(1)
 		http.Error(response, "wallet unavailable", http.StatusServiceUnavailable)
 
 		return
@@ -190,7 +230,9 @@ func (w *Wallet) apply(response http.ResponseWriter, request *http.Request, key 
 		status = http.StatusOK
 	}
 
-	if take(&w.hanging) {
+	if take(&w.hanging) || oneIn(&w.hangOneIn, &w.hangCount) {
+		w.held.Add(1)
+
 		select {
 		case <-request.Context().Done():
 		case <-w.done:
@@ -224,4 +266,11 @@ func take(n *atomic.Int64) bool {
 			return true
 		}
 	}
+}
+
+// oneIn counts one more in count and reports whether it is a multiple of n, when n is positive.
+func oneIn(n, count *atomic.Int64) bool {
+	every := n.Load()
+
+	return every > 0 && count.Add(1)%every == 0
 }

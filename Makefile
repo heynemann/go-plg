@@ -208,8 +208,9 @@ examples: $(GOLANGCI_LINT) warm
 # (`-tags e2e`: the teams' CI scripts run the plg command built from this checkout, the artifacts go through MinIO,
 # so Docker, git and sh are required), then the load tests without it (`-tags e2e,e2e_load`, the tests named
 # TestLoad…), whose throughput and latency thresholds are measured without the race detector. A load test is a
-# file of its own behind e2e_load, so the scenarios' run never builds it and the load run, which matches nothing
-# while there is none, passes. E2E_TIMEOUT is a hang detector per test binary, as TEST_TIMEOUT is.
+# file of its own behind e2e_load, so the scenarios' run never builds it. The load run is verbose and never cached
+# (`-v -count=1`), so every run logs what it measured. E2E_TIMEOUT is a hang detector per test binary, as
+# TEST_TIMEOUT is.
 E2E_TIMEOUT := 30m
 
 complex-e2e: $(GOLANGCI_LINT) warm
@@ -221,7 +222,7 @@ complex-e2e: $(GOLANGCI_LINT) warm
 	cd e2e && go mod tidy -diff
 	cd e2e/contracts && go mod tidy -diff
 	cd e2e && go test -race -shuffle=on -tags e2e -timeout $(E2E_TIMEOUT) ./...
-	cd e2e && go test -shuffle=on -tags e2e,e2e_load -run '^TestLoad' -timeout $(E2E_TIMEOUT) ./...
+	cd e2e && go test -v -count=1 -shuffle=on -tags e2e,e2e_load -run '^TestLoad' -timeout $(E2E_TIMEOUT) ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)

@@ -2241,8 +2241,12 @@ serves them in every guest.
   artifacts published under `s3storage.WithArtifacts`, the platform with an in-process OpenTelemetry SDK, fake
   wallet and vendor APIs, and an oracle computing in Go what each campaign must do.
 
-`make complex-e2e` lints the module and runs its scenarios with `-race`, then its load tests without it (Docker,
-`git` and `sh` required); it is not part of `make check`.
+`make complex-e2e` lints the module and runs its scenarios with `-race`, then its load test without it (Docker,
+`git` and `sh` required); it is not part of `make check`. The load test (`e2e/load_test.go`) runs a fixed amount of
+mixed traffic, 56 campaigns over 10,000 users in every language, while conditions are republished and the wallet
+fails or holds a fraction of its requests, and asserts service levels (throughput, the members' p99 latency, an
+error budget, no reward lost or duplicated) and invariants (the host's heap, goroutines after `Close`, the pools'
+bounds, the guests' memory budget); PLAN.md records the measurements behind its thresholds.
 
 ## Development
 
