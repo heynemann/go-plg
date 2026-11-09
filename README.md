@@ -549,10 +549,11 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
   `requireOwnership`.
 - **files:** the plugin's files are copied once into memory, as a [storage](#storages) loads them (regular files,
   symbolic links inside the plugin left out, within plg's limits: `plg.MaxPluginFileSize` and the others), from
-  the composed copy when the author repository has shared directories. Every later step (sandbox, types, syntax,
-  typings, load, test cases) reads that copy and never the directory, so they all see the same files, and a plugin
-  over the limits fails here with `plg.ErrPluginTooLarge`, as its load would, before any file is read whole. The
-  row shows only when the step fails (`plg pack` reports it as its `pack` step).
+  the composed copy when the author repository has shared directories; the plugin's directory itself may be a
+  symbolic link, or be reached through one. Every later step (sandbox, types, syntax, typings, load, test cases)
+  reads that copy and never the directory, so they all see the same files, and a plugin over the limits fails here
+  with `plg.ErrPluginTooLarge`, as its load would, before any file is read whole. The row shows only when the step
+  fails (`plg pack` reports it as its `pack` step).
 - **contract:** the contract module is resolved at the version `implements` pins, through the local `go` command
   (`go mod download -json`), so `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `.netrc` credentials and the Go module cache
   work as for any Go build: once the module is in the cache, validating needs no network (`GOPROXY=off` works). The

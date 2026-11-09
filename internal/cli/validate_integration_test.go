@@ -395,6 +395,61 @@ func TestValidateRefusesPluginsOverTheLimits(t *testing.T) {
 	}
 }
 
+// linkedPlugin copies the testdata plugin into a directory of the test's own, holding alias.lua, a link to
+// another of its files, and returns a symbolic link to it, named linked.
+func linkedPlugin(t *testing.T, plugin string) string {
+	t.Helper()
+
+	dir := pluginCopy(t, plugin)
+	require.NoError(t, os.Symlink("plugin.yaml", filepath.Join(dir, "alias.lua")))
+
+	link := filepath.Join(t.TempDir(), "linked")
+	require.NoError(t, os.Symlink(dir, link))
+
+	return link
+}
+
+// TestValidateFollowsALinkToThePluginDirectory validates a plugin through a symbolic link to its directory: it
+// passes, as named on the command line, under the link's name, the link inside it left out of its files as ever (it
+// would not compile as Lua); a link inside it leading out of it still fails the files step.
+func TestValidateFollowsALinkToThePluginDirectory(t *testing.T) {
+	t.Parallel()
+
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+
+	got := validate(environ, linkedPlugin(t, "luagood"))
+	require.Equal(t, 0, got.code, got.stdout+got.stderr)
+	assert.Contains(t, got.stdout, "manifest   ok      lua plugin linked implementing ")
+
+	link := linkedPlugin(t, "luagood")
+	outside := filepath.Join(t.TempDir(), "secret.lua")
+	require.NoError(t, os.WriteFile(outside, []byte("return 1\n"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(link, "leak.lua")))
+
+	got = validate(environ, link)
+	assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+	assert.Contains(t, got.stdout, "files     FAIL    plg: plugin directory luagood: copying the plugin's files: ")
+	assert.Contains(t, got.stdout, "leak.lua: symbolic link out of the plugin's files")
+}
+
+// TestValidateFollowsALinkedWorkingDirectory validates "." from a working directory reached through a symbolic
+// link, whose path (as os.Getwd returns $PWD) is the link's: the plugin passes.
+//
+//nolint:paralleltest // t.Chdir: the working directory is the process's
+func TestValidateFollowsALinkedWorkingDirectory(t *testing.T) {
+	environ := testproxy.Environ(testproxy.New(t, modules()), t.TempDir())
+	link := linkedPlugin(t, "luagood")
+	t.Chdir(link)
+
+	var stdout, stderr bytes.Buffer
+
+	code := cli.Main([]string{"validate", "."}, &cli.Env{
+		Stdout: &stdout, Stderr: &stderr, Environ: func() []string { return environ }, Dir: link,
+	})
+	require.Equal(t, 0, code, stdout.String()+stderr.String())
+	assert.Contains(t, stdout.String(), "manifest   ok      lua plugin linked implementing ")
+}
+
 // abs returns the absolute path of the testdata plugin dir.
 func abs(t *testing.T, dir string) string {
 	t.Helper()

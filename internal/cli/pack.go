@@ -150,14 +150,20 @@ func packedDirs(dir string) ([]string, error) {
 // never the directory: what is type-checked, loaded and tested is one set of files, and for plg pack what is
 // packed, so a file changed on disk meanwhile is neither validated nor packed. plg pack also reads the git state
 // of what they were copied from at that moment. A failure fails the plugin's files step (pack's for plg pack).
+// The directory copied is resolved first: a storage refuses a plugin directory that is a symbolic link, but the
+// plugin's directory may be reached through one (named on the command line, or the working directory's path).
 func (v *validation) snapshot(ctx context.Context) bool {
 	step := "files"
 	if v.packed != nil {
 		step = "pack"
 	}
 
-	opened, err := plg.NewFSStorage(filepath.Dir(v.filesDir)).Open(ctx,
-		&plg.Descriptor{Key: filepath.Base(v.filesDir)})
+	dir, err := filepath.EvalSymlinks(v.filesDir)
+	if err != nil {
+		return v.failed(step, err)
+	}
+
+	opened, err := plg.NewFSStorage(filepath.Dir(dir)).Open(ctx, &plg.Descriptor{Key: filepath.Base(dir)})
 	if err != nil {
 		return v.failed(step, err)
 	}
