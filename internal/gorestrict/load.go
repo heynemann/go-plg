@@ -1,7 +1,6 @@
 package gorestrict
 
 import (
-	"go/build"
 	"go/parser"
 	"go/token"
 	"path"
@@ -15,20 +14,25 @@ const (
 	guestArch = "wasm"
 )
 
-// GuestLoads reports whether the Go guest's interpreter, yaegi v0.16.1 on wasip1/wasm, loads the Go source file
-// name (its base name decides) whose content is src, deciding as yaegi does for the files of a package it imports.
-// By name, it skips files not ending in .go, names starting with "_" or "." and _test.go files. Of the elements
-// after the name's first "_" (separated by "_"), one alone that is an operating system or architecture yaegi knows
-// (see knownOS and knownArch) other than wasip1 and wasm skips the file (x_windows.go, x_amd64.go); of two or more,
-// the last one being such an architecture does (x_y_amd64.go, x_wasip1_amd64.go), and so does the last but one
-// being such an operating system followed by an architecture yaegi knows (x_linux_wasm.go). Any other name loads:
-// x_riscv64.go, x_hurd.go, x_y_windows.go. It then reads the comments before the package clause: every
-// `// +build` line among them must hold (one of its space-separated options does when each of the option's
-// comma-separated tags does: wasip1, wasm, or go1.N up to N of the Go release plg is built with, which builds the
-// guest; negated by a leading "!"). `//go:build` lines are not read. A package clause that does not parse fails the
-// guest's load: GuestLoads returns the parser's error, positioned in fset. yaegi panics on an empty tag
-// (`// +build a,`), which here does not hold; a `// yaegi:tags` line, which adds tags for the files yaegi reads
-// after it, is not followed.
+// GuestGoMinor is N of the Go 1.N release that built the committed Go guest (guest/golang/golang.wasm.gz, built
+// with the Makefile's GOTOOLCHAIN): yaegi in that guest holds the go1.1 to go1.N build tags whatever Go builds the
+// host. A test pins it to both. A guest plg build-guest builds uses the plugin module's Go instead, so for it the
+// go1.N tags above GuestGoMinor can be judged differently than that guest loads them.
+const GuestGoMinor = 27
+
+// GuestLoads reports whether the Go guest's interpreter, yaegi v0.16.1 on wasip1/wasm, loads the Go source file name
+// (its base name decides) whose content is src, deciding as yaegi does for the files of a package it imports. By name,
+// it skips files not ending in .go, names starting with "_" or "." and _test.go files. Of the elements after the name's
+// first "_" (separated by "_"), one alone that is an operating system or architecture yaegi knows (see knownOS and
+// knownArch) other than wasip1 and wasm skips the file (x_windows.go, x_amd64.go); of two or more, the last one being
+// such an architecture does (x_y_amd64.go, x_wasip1_amd64.go), and so does the last but one being such an operating
+// system followed by an architecture yaegi knows (x_linux_wasm.go). Any other name loads: x_riscv64.go, x_hurd.go,
+// x_y_windows.go. It then reads the comments before the package clause: every `// +build` line among them must hold
+// (one of its space-separated options does when each of the option's comma-separated tags does: wasip1, wasm, or go1.N
+// up to N = GuestGoMinor, the Go release that built the committed guest; negated by a leading "!"). `//go:build` lines
+// are not read. A package clause that does not parse fails the guest's load: GuestLoads returns the parser's error,
+// positioned in fset. yaegi panics on an empty tag (`// +build a,`), which here does not hold; a `// yaegi:tags` line,
+// which adds tags for the files yaegi reads after it, is not followed.
 func GuestLoads(fset *token.FileSet, name string, src []byte) (bool, error) {
 	if !nameLoads(path.Base(name)) {
 		return false, nil
@@ -146,7 +150,7 @@ func buildTagHolds(tag string) bool {
 	holds := name == guestOS || name == guestArch
 	if version, ok := strings.CutPrefix(name, "go1."); ok && name != "go1." {
 		minor, err := strconv.Atoi(version)
-		holds = err == nil && len(build.Default.ReleaseTags) >= minor // the tags are go1.1 to go1.N
+		holds = err == nil && minor <= GuestGoMinor
 	}
 
 	return holds != negated

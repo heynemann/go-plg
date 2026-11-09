@@ -366,7 +366,9 @@ func Create(host greeter.Host) (greeter.Greeter, error) // with plg.WithHost[gre
   architecture yaegi knows other than `wasip1`/`wasm` (`x_windows.go`, `x_amd64.go`), or end in such an architecture
   (`x_y_arm64.go`, `x_wasip1_amd64.go`) or in such an operating system followed by any architecture yaegi knows
   (`x_linux_wasm.go`); and files whose `// +build` lines before the package clause do not all hold (the tags that
-  hold are `wasip1`, `wasm` and `go1.N` up to plg's Go release). yaegi knows fewer names than `go build` (operating
+  hold are `wasip1`, `wasm` and `go1.N` up to the Go release that built the committed guest,
+  `gorestrict.GuestGoMinor`, pinned by a test to the Makefile's `GOTOOLCHAIN`; a guest `plg build-guest` builds with
+  another Go can load `go1.N` files differently). yaegi knows fewer names than `go build` (operating
   systems `aix android darwin dragonfly freebsd illumos ios js linux netbsd openbsd plan9 solaris windows`,
   architectures `386 amd64 arm arm64 loong64 mips mips64 mips64le mipsle ppc64 ppc64le s390x`) and reads an operating
   system as the last of several elements as no constraint, so `x_riscv64.go`, `x_hurd.go`, `x_linux_riscv64.go` and

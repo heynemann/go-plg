@@ -1,9 +1,15 @@
 package gorestrict_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
+	"os"
+	"regexp"
+	"strconv"
 	"testing"
 	"testing/fstest"
 
@@ -160,6 +166,9 @@ func TestGuestLoadsWhatYaegiLoads(t *testing.T) {
 		"// +build !wasip1\n":                   false,
 		"// +build wasm,linux\n":                false,
 		"// +build go1.999\n":                   false,
+		"// +build go1.27\n":                    true,
+		"// +build go1.28\n":                    false,
+		"// +build !go1.28\n":                   true,
 		"// +build go1.x go1.\n":                false,
 		"// +build wasm,\n":                     false,
 		"// +build wasm\n// +build linux\n":     false,
@@ -177,4 +186,40 @@ func TestGuestLoadsWhatYaegiLoads(t *testing.T) {
 	_, err := gorestrict.GuestLoads(token.NewFileSet(), "p/a.go", []byte("// +build ignore\n\npackag main\n"))
 	require.EqualError(t, err, "p/a.go:3:1: expected 'package', found packag",
 		"yaegi fails the load on a package clause that does not parse, whatever the constraints")
+}
+
+// TestGuestGoMinorIsTheCommittedGuestsGo checks that GuestGoMinor is the minor of the Go that built the committed Go
+// guest and of the Makefile's GOTOOLCHAIN, so bumping either without the constant fails here.
+func TestGuestGoMinorIsTheCommittedGuestsGo(t *testing.T) {
+	t.Parallel()
+
+	want := "^" + regexp.QuoteMeta("go1."+strconv.Itoa(gorestrict.GuestGoMinor)+".")
+
+	gz, err := os.ReadFile("../../guest/golang/golang.wasm.gz")
+	require.NoError(t, err)
+
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	require.NoError(t, err)
+
+	wasm, err := io.ReadAll(zr)
+	require.NoError(t, err)
+
+	// debug/buildinfo does not read wasm; the runtime's version string is the binary's only go1.N.P.
+	versions := map[string]bool{}
+	for _, version := range regexp.MustCompile(`go1\.\d+\.\d+`).FindAll(wasm, -1) {
+		versions[string(version)+"."] = true
+	}
+
+	require.Len(t, versions, 1)
+
+	for version := range versions {
+		assert.Regexp(t, want, version)
+	}
+
+	makefile, err := os.ReadFile("../../Makefile")
+	require.NoError(t, err)
+
+	toolchain := regexp.MustCompile(`(?m)^export GOTOOLCHAIN := (\S+)$`).FindSubmatch(makefile)
+	require.NotNil(t, toolchain)
+	assert.Regexp(t, want, string(toolchain[1])+".")
 }
