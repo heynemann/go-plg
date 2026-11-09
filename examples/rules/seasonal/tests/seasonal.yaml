@@ -1,3 +1,7 @@
+# The coupon API the rule asks about coupons other than SUMMER is stubbed, at the address its faked coupon_api_url
+# secret gives.
+httpPolicy:
+  allowedHosts: [coupons.example.com]
 cases:
   - name: the SUMMER coupon takes 8% off
     call: Discount
@@ -11,6 +15,49 @@ cases:
       order: {customer: bob, coupon: "", items: [{sku: tea, quantity: 10, unitCents: 450}]}
     expect:
       result: {cents: 0, reason: ""}
+  - name: the coupon API says what another coupon takes off
+    call: Discount
+    input:
+      order: {customer: bob, coupon: AUTUMN, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    secrets: {coupon_api_url: "https://coupons.example.com", coupon_api_token: t0k3n}
+    http:
+      - {url: "https://coupons.example.com/coupons/AUTUMN", body: '{"percent":5}', times: 1}
+    expect:
+      result: {cents: 225, reason: "coupon AUTUMN: 5% off"}
+  - name: a coupon the API does not know takes nothing off
+    call: Discount
+    input:
+      order: {customer: bob, coupon: NOPE, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    secrets: {coupon_api_url: "https://coupons.example.com", coupon_api_token: t0k3n}
+    http:
+      - {url: "https://coupons.example.com/coupons/NOPE", status: 404, times: 1}
+    expect:
+      result: {cents: 0, reason: ""}
+  - name: the API's refusal is the rule's error, the token it echoes scrubbed
+    call: Discount
+    input:
+      order: {customer: bob, coupon: REVOKED, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    secrets: {coupon_api_url: "https://coupons.example.com", coupon_api_token: t0k3n}
+    http:
+      - {url: "https://coupons.example.com/coupons/REVOKED", status: 403, body: "token t0k3n may not read REVOKED"}
+    expect:
+      error: "the coupon API answered 403 for REVOKED: token [secret coupon_api_token] may not read REVOKED"
+  - name: never more than 8% off, whatever the API says
+    call: Discount
+    input:
+      order: {customer: bob, coupon: HUGE, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    secrets: {coupon_api_url: "https://coupons.example.com", coupon_api_token: t0k3n}
+    http:
+      - {url: "https://coupons.example.com/coupons/HUGE", body: '{"percent":50}'}
+    expect:
+      error: the coupon API grants HUGE 50% off, not 0 to 8
+  - name: without its token the rule fails
+    call: Discount
+    input:
+      order: {customer: bob, coupon: AUTUMN, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    secrets: {coupon_api_url: "https://coupons.example.com", coupon_api_token: null}
+    expect:
+      error: secret "coupon_api_token" could not be resolved
   - name: a service allowing 5% rejects the rule
     call: Validate
     input:

@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -17,12 +18,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg"
@@ -52,6 +55,8 @@ var servingLine = regexp.MustCompile(`msg=serving addr=(\S+)`)
 type serviceLog struct {
 	// rest receives the lines after the one saying the service serves; it is closed when the log ends.
 	rest <-chan string
+	// stop stops the service and waits for it to exit (cleanly); [startIn] sets it.
+	stop func()
 	// url is the service's base URL.
 	url string
 }
@@ -88,8 +93,8 @@ func watch(t *testing.T, log io.Reader) serviceLog {
 	return serviceLog{}
 }
 
-// start runs the service in this process with args (always on a free loopback port) and returns its URL. When
-// the test ends, the service is stopped and must exit cleanly.
+// start runs the service in this process with args (always on a free loopback port), without environment or
+// tracing, and returns its URL. When the test ends, the service is stopped and must exit cleanly.
 func start(t *testing.T, args ...string) string {
 	t.Helper()
 
@@ -100,19 +105,42 @@ func start(t *testing.T, args ...string) string {
 func startWatched(t *testing.T, args ...string) serviceLog {
 	t.Helper()
 
+	return startIn(t, quietProcess(io.Discard), args...)
+}
+
+// quietProcess returns the process of a service logging to stderr, without environment or tracing.
+func quietProcess(stderr io.Writer) process {
+	return process{stderr: stderr, tracerProvider: noop.NewTracerProvider(), lookupEnv: environment(nil)}
+}
+
+// environment returns a lookupEnv of the variables in vars.
+func environment(vars map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		value, ok := vars[name]
+
+		return value, ok
+	}
+}
+
+// startIn is startWatched in proc: the service's whole log goes to proc's stderr too. When the test ends, or once
+// the returned serviceLog's stop is called, the service is stopped and must exit cleanly.
+func startIn(t *testing.T, proc process, args ...string) serviceLog {
+	t.Helper()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	logR, logW := io.Pipe()
 	exited := make(chan int, 1)
+	logged := proc.stderr
+	proc.stderr = io.MultiWriter(logW, logged)
 
 	go func() {
-		exited <- run(ctx, append([]string{"-addr", "127.0.0.1:0"}, args...), logW)
+		exited <- run(ctx, append([]string{"-addr", "127.0.0.1:0"}, args...), proc)
 
 		assert.NoError(t, logW.Close())
 	}()
 
 	log := watch(t, logR)
-
-	t.Cleanup(func() {
+	log.stop = sync.OnceFunc(func() {
 		cancel()
 
 		for range log.rest { // drains the log until the service exits
@@ -120,6 +148,8 @@ func startWatched(t *testing.T, args ...string) serviceLog {
 
 		assert.Equal(t, exitOK, <-exited, "a clean shutdown")
 	})
+
+	t.Cleanup(log.stop)
 
 	return log
 }
@@ -130,14 +160,16 @@ type answer struct {
 	status int
 }
 
-// post sends body to the service's /quote.
-func post(t *testing.T, url, body string) answer {
+// post sends body to the service's /quote, with header.
+func post(t *testing.T, url, body string, header http.Header) answer {
 	t.Helper()
 
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url+"/quote", strings.NewReader(body))
 	require.NoError(t, err)
+
+	maps.Copy(req.Header, header)
 
 	resp, err := client.Do(req)
 	require.NoError(t, err)
@@ -153,7 +185,13 @@ func post(t *testing.T, url, body string) answer {
 func quoteFor(t *testing.T, url, order string) quote {
 	t.Helper()
 
-	got := post(t, url, order)
+	return decodeQuote(t, post(t, url, order, nil))
+}
+
+// decodeQuote requires got to be a quote and decodes it.
+func decodeQuote(t *testing.T, got answer) quote {
+	t.Helper()
+
 	require.Equal(t, http.StatusOK, got.status, got.body)
 
 	var decoded quote
@@ -256,7 +294,7 @@ func TestServiceRejectsInvalidOrders(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := post(t, url, order)
+			got := post(t, url, order, nil)
 			assert.Equal(t, http.StatusBadRequest, got.status, got.body)
 		})
 	}
@@ -371,6 +409,11 @@ func TestServiceFailures(t *testing.T) {
 			log:  "listing storage artifacts " + notArtifact + ": bulk.plg: ",
 			more: []string{plg.ErrInvalidArtifact.Error()},
 		},
+		"a malformed coupon API host": {
+			args: []string{"-addr", "127.0.0.1:0", "-coupon-api", "https://coupons.example.com/v1"},
+			want: exitFailed,
+			log:  plg.ErrInvalidHTTPPolicy.Error(),
+		},
 	}
 
 	for name, tc := range tests {
@@ -379,7 +422,7 @@ func TestServiceFailures(t *testing.T) {
 
 			var log strings.Builder
 
-			assert.Equal(t, tc.want, run(t.Context(), tc.args, &log))
+			assert.Equal(t, tc.want, run(t.Context(), tc.args, quietProcess(&log)))
 			assert.Contains(t, log.String(), tc.log)
 
 			for _, want := range tc.more {
@@ -398,15 +441,16 @@ func TestServeStopsWhenItsListenerFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, listener.Close(), "Serve fails at once on a closed listener")
 
-	err = serve(
-		t.Context(),
-		listener,
-		config{storage: plg.NewMemoryStorage("none"), logger: slog.New(slog.DiscardHandler)},
-	)
+	err = serve(t.Context(), listener, &config{
+		storage: plg.NewMemoryStorage("none"), logger: slog.New(slog.DiscardHandler),
+		tracerProvider: noop.NewTracerProvider(), lookupEnv: environment(nil),
+	})
 	require.ErrorIs(t, err, net.ErrClosed)
 }
 
-// The service built and run as a program: it serves until it receives SIGINT, then exits cleanly.
+// The service built and run as a program: it serves until it receives SIGINT, then exits cleanly. The seasonal
+// rule served beside the embedded ones reads its secrets from the program's environment and calls the coupon API
+// -coupon-api allows.
 func TestServiceProgram(t *testing.T) {
 	t.Parallel()
 
@@ -416,7 +460,14 @@ func TestServiceProgram(t *testing.T) {
 	build, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".").CombinedOutput()
 	require.NoError(t, err, string(build))
 
-	cmd := exec.CommandContext(t.Context(), bin, "-addr", "127.0.0.1:0") //nolint:gosec // G204: the program just built
+	api := newCouponAPI(t)
+	rules := copyPlugins(t)
+	addSeasonal(t, rules)
+
+	//nolint:gosec // G204: the program just built
+	cmd := exec.CommandContext(t.Context(), bin, "-addr", "127.0.0.1:0", "-plugins", rules,
+		"-coupon-api", api.host, "-coupon-api-private")
+	cmd.Env = append(os.Environ(), api.environ()...)
 	stderr, err := cmd.StderrPipe()
 	require.NoError(t, err)
 	require.NoError(t, cmd.Start())
@@ -430,6 +481,17 @@ func TestServiceProgram(t *testing.T) {
 	)
 	assert.Equal(t, "pricing/coupon", got.Applied)
 	assert.Equal(t, int64(500), got.TotalCents)
+	assert.Contains(t, got.Discounts, ruleResult{Rule: "pricing/seasonal"}, "a coupon the API does not know")
+	assert.Equal(t, "Bearer "+couponToken, api.received(t).authorization)
+
+	got = quoteFor(
+		t,
+		log.url,
+		`{"customer":"bob","coupon":"AUTUMN","items":[{"sku":"t","quantity":10,"unitCents":100}]}`,
+	)
+	assert.Contains(t, got.Discounts, ruleResult{Rule: "pricing/seasonal", Cents: 50, Reason: "coupon AUTUMN: 5% off"},
+		"the coupon API's answer")
+	assert.Equal(t, "Bearer "+couponToken, api.received(t).authorization)
 
 	require.NoError(t, cmd.Process.Signal(syscall.SIGINT))
 
