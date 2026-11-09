@@ -278,7 +278,10 @@ func printingStorage(t *testing.T, statements map[string]string) *plg.MemoryStor
 	store := plg.NewMemoryStorage("printing")
 
 	for key, statement := range statements {
-		desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: "v1"}
+		desc := plg.Descriptor{
+			Key: key, Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+			Version: "v1",
+		}
 		source := strings.ReplaceAll(printingPlugin, "{{PRINT}}", statement)
 		require.NoError(t, store.Put(&desc, fstest.MapFS{"plugin.go": {Data: []byte(source)}}))
 	}

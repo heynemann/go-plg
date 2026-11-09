@@ -1,13 +1,16 @@
 package plg
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -26,15 +29,25 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/heynemann/go-plg/internal/contractref"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/engine"
+	"github.com/heynemann/go-plg/internal/goguest"
 	"github.com/heynemann/go-plg/internal/guestout"
 	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/memfs"
+	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/internal/wire"
 )
 
@@ -254,11 +267,12 @@ func TestManifestMemoryLimitsMatchRegister(t *testing.T) {
 	t.Parallel()
 
 	for _, limit := range []uint64{1, engine.PageSize - 1, engine.PageSize, engine.PageSize + 1, 4 << 30, 4<<30 + 1} {
-		manifest := fmt.Sprintf("language: go\nentrypoint: .\nmemoryLimit: %d\n", limit)
+		manifest := fmt.Sprintf("implements: example.com/c.I@v1.0.0\nlanguage: go\nentrypoint: .\nmemoryLimit: %d\n",
+			limit)
 		desc, parseErr := ParseManifest([]byte(manifest))
 		desc.Key = "k"
 		desc.MemoryLimit = limit
-		checkErr := checkDescriptor("s", &desc)
+		_, checkErr := checkDescriptor("s", &desc)
 
 		valid := limit >= engine.PageSize && limit <= 4<<30
 		assert.Equal(t, valid, parseErr == nil, "ParseManifest with %d: %v", limit, parseErr)
@@ -271,12 +285,56 @@ func TestManifestMemoryLimitsMatchRegister(t *testing.T) {
 	}
 }
 
+// TestCheckContractJudgesThePinAgainstTheBuild adds the contract issue of a plugin pinned to v1.4.0 against the
+// contract module a program is built with: none for a compatible version, an error naming both versions for an
+// incompatible one, and a warning naming the pin when the module is a local checkout, saying where it is.
+func TestCheckContractJudgesThePinAgainstTheBuild(t *testing.T) {
+	t.Parallel()
+
+	ref := contractref.Ref{Package: "example.com/contracts/rewards", Interface: "Cohort", Version: "v1.4.0"}
+	module := func(version, dir string) contractref.Module {
+		return contractref.Module{Path: "example.com/contracts", Version: version, Dir: dir}
+	}
+
+	for name, tc := range map[string]struct {
+		built contractref.Module
+		want  []Issue
+	}{
+		"same version": {built: module("v1.4.0", "")},
+		"newer minor":  {built: module("v1.7.2", "")},
+		"older minor": {built: module("v1.3.9", ""), want: []Issue{{
+			Severity: SeverityError, Code: CodeContractVersion, Field: "implements",
+			Message: "example.com/contracts: incompatible contract version: the plugin is written against v1.4.0, " +
+				"a minor version newer than the service's v1.3.9",
+		}}},
+		"another major": {built: module("v2.0.0", ""), want: []Issue{{
+			Severity: SeverityError, Code: CodeContractVersion, Field: "implements",
+			Message: "example.com/contracts: incompatible contract version: the plugin is written against v1.4.0, " +
+				"a major version other than the service's v2.0.0",
+		}}},
+		"checkout": {built: module(contractref.Devel, ""), want: []Issue{{
+			Severity: SeverityWarning, Code: CodeContractDevel, Field: "implements",
+			Message: "the service's contract module example.com/contracts is built from a local checkout, version " +
+				"(devel): the plugin's v1.4.0 is not checked",
+		}}},
+		"replaced by a directory": {built: module(contractref.Devel, "../contracts"), want: []Issue{{
+			Severity: SeverityWarning, Code: CodeContractDevel, Field: "implements",
+			Message: "the service's contract module example.com/contracts is replaced by the local directory " +
+				"../contracts, version (devel): the plugin's v1.4.0 is not checked",
+		}}},
+	} {
+		report := &Report{}
+		checkContract(report, tc.built, ref)
+		assert.Equal(t, tc.want, report.Issues, name)
+	}
+}
+
 // TestDecodeResultsRejectsMalformedBodies covers the guest answering garbage with an OK status: the call
 // fails (and its instance is discarded) instead of returning made-up values.
 func TestDecodeResultsRejectsMalformedBodies(t *testing.T) {
 	t.Parallel()
 
-	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
+	meth, err := newMethod(new(wire.Planner), new(reflect.TypeFor[pair]().Method(0)), 0, 0)
 	require.NoError(t, err)
 
 	valid, err := wire.AppendString(nil, "x")
@@ -460,7 +518,7 @@ func reporting(handler slog.Handler) *panicReporter {
 // newTestPool returns a pool of sp's instances; cfg's spawn, key, language and limit are set, and its panic
 // reporter, budget and meters default to a discarding one, no budget and discarding instruments.
 func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
-	cfg.spawn, cfg.key, cfg.lang, cfg.limit = spawner.spawn, "test/k", LanguageGo, testLimit
+	cfg.spawn, cfg.id, cfg.limit = spawner.spawn, pluginID{owner: noOwner, key: "test/k", lang: LanguageGo}, testLimit
 	if cfg.panics == nil {
 		cfg.panics = reporting(slog.DiscardHandler)
 	}
@@ -470,7 +528,11 @@ func newTestPool(spawner *fakeSpawner, cfg *poolConfig) *pool {
 	}
 
 	if cfg.meters == nil {
-		cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
+		cfg.meters = newPluginMeters(
+			discardInstruments(),
+			cfg.id,
+			methodsOf(reflect.TypeFor[testIface]()),
+		)
 	}
 
 	return newPool(cfg)
@@ -756,13 +818,11 @@ func TestPoolStopsGrowingAtTheBudget(t *testing.T) {
 			panics: reporting(slog.DiscardHandler),
 			spawn:  spawner.spawn,
 			budget: budget,
-			key:    "test/other",
+			id:     pluginID{owner: noOwner, key: "test/other", lang: LanguageGo},
 			meters: newPluginMeters(
 				discardInstruments(),
-				"test/other",
-				LanguageGo,
-				noOwner,
-				reflect.TypeFor[testIface](),
+				pluginID{owner: noOwner, key: "test/other", lang: LanguageGo},
+				methodsOf(reflect.TypeFor[testIface]()),
 			),
 			limit:   testLimit,
 			minSize: 1,
@@ -1374,11 +1434,11 @@ func TestGuestOutputGuardsDoNotAllocate(t *testing.T) {
 	line := []byte("a line of guest output\n")
 	failures := 0
 	allocs := func(logger *slog.Logger) float64 {
-		out := guestout.New(logger, "test/k")
+		out := guestout.New(logger, "test/k", nil)
 		stdout := out.Stdout()
 
 		return testing.AllocsPerRun(100, func() {
-			out.Begin()
+			out.Begin(t.Context())
 
 			_, err := stdout.Write(line)
 			if err != nil {
@@ -1412,7 +1472,7 @@ func TestDiscardingAnUnstartedInstanceLogsItsCloseFailure(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecorder()
-	starting := &launcher{output: slog.New(rec), key: "test/k"}
+	starting := &launcher{output: slog.New(rec), id: pluginID{key: "test/k"}}
 	inst := &failingCloser{}
 
 	starting.discardUnstarted(t.Context(), inst)
@@ -1524,7 +1584,11 @@ func TestRefillerGivesTheInstanceBackWhenItsMeterPanics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reporter := reporting(slog.DiscardHandler)
 		budget := &memoryBudget{}
-		meters := newPluginMeters(panickingInstruments(t), "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(
+			panickingInstruments(t),
+			pluginID{owner: noOwner, key: "test/k", lang: LanguageGo},
+			methodsOf(reflect.TypeFor[testIface]()),
+		)
 		instances := startPool(t, &fakeSpawner{}, &poolConfig{
 			panics: reporter, budget: budget, meters: meters, minSize: 1, maxSize: 1,
 		})
@@ -1554,8 +1618,15 @@ func TestPoolSurvivesAPanickingMeterProvider(t *testing.T) {
 		budget := &memoryBudget{}
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		instances := startPool(t, spawner, &poolConfig{
-			panics: reporter, budget: budget, minSize: 1, maxSize: 1,
-			meters: newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]()),
+			panics:  reporter,
+			budget:  budget,
+			minSize: 1,
+			maxSize: 1,
+			meters: newPluginMeters(
+				inst,
+				pluginID{owner: noOwner, key: "test/k", lang: LanguageGo},
+				methodsOf(reflect.TypeFor[testIface]()),
+			),
 		})
 		<-spawner.attempts // warm's
 
@@ -1607,8 +1678,9 @@ func TestAPanickingMeterProviderNeverFailsAnHTTPRequest(t *testing.T) {
 
 	inst := panickingInstruments(t)
 	reporter := newPanicReporter(slog.New(slog.DiscardHandler), nil, 4, inst)
-	meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
-	done := (&Container{panics: reporter}).httpDone("test/k", LanguageGo, meters)
+	id := pluginID{owner: noOwner, key: "test/k", lang: LanguageGo}
+	meters := newPluginMeters(inst, id, methodsOf(reflect.TypeFor[testIface]()))
+	done := (&Container{panics: reporter}).httpDone(id, meters)
 
 	assert.NotPanics(t, func() { done(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200}) })
 
@@ -1661,7 +1733,7 @@ var errTrap = errors.New("wasm error: unreachable")
 func TestCallFailuresArePanicErrors(t *testing.T) {
 	t.Parallel()
 
-	meth, err := newMethod(new(wire.Planner), reflect.TypeFor[pair](), 0, 0)
+	meth, err := newMethod(new(wire.Planner), new(reflect.TypeFor[pair]().Method(0)), 0, 0)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -1851,7 +1923,7 @@ func TestHTTPPanicsArePanicErrors(t *testing.T) {
 
 	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
 
-	ctr.httpPanicked("test/k", LanguageGo, noOwner)(t.Context(), "transport bug")
+	ctr.httpPanicked(pluginID{owner: noOwner, key: "test/k", lang: LanguageGo})(t.Context(), "transport bug")
 
 	recent := ctr.RecentPanics()
 	require.Len(t, recent, 1)
@@ -2043,6 +2115,15 @@ func TestCheckNoGoStatements(t *testing.T) {
 			files: fstest.MapFS{"a_test.go": spawns, "link.go": {Mode: fs.ModeSymlink, Data: []byte("x")}},
 		},
 		{
+			name: "only the files the guest loads", dir: "p", want: ErrGoStatement, msg: "plugins: p/z_riscv64.go:4:2",
+			files: fstest.MapFS{
+				"p/a.go": clean, "p/_old.go": spawns, "p/.x.go": spawns, "p/x_windows.go": spawns,
+				"p/z_riscv64.go": spawns, "p/_broken.go": {Data: []byte("package p\nfunc {")},
+				"p/gen.go": {Data: []byte("// +build ignore\n\npackage main\n\nimport \"os\"\n\n" +
+					"func main() {\n\tgo os.Exit(0)\n}\n")},
+			},
+		},
+		{
 			name: "syntax errors fail as the guest would", dir: ".", want: errGuestLoad,
 			files: fstest.MapFS{"a.go": {Data: []byte("package p\nfunc {")}}, msg: "a.go:2:6",
 		},
@@ -2065,6 +2146,51 @@ func TestCheckNoGoStatements(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 			assert.Contains(t, err.Error(), tc.msg)
 		})
+	}
+}
+
+// TestGoSourceTreeMountsVendoredPackages mounts a Go plugin's vendor directory at its packages' import paths, beside
+// the plugin and the contract, and refuses vendored packages taking the contract's import path or plg's own.
+func TestGoSourceTreeMountsVendoredPackages(t *testing.T) {
+	t.Parallel()
+
+	var source memfs.Builder
+
+	require.NoError(t, source.Add("c.go", []byte("package c\n")))
+
+	contractSource, err := source.Build()
+	require.NoError(t, err)
+
+	contr := &contract{pkgPath: "example.com/c", source: contractSource}
+	file := &fstest.MapFile{Data: []byte("package x\n")}
+
+	tree, err := goSourceTree(contr, []byte("package dispatch\n"), fstest.MapFS{
+		"p/plugin.go":                             file,
+		"p/vendor/example.com/repo/lib/lib.go":    file,
+		"p/vendor/example.com/repo/lib/x/x.go":    file,
+		"p/vendor/example.com/c/sub/sub.go":       file,
+		"other/vendor/example.com/elsewhere/e.go": file,
+	}, "p/plugin.go")
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"src/example.com/c/c.go", "src/plg.local/plugin/plugin.go", "src/plg.local/dispatch/dispatch.go",
+		"src/example.com/repo/lib/lib.go", "src/example.com/repo/lib/x/x.go", "src/example.com/c/sub/sub.go",
+	} {
+		_, err = fs.Stat(tree, name)
+		require.NoError(t, err, name)
+	}
+
+	_, err = fs.Stat(tree, "src/example.com/elsewhere")
+	require.ErrorIs(t, err, fs.ErrNotExist, "only the package directory's vendor directory is mounted")
+
+	_, err = goSourceTree(contr, nil, fstest.MapFS{"plugin.go": file, "vendor": file}, ".")
+	require.NoError(t, err, "a file named vendor is the plugin's own")
+
+	for _, vendored := range []string{"example.com/c/v.go", "plg.local/v.go", "plg.local/dispatch/v.go"} {
+		_, err = goSourceTree(contr, nil, fstest.MapFS{"plugin.go": file, "vendor/" + vendored: file}, ".")
+		require.ErrorIs(t, err, errVendored, vendored)
+		assert.ErrorContains(t, err, "vendor/"+vendored, vendored)
 	}
 }
 
@@ -2389,7 +2515,11 @@ func TestCallMeasurementsByMethodAndOutcome(t *testing.T) {
 		Team: Team{Name: "payments", Department: "finance"}, Org: "commerce", Company: "acme",
 		Maintainers: []Maintainer{{Name: "Ana", Email: "ana@example.com"}}, Labels: map[string]string{"tier": "1"},
 	}
-	meters := newPluginMeters(inst, "n/k", LanguageLua, newOwnerTags(owner, "", ""), reflect.TypeFor[twoMethods]())
+	meters := newPluginMeters(
+		inst,
+		pluginID{owner: newOwnerTags(owner, "", ""), key: "n/k", lang: LanguageLua},
+		methodsOf(reflect.TypeFor[twoMethods]()),
+	)
 	ctx := t.Context()
 
 	for _, call := range []struct {
@@ -2436,7 +2566,11 @@ func TestHTTPMeasurements(t *testing.T) {
 	t.Parallel()
 
 	inst, reader, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "web/p", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(
+		inst,
+		pluginID{owner: noOwner, key: "web/p", lang: LanguageGo},
+		methodsOf(reflect.TypeFor[testIface]()),
+	)
 	ctx := t.Context()
 
 	for _, report := range []httpcap.Report{
@@ -2446,7 +2580,7 @@ func TestHTTPMeasurements(t *testing.T) {
 		{Outcome: httpcap.OutcomeRefused, Sent: 40, Duration: time.Microsecond},
 		{Outcome: httpcap.OutcomeFailed, Sent: 50, Duration: 2 * time.Second},
 	} {
-		meters.requested(ctx, report)
+		meters.requested(ctx, &report)
 	}
 
 	got := collect(t, reader)
@@ -2491,7 +2625,11 @@ func TestPoolMeasurements(t *testing.T) {
 		spawner := &fakeSpawner{attempts: make(chan time.Time, 8)}
 		spawner.memory.Store(3 * engine.PageSize)
 
-		meters := newPluginMeters(inst, "test/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+		meters := newPluginMeters(
+			inst,
+			pluginID{owner: noOwner, key: "test/k", lang: LanguageGo},
+			methodsOf(reflect.TypeFor[testIface]()),
+		)
 		instances := startPool(t, spawner, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 		observing(t, provider, inst, instances)
 
@@ -2570,9 +2708,19 @@ func TestInUseCountsInstancesServingConcurrentCalls(t *testing.T) {
 	inst, reader, provider := sdkInstruments(t)
 	guest := newScriptedGuest()
 	cfg := &poolConfig{
-		spawn: func(context.Context) (instance, error) { return guest, nil }, panics: reporting(slog.DiscardHandler),
-		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1, lanes: 3,
-		meters: newPluginMeters(inst, "test/k", LanguageLua, noOwner, reflect.TypeFor[testIface]()),
+		spawn:   func(context.Context) (instance, error) { return guest, nil },
+		panics:  reporting(slog.DiscardHandler),
+		budget:  &memoryBudget{},
+		id:      pluginID{owner: noOwner, key: "test/k", lang: LanguageLua},
+		limit:   testLimit,
+		minSize: 1,
+		maxSize: 1,
+		lanes:   3,
+		meters: newPluginMeters(
+			inst,
+			pluginID{owner: noOwner, key: "test/k", lang: LanguageLua},
+			methodsOf(reflect.TypeFor[testIface]()),
+		),
 	}
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))
@@ -2677,13 +2825,17 @@ func TestAFailingMeterProviderLeavesAWorkingContainer(t *testing.T) {
 	assert.Contains(t, attr(&records[0], "error").String(), errMeter.Error())
 
 	// Every measurement goes to a no-op instrument instead.
-	meters := newPluginMeters(ctr.meters, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	meters := newPluginMeters(
+		ctr.meters,
+		pluginID{owner: noOwner, key: "n/k", lang: LanguageGo},
+		methodsOf(reflect.TypeFor[testIface]()),
+	)
 	meters.called(t.Context(), 0, time.Millisecond, errFake)
-	meters.requested(t.Context(), httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
+	meters.requested(t.Context(), &httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Received: 1})
 	ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 	ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
 	ctr.countReloadFailure(t.Context(), "n", &Owner{})
-	ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
+	ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{}, skipLanguage)
 
 	assert.Len(t, ctr.RecentPanics(), 1, "the container kept working")
 	require.NoError(t, ctr.Close(t.Context()))
@@ -2762,7 +2914,7 @@ func TestAMeterProviderPanickingInItsSetupLeavesAWorkingContainer(t *testing.T) 
 
 			ctr.countLoad(t.Context(), "n/k", LanguageGo, &Owner{}, nil)
 			ctr.countReloadFailure(t.Context(), "n", &Owner{})
-			ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{})
+			ctr.countSkipped(t.Context(), "n/k", LanguageLua, &Owner{}, skipLanguage)
 			ctr.panics.report(t.Context(), &PanicError{Key: "n/k", Phase: PhaseCall})
 
 			require.NotPanics(t, func() { require.NoError(t, ctr.Close(t.Context())) })
@@ -2839,13 +2991,14 @@ func TestMetricsDoNotAllocate(t *testing.T) {
 	}
 
 	inst, _, _ := sdkInstruments(t)
-	meters := newPluginMeters(inst, "n/k", LanguageGo, noOwner, reflect.TypeFor[testIface]())
+	id := pluginID{owner: noOwner, key: "n/k", lang: LanguageGo}
+	meters := newPluginMeters(inst, id, methodsOf(reflect.TypeFor[testIface]()))
 	instances := warmPool(t, &fakeSpawner{}, &poolConfig{meters: meters, minSize: 1, maxSize: 1})
 	ctx := t.Context()
 	pluginErr := &PluginError{Key: "n/k", Method: "Do", Message: "no"}
 	ok := httpcap.Report{Outcome: httpcap.OutcomeOK, Status: 200, Sent: 10, Received: 20, Duration: time.Millisecond}
 	refused := httpcap.Report{Outcome: httpcap.OutcomeRefused, Sent: 10, Duration: time.Millisecond}
-	requested := (&Container{panics: instances.panics}).httpDone("n/k", LanguageGo, meters)
+	requested := (&Container{panics: instances.panics}).httpDone(id, meters)
 
 	var failures int
 
@@ -3026,14 +3179,19 @@ func muxPool(t *testing.T, guest *scriptedGuest, lanes int32, web engine.HTTPFun
 
 	cfg := &poolConfig{
 		spawn: func(context.Context) (instance, error) { return guest, nil }, http: web, panics: panics,
-		budget: &memoryBudget{}, key: "test/k", lang: LanguageLua, limit: testLimit, minSize: 1, maxSize: 1,
+		budget: &memoryBudget{}, id: pluginID{owner: noOwner, key: "test/k", lang: LanguageLua}, limit: testLimit,
+		minSize: 1, maxSize: 1,
 		lanes: lanes,
 	}
 	if cfg.panics == nil {
 		cfg.panics = reporting(slog.DiscardHandler)
 	}
 
-	cfg.meters = newPluginMeters(discardInstruments(), cfg.key, cfg.lang, noOwner, reflect.TypeFor[testIface]())
+	cfg.meters = newPluginMeters(
+		discardInstruments(),
+		cfg.id,
+		methodsOf(reflect.TypeFor[testIface]()),
+	)
 
 	instances := newPool(cfg)
 	require.NoError(t, instances.warm(t.Context()))
@@ -4388,4 +4546,702 @@ func TestEventsAfterCloseAreNotQueued(t *testing.T) {
 
 	assert.Empty(t, ctr.events.queue)
 	assert.Len(t, ctr.RecentPanics(), 1, "the panic itself was still reported")
+}
+
+// TestEventsKeepTheNewestOfEachKeyUnderConcurrency emits events about two listed keys from 8 goroutines, in a
+// container without a WithOnEvent function, while 4 goroutines read them with Events: every read holds at most
+// 100 events, each writer's in the order it emitted them. Once the writers are done, each key holds exactly its
+// newest 100: what each writer has left there is the end of what it emitted. An event about a key no registration
+// lists is kept nowhere.
+func TestEventsKeepTheNewestOfEachKeyUnderConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		writers = 8
+		rounds  = 1000
+	)
+
+	ctr := New()
+
+	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
+
+	keys := []string{"reg/a", "reg/b"}
+	reg := &registration{name: "reg", keys: xsync.NewMap[string, *listedPlugin]()}
+	ctr.names.Store("reg", reg)
+	ctr.regs.Store("reg", reg)
+	t.Cleanup(func() { ctr.regs.Delete("reg") }) // it has no reloader for Close to stop
+
+	for _, key := range keys { // known to Info, as a skipped plugin is
+		reg.entry(key).rejection.Store(&rejection{owner: &noOwner.owner, status: StatusSkipped})
+	}
+
+	var (
+		writing, reading sync.WaitGroup
+		done             atomic.Bool
+		readErr          atomic.Pointer[error]
+	)
+
+	for w := range writers {
+		writing.Go(func() { emitMarks(t.Context(), ctr, append(keys, "reg/unlisted"), w, rounds) })
+	}
+
+	for i := range 4 {
+		reading.Go(func() {
+			for !done.Load() {
+				err := eventsInOrder(ctr, keys[i%len(keys)])
+				if err != nil {
+					readErr.CompareAndSwap(nil, &err)
+				}
+			}
+		})
+	}
+
+	writing.Wait()
+	done.Store(true)
+	reading.Wait()
+
+	if failed := readErr.Load(); failed != nil {
+		require.NoError(t, *failed, "a read while writing")
+	}
+
+	for _, key := range keys {
+		require.NoError(t, eventsInOrder(ctr, key))
+		assertEachWritersNewest(t, ctr, key, rounds)
+	}
+
+	_, err := Events(ctr, "reg/unlisted")
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.Equal(t, len(keys), reg.keys.Size(), "an event about a key no listing names makes no record")
+}
+
+// emitMarks emits, for each of rounds rounds, a Panicked event about each key, its PanicError's value marking
+// the writer and the round.
+func emitMarks(ctx context.Context, ctr *Container, keys []string, writer, rounds int) {
+	for r := range rounds {
+		for _, key := range keys {
+			ctr.events.emit(ctx, &Event{
+				Kind: EventPanicked, Key: key, Panic: &PanicError{Key: key, Value: historyMark{writer, r}},
+			})
+		}
+	}
+}
+
+// eventsInOrder reads the events of key: at most keptEvents, each writer's in the order it emitted them.
+func eventsInOrder(ctr *Container, key string) error {
+	events, err := Events(ctr, key)
+	if err != nil {
+		return err
+	}
+
+	panics := make([]*PanicError, len(events))
+	for i := range events {
+		panics[i] = events[i].Panic
+	}
+
+	return historyInOrder(panics, keptEvents)
+}
+
+// assertEachWritersNewest checks that key holds exactly keptEvents events, all about it, and that what each
+// writer of emitMarks has left there is the end of what it emitted: the newest events, its last ones.
+func assertEachWritersNewest(t *testing.T, ctr *Container, key string, rounds int) {
+	t.Helper()
+
+	events, err := Events(ctr, key)
+	require.NoError(t, err)
+	require.Len(t, events, keptEvents, "%s: quiescent, the ring is full", key)
+
+	kept := map[int][]int{} // writer -> rounds kept, in order
+
+	for i := range events {
+		assert.Equal(t, key, events[i].Key)
+
+		mark, ok := events[i].Panic.Value.(historyMark)
+		require.True(t, ok)
+
+		kept[mark.writer] = append(kept[mark.writer], mark.round)
+	}
+
+	for writer, got := range kept {
+		want := make([]int, len(got))
+		for i := range want {
+			want[i] = rounds - len(got) + i
+		}
+
+		assert.Equal(t, want, got, "%s: writer %d's newest events, its last ones", key, writer)
+	}
+}
+
+// methodsOf returns the methods of the interface iface as the meters and spans of its plugins name them (they
+// need no codecs).
+func methodsOf(iface reflect.Type) []*method {
+	methods := make([]*method, iface.NumMethod())
+	for i := range methods {
+		methods[i] = &method{name: iface.Method(i).Name, index: uint32(i)}
+	}
+
+	return methods
+}
+
+// TestOfflineDefaultsAreRegistersDefaults: plg validate prints and runs under the defaults a Register without
+// WithMemoryLimit and WithPool has, per language.
+func TestOfflineDefaultsAreRegistersDefaults(t *testing.T) {
+	t.Parallel()
+
+	pool := min(runtime.GOMAXPROCS(0), maxPoolSize)
+
+	for lang, memory := range map[Language]uint64{
+		LanguageGo: 128 << 20, LanguageLua: 64 << 20, LanguageTypeScript: 64 << 20, "cobol": 0,
+	} {
+		assert.Equal(t, directive.Limits{Memory: memory, PoolMin: 1, PoolMax: pool}, offline.Defaults(string(lang)),
+			lang)
+	}
+}
+
+// TestLuaLongStringHoldsAnyText embeds texts holding the closing brackets of the shorter long strings, at their end
+// too, and a first newline (which Lua skips after the opening bracket): each is closed only at its end, by the
+// first level it never closes.
+func TestLuaLongStringHoldsAnyText(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ text, level string }{
+		{"", ""},
+		{"plain", ""},
+		{"]]", "="},
+		{"x]", "="},
+		{"]=]]]", "=="},
+		{"x]=", ""},
+		{"x]=]", "=="},
+		{"\nfirst", ""},
+		{"]", "="},
+		{"]=", ""},
+		{"]]=", "=="},
+		{"x]==", ""},
+		{"]==]]]x]=", "==="},
+		{"]]]=]]", "=="},
+	} {
+		got := luaLongString(tc.text)
+		assert.Equal(t, "["+tc.level+"[\n"+tc.text+"]"+tc.level+"]", got, "%q", tc.text)
+		assert.Equal(t, len(got)-len(tc.level)-2, strings.Index(got, "]"+tc.level+"]"), "%q: closed at its end only",
+			tc.text)
+	}
+}
+
+// TestLuaLongStringIsOnePass embeds a text closing every level up to k (k²/2 bytes): it gets level k+1, built
+// without a copy of the text per level tried.
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestLuaLongStringIsOnePass(t *testing.T) {
+	const k = 2000
+
+	var text strings.Builder
+
+	for level := range k + 1 {
+		text.WriteString("]" + strings.Repeat("=", level) + "]")
+	}
+
+	s := text.String()
+	level := strings.Repeat("=", k+1)
+	assert.Equal(t, "["+level+"[\n"+s+"]"+level+"]", luaLongString(s))
+
+	// The level's "=", the levels seen, and the result: never a copy of the text per level.
+	assert.LessOrEqual(t, testing.AllocsPerRun(5, func() { _ = luaLongString(s) }), 15.0)
+}
+
+// TestOfflineOwnershipIsTheLoadsRule returns the missing-ownership issue a load adds: a warning, an error when
+// required, none for a complete owner; an invalid manifest fails.
+func TestOfflineOwnershipIsTheLoadsRule(t *testing.T) {
+	t.Parallel()
+
+	const head = "implements: example.com/c/p.I@v1.0.0\nlanguage: lua\nentrypoint: p.lua\n"
+
+	issues, err := offlineOwnership([]byte(head+"owner: {team: {name: growth}}\n"), false)
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "warning", issues[0].Severity)
+	assert.Equal(t, CodeOwnershipMissing, issues[0].Code)
+	assert.Equal(t, "owner.contact", issues[0].Field)
+
+	issues, err = offlineOwnership([]byte(head), true)
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "error", issues[0].Severity)
+	assert.Equal(t, "owner", issues[0].Field)
+
+	issues, err = offlineOwnership([]byte(head+"owner: {team: {name: growth}, contact: {email: g@example.com}}\n"),
+		true)
+	require.NoError(t, err)
+	assert.Empty(t, issues)
+
+	_, err = offlineOwnership([]byte("language: lua\n"), false)
+	require.ErrorIs(t, err, ErrInvalidManifest)
+}
+
+// testSecrets returns the secrets of a plugin version declaring names, resolved by resolve and cached for ttl, and
+// the log their failures go to.
+func testSecrets(t *testing.T, resolve secretResolver, ttl time.Duration, names ...string) (*pluginSecrets,
+	*bytes.Buffer,
+) {
+	t.Helper()
+
+	var logs bytes.Buffer
+
+	cfg := &registerConfig{resolve: resolve, secretTTL: ttl}
+	info := PluginInfo{Key: "s/p", Version: "v1", Language: LanguageLua}
+	id := pluginID{owner: noOwner, key: info.Key, lang: info.Language}
+
+	return newPluginSecrets(cfg, &info, names, nil, slog.New(slog.NewJSONHandler(&logs, nil)), id), &logs
+}
+
+// read reads the secret name as a guest does: through serve, decoding its answer.
+func read(t *testing.T, s *pluginSecrets, name string) (string, error) {
+	t.Helper()
+
+	return goguest.SecretAnswer(s.serve(t.Context(), nil, []byte(name))) //nolint:wrapcheck // the guest's own error
+}
+
+func TestOversizedSecretsFailTheRead(t *testing.T) {
+	t.Parallel()
+
+	huge := strings.Repeat("v", MaxSecretSize+1)
+	secrets, logs := testSecrets(t, func(context.Context, PluginInfo, string) (string, error) { return huge, nil },
+		secretTTL, "big")
+
+	_, err := read(t, secrets, "big")
+	require.EqualError(t, err, `plg: secret "big" could not be resolved (the service's log says why)`)
+	assert.Contains(t, logs.String(), `"secret":"big","error":"the resolver returned a value over the 65536-byte `+
+		`limit: 65537 bytes"`)
+	assert.Equal(t, "x", secrets.redactor().String("x"), "a refused value is not recorded")
+
+	exact := strings.Repeat("v", MaxSecretSize)
+	secrets, _ = testSecrets(t, func(context.Context, PluginInfo, string) (string, error) { return exact, nil },
+		secretTTL, "big")
+
+	got, err := read(t, secrets, "big")
+	require.NoError(t, err, "the limit itself is allowed")
+	assert.Equal(t, exact, got)
+}
+
+func TestUndeclaredSecretNamesAreRefusedBriefly(t *testing.T) {
+	t.Parallel()
+
+	unexpected := func(context.Context, PluginInfo, string) (string, error) {
+		t.Error("an undeclared name reached the resolver")
+
+		return "", nil
+	}
+
+	secrets, _ := testSecrets(t, unexpected, secretTTL, "a", "b")
+	longest := strings.Repeat("n", MaxSecretName)
+
+	_, err := read(t, secrets, longest)
+	require.EqualError(
+		t,
+		err,
+		`plg: secret "`+longest+`" is not declared in the plugin's plugin.yaml (it declares a, b)`,
+		"a name of MaxSecretName bytes, longer than any declared one, is quoted",
+	)
+
+	_, err = read(t, secrets, longest+"n")
+	require.EqualError(t, err, "plg: a secret name of 65 bytes is not declared in the plugin's plugin.yaml "+
+		"(it declares a, b)", "a name over MaxSecretName bytes is not")
+
+	_, err = read(t, secrets, strings.Repeat("n", 1<<20))
+	require.EqualError(t, err, "plg: a secret name of 1048576 bytes is not declared in the plugin's plugin.yaml "+
+		"(it declares a, b)", "a huge name is not echoed")
+
+	none, _ := testSecrets(t, unexpected, secretTTL)
+
+	_, err = read(t, none, "a")
+	require.EqualError(t, err, `plg: secret "a" is not declared in the plugin's plugin.yaml (it declares none)`)
+	assert.Nil(t, none.redactor(), "a version declaring no secrets scrubs nothing")
+}
+
+func TestWithoutACacheEveryReadResolves(t *testing.T) {
+	t.Parallel()
+
+	var n int
+
+	secrets, _ := testSecrets(t, func(context.Context, PluginInfo, string) (string, error) {
+		n++
+
+		return strings.Repeat("x", n) + "-value", nil
+	}, 0, "k")
+
+	for want := range 3 {
+		got, err := read(t, secrets, "k")
+		require.NoError(t, err)
+		assert.Equal(t, strings.Repeat("x", want+1)+"-value", got)
+	}
+
+	assert.Equal(t, "[secret k] [secret k]", secrets.redactor().String("x-value xxx-value"),
+		"every value read is scrubbed")
+}
+
+// nopCall is a call without arguments or results, allocating nothing.
+type nopCall struct{}
+
+func (nopCall) AppendArgs(b []byte) ([]byte, error) { return b, nil }
+
+func (nopCall) DecodeResults(*wire.Reader) error { return nil }
+
+// tracedPlugin returns a generation of plugin "test/k" serving testIface, owned by team t of org o of company c,
+// whose single instance answers with call, traced by tracing (nil traces nothing), and its Do method.
+func tracedPlugin(t *testing.T, reporter *panicReporter, tracing *tracing, call func() (engine.Result, error),
+) (*plugin, *method) {
+	t.Helper()
+
+	iface := reflect.TypeFor[testIface]()
+	meth, err := newMethod(new(wire.Planner), new(iface.Method(0)), 0, 0)
+	require.NoError(t, err)
+
+	instances := warmPool(t, &fakeSpawner{call: call}, &poolConfig{panics: reporter, minSize: 1, maxSize: 1})
+	t.Cleanup(func() { assert.NoError(t, instances.close(context.Background())) })
+
+	plug := &plugin{key: "test/k", desc: Descriptor{Language: LanguageGo}, pool: instances}
+
+	if tracing != nil {
+		owner := newOwnerTags(&Owner{Team: Team{Name: "t"}, Org: "o", Company: "c"}, "v1", "s")
+		plug.spans = newPluginSpans(tracing, pluginID{owner: owner, key: "test/k", lang: LanguageGo}, []*method{meth},
+			nil)
+	}
+
+	return plug, meth
+}
+
+func answering(res engine.Result, err error) func() (engine.Result, error) {
+	return func() (engine.Result, error) { return res, err }
+}
+
+// TestNoopTracingCallsDoNotAllocate: with a no-op provider (or the API's default global one, before an SDK replaces
+// it), a call allocates exactly what it does untraced (`make allocs` runs it uninstrumented, with -race); a
+// recording provider allocates, so the comparison measures the spans.
+//
+//nolint:paralleltest // testing.AllocsPerRun panics in parallel tests
+func TestNoopTracingCallsDoNotAllocate(t *testing.T) {
+	if testing.CoverMode() != "" {
+		t.Skip("allocations are measured without coverage instrumentation, by make allocs")
+	}
+
+	reporter := reporting(slog.DiscardHandler)
+	recording := sdktrace.NewTracerProvider()
+
+	t.Cleanup(func() { assert.NoError(t, recording.Shutdown(context.Background())) })
+
+	failures := 0
+	allocs := func(tracing *tracing) float64 {
+		plug, meth := tracedPlugin(t, reporter, tracing, answering(engine.Result{Status: wire.StatusOK}, nil))
+
+		return testing.AllocsPerRun(100, func() {
+			if plug.call(t.Context(), meth, nopCall{}) != nil {
+				failures++
+			}
+		})
+	}
+
+	untraced := allocs(nil)
+	assert.InDelta(t, untraced, allocs(newTracing(tracenoop.NewTracerProvider(), reporter)), 0, "noop")
+
+	deprecated := trace.NewNoopTracerProvider() //nolint:staticcheck // SA1019: the deprecated no-op one is still one
+	assert.InDelta(t, untraced, allocs(newTracing(deprecated, reporter)), 0, "deprecated noop")
+
+	// The API's default global provider as the global one: what newTracing makes of it, with the global
+	// provider unchanged since (whichever it is in this process).
+	idle := &tracing{tracer: recording.Tracer("test"), idle: otel.GetTracerProvider(), panics: reporter}
+	assert.InDelta(t, untraced, allocs(idle), 0, "the API's default global provider, before an SDK replaces it")
+	assert.Greater(t, allocs(newTracing(recording, reporter)), untraced, "a recording provider")
+	assert.Zero(t, failures)
+}
+
+func TestCallSpansRecordTheirOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err     error
+		name    string
+		outcome string
+		res     engine.Result
+	}{
+		{name: "ok", res: engine.Result{Status: wire.StatusOK}, outcome: "ok"},
+		{name: "plugin error", res: engine.Result{Status: wire.StatusError, Message: "no"}, outcome: "error"},
+		{name: "conversion", res: engine.Result{Status: wire.StatusConvert, Message: "big"}, outcome: "conversion"},
+		{name: "guest panic", res: engine.Result{Status: wire.StatusPanic, Message: "boom"}, outcome: "panic"},
+		{name: "unavailable", err: engine.ErrStopped, outcome: "unavailable"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			exporter := tracetest.NewInMemoryExporter()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+
+			t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.Background())) })
+
+			reporter := reporting(slog.DiscardHandler)
+			plug, meth := tracedPlugin(t, reporter, newTracing(provider, reporter), answering(tc.res, tc.err))
+
+			ctx, parent := provider.Tracer("test").Start(t.Context(), "request")
+			err := plug.call(ctx, meth, nopCall{})
+
+			parent.End()
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, 2, "the call's and its parent")
+
+			span := spans[0]
+			assert.Equal(t, "plg.call test/k.Do", span.Name)
+			assert.Equal(t, parent.SpanContext().SpanID(), span.Parent.SpanID())
+			assert.ElementsMatch(t, []string{
+				"key=test/k", "version=v1", "language=go", "method=Do", "outcome=" + tc.outcome, "team=t", "org=o",
+				"company=c",
+			}, attrStrings(&span))
+
+			if tc.outcome == "ok" {
+				require.NoError(t, err)
+				assert.Equal(t, sdktrace.Status{Code: codes.Unset}, span.Status)
+				assert.Empty(t, span.Events)
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, sdktrace.Status{Code: codes.Error, Description: err.Error()}, span.Status)
+			require.Len(t, span.Events, 1)
+			assert.Equal(t, "exception", span.Events[0].Name)
+		})
+	}
+}
+
+// TestHTTPSpansRecordTheResponseStatus: an answered request carries http.response.status_code, and a status of
+// 400 or above sets the client span's error status; below 400 it stays unset.
+func TestHTTPSpansRecordTheResponseStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusOK, http.StatusFound, http.StatusBadRequest, http.StatusBadGateway} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+
+			exporter := tracetest.NewInMemoryExporter()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+
+			t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.Background())) })
+
+			reporter := reporting(slog.DiscardHandler)
+			plug, _ := tracedPlugin(t, reporter, newTracing(provider, reporter), answering(engine.Result{}, nil))
+
+			_, end := plug.spans.httpRequest(t.Context())
+			require.NotNil(t, end)
+			end(httpcap.Report{
+				Method: http.MethodGet, URL: "https://example.test/x", Status: status, Outcome: httpcap.OutcomeOK,
+			})
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, 1)
+			assert.Contains(t, attrStrings(&spans[0]), "http.response.status_code="+strconv.Itoa(status))
+
+			want := codes.Unset
+			if status >= http.StatusBadRequest {
+				want = codes.Error
+			}
+
+			assert.Equal(t, want, spans[0].Status.Code)
+		})
+	}
+}
+
+// attrStrings returns a span's attributes as key=value strings.
+func attrStrings(span *tracetest.SpanStub) []string {
+	out := make([]string, 0, len(span.Attributes))
+	for _, kv := range span.Attributes {
+		out = append(out, string(kv.Key)+"="+kv.Value.String())
+	}
+
+	return out
+}
+
+// panickingTracerProvider panics where it is told to: creating a tracer, starting a span or ending one.
+type panickingTracerProvider struct {
+	tracenoop.TracerProvider
+
+	where string
+}
+
+//nolint:ireturn // the OpenTelemetry API's interface
+func (p panickingTracerProvider) Tracer(string, ...trace.TracerOption) trace.Tracer {
+	if p.where == "Tracer" {
+		panic("tracer bug")
+	}
+
+	return panickingTracer{where: p.where}
+}
+
+type panickingTracer struct {
+	tracenoop.Tracer
+
+	where string
+}
+
+//nolint:ireturn // the OpenTelemetry API's interface
+func (t panickingTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption,
+) (context.Context, trace.Span) {
+	if t.where == "Start" {
+		panic("tracer bug")
+	}
+
+	return ctx, panickingSpan{}
+}
+
+type panickingSpan struct {
+	tracenoop.Span
+}
+
+func (panickingSpan) End(...trace.SpanEndOption) {
+	panic("tracer bug")
+}
+
+// TestTracerProviderPanicsAreContained: a tracer provider panicking creates no tracer, or fails no call; each
+// panic is a PanicError in PhaseCallback naming the provider.
+func TestTracerProviderPanicsAreContained(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Tracer", func(t *testing.T) {
+		t.Parallel()
+
+		reporter := reporting(slog.DiscardHandler)
+		assert.False(t, newTracing(panickingTracerProvider{where: "Tracer"}, reporter).on(), "no tracer: off")
+		requireTracerPanics(t, reporter)
+	})
+
+	for _, where := range []string{"Start", "End"} {
+		t.Run(where, func(t *testing.T) {
+			t.Parallel()
+
+			reporter := reporting(slog.DiscardHandler)
+			tracing := newTracing(panickingTracerProvider{where: where}, reporter)
+			plug, meth := tracedPlugin(t, reporter, tracing, answering(engine.Result{Status: wire.StatusOK}, nil))
+			require.NoError(t, plug.call(t.Context(), meth, nopCall{}), "the call goes on")
+
+			ctx, ended := plug.spans.httpRequest(t.Context())
+			if where == "Start" {
+				assert.Nil(t, ended, "no span to end")
+				assert.Equal(t, t.Context(), ctx)
+			} else {
+				assert.NotPanics(t, func() { ended(httpcap.Report{Method: "GET"}) })
+			}
+
+			requireTracerPanics(t, reporter)
+		})
+	}
+}
+
+// requireTracerPanics requires reporter to have recorded panics, every one the tracer provider's.
+func requireTracerPanics(t *testing.T, reporter *panicReporter) {
+	t.Helper()
+
+	recent := reporter.history.recent()
+	require.NotEmpty(t, recent)
+
+	for _, failed := range recent {
+		assert.Equal(t, PhaseCallback, failed.Phase)
+		assert.Equal(t, "trace.TracerProvider", failed.Method)
+		assert.Equal(t, "tracer bug", failed.Value)
+	}
+}
+
+func TestHostOutcome(t *testing.T) {
+	t.Parallel()
+
+	answer := func(status wire.Status, msg string) []byte {
+		return wire.AppendMessage([]byte{byte(status)}, msg)
+	}
+
+	for _, tc := range []struct {
+		err           error
+		name, outcome string
+		message       string
+		answer        []byte
+	}{
+		{name: "ok", answer: []byte{byte(wire.StatusOK), 1, 2}, outcome: "ok"},
+		{name: "error", answer: answer(wire.StatusError, "no user"), outcome: "error", message: "no user"},
+		{name: "conversion", answer: answer(wire.StatusConvert, "too big"), outcome: "conversion", message: "too big"},
+		{name: "panic", answer: answer(wire.StatusPanic, "bug"), outcome: "panic", message: "bug"},
+		{name: "not served", err: errHostArgs, outcome: "error", message: errHostArgs.Error()},
+		{name: "no answer", outcome: "error", message: "empty answer"},
+	} {
+		got := hostOutcome(tc.answer, tc.err)
+		assert.Equal(t, tc.outcome, got.outcome.String(), tc.name)
+		assert.Equal(t, tc.message, got.message, tc.name)
+	}
+
+	got := hostOutcome([]byte{byte(wire.StatusError), 9}, nil)
+	assert.Equal(t, callError, got.outcome)
+	assert.Contains(t, got.message, "undecodable message: ", "a truncated message")
+}
+
+// TestTracingFollowsTheGlobalProvider checks, in a process of its own (the global provider can be replaced only
+// once per process), that the default tracing is the global provider: off while it is the API's default, on
+// once an SDK replaces it.
+func TestTracingFollowsTheGlobalProvider(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv(GlobalTracingChild) == "" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], //nolint:gosec // G204: this test binary, re-run
+			"-test.run=^TestTracingFollowsTheGlobalProvider$", "-test.count=1", "-test.v")
+
+		cmd.Env = append(os.Environ(), GlobalTracingChild+"=1")
+
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		assert.Contains(t, string(out), "--- PASS: TestTracingFollowsTheGlobalProvider", "the child ran the test")
+
+		return
+	}
+
+	reporter := reporting(slog.DiscardHandler)
+	tracing := newTracing(nil, reporter)
+	require.NotNil(t, tracing.idle, "the API's default global provider is recognised")
+	assert.False(t, tracing.on())
+
+	plug, meth := tracedPlugin(t, reporter, tracing, answering(engine.Result{Status: wire.StatusOK}, nil))
+	require.NoError(t, plug.call(t.Context(), meth, nopCall{}))
+
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+
+	t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.Background())) })
+	otel.SetTracerProvider(provider)
+
+	assert.True(t, tracing.on(), "the SDK replaced the default")
+	require.NoError(t, plug.call(t.Context(), meth, nopCall{}))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1, "only the call made once the SDK was installed")
+	assert.Equal(t, "plg.call test/k.Do", spans[0].Name)
+
+	assert.Nil(t, newTracing(nil, reporter).idle, "the SDK is no default")
+	assert.Nil(t, newTracing(tracenoop.NewTracerProvider(), reporter).tracer, "a no-op provider is off")
+}
+
+// TestGoValidateMissingReadsTheFilesTheGuestLoads names only the Validate methods the Go guest can see: one
+// declared in a file the guest skips (a name starting with "_", another GOOS's file, a build-constrained one) is
+// not declared by the plugin.
+func TestGoValidateMissingReadsTheFilesTheGuestLoads(t *testing.T) {
+	t.Parallel()
+
+	const want = "Validate(ctx context.Context, in c.In) ([]plugin.Issue, error)"
+
+	files := fstest.MapFS{
+		"p/plugin.go":      {Data: []byte("package p\n\ntype P struct{}\n")},
+		"p/_old.go":        {Data: []byte("package p\n\nfunc (P) Validate() {}\n")},
+		"p/v_windows.go":   {Data: []byte("package p\n\nfunc (*P) Validate() {}\n")},
+		"p/ignored.go":     {Data: []byte("// +build ignore\n\npackage p\n\nfunc (P) Validate(int) {}\n")},
+		"p/plugin_test.go": {Data: []byte("package p\n\nfunc (P) Validate(string) {}\n")},
+	}
+
+	assert.Equal(t, "the plugin instance has no method "+want+", and the plugin declares no method Validate",
+		goValidateMissing(files, "p", want))
+
+	files["p/validate.go"] = &fstest.MapFile{Data: []byte("package p\n\nfunc (P) Validate(n int) {}\n")}
+	assert.Equal(t, "the plugin instance has no method "+want+"; the plugin declares func (P) Validate(n int) "+
+		"(p/validate.go:3:1)", goValidateMissing(files, "p", want))
 }

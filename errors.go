@@ -3,6 +3,7 @@ package plg
 import (
 	"errors"
 
+	"github.com/heynemann/go-plg/internal/gorestrict"
 	"github.com/heynemann/go-plg/internal/httpcap"
 )
 
@@ -39,8 +40,8 @@ var (
 	// ErrMemoryBudget reports a Register whose plugins' worst-case memory, added to that of the plugins already
 	// registered, exceeds the container's [WithMemoryBudget].
 	ErrMemoryBudget = errors.New("plg: memory budget exceeded")
-	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, or whose MemoryLimit is under
-	// one 64 KiB page or over 4 GiB.
+	// ErrInvalidDescriptor reports a [Descriptor] without a key or an entrypoint, whose Implements is missing or
+	// malformed, or whose MemoryLimit is under one 64 KiB page or over 4 GiB.
 	ErrInvalidDescriptor = errors.New("plg: invalid descriptor")
 	// ErrInvalidManifest reports a plugin.yaml that is missing or malformed: in a plugin directory of an
 	// [FSStorage], or given to [ParseManifest].
@@ -51,8 +52,12 @@ var (
 	ErrPluginTooLarge = errors.New("plg: plugin files too large")
 	// ErrDuplicateKey reports a plugin key listed twice by the storages of one Register call.
 	ErrDuplicateKey = errors.New("plg: duplicate plugin key")
-	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run.
+	// ErrUnsupportedLanguage reports a plugin in a language plg cannot run, or one its registration does not
+	// enable: the reason a plugin in such a language is skipped.
 	ErrUnsupportedLanguage = errors.New("plg: unsupported language")
+	// ErrOtherInterface reports a plugin whose [Descriptor.Implements] names another interface than the one its
+	// registration serves: the reason such a plugin is skipped, and a [Check] candidate's report's Err.
+	ErrOtherInterface = errors.New("plg: plugin implements another interface")
 	// ErrGuestNotLinked reports a plugin whose language guest package is not imported by the program.
 	ErrGuestNotLinked = errors.New("plg: guest not linked")
 	// ErrLoad reports a plugin that failed to load: its storage could not open it, its source does not
@@ -76,7 +81,7 @@ var (
 	// and column of each. Register checks the source before loading it: goroutines inside a WebAssembly guest
 	// give no parallelism and are paused between calls, so plugins get their parallelism from the instance
 	// pool instead.
-	ErrGoStatement = errors.New("plg: go statements are not allowed in plugins")
+	ErrGoStatement = gorestrict.ErrGoStatement
 	// ErrInvalidHTTPPolicy reports an [HTTPPolicy] Register cannot accept.
 	ErrInvalidHTTPPolicy = httpcap.ErrInvalidPolicy
 	// ErrCall reports a call that failed outside the plugin's own code: the guest trapped, panicked, was

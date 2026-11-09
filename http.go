@@ -2,12 +2,12 @@ package plg
 
 import (
 	"context"
-	"crypto/x509"
 	"log/slog"
 	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 // HTTPPolicy lets the plugins of one Register call make HTTP requests, which the host makes on their behalf.
@@ -56,22 +56,35 @@ func WithHTTP(policy HTTPPolicy) RegisterOption {
 	}
 }
 
-// httpClient returns the client enforcing the Register call's policy, trusting roots for https (nil: the
-// system's): a refusing one without WithHTTP.
-func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (*httpcap.Client, error) {
+// httpClient returns the client enforcing the Register call's policy, trusting its roots for https (nil: the
+// system's) or answered by its transport (plg validate's test cases): a refusing one without WithHTTP.
+func httpClient(cfg *registerConfig, logger *slog.Logger) (*httpcap.Client, error) {
+	policy := cfg.http
 	if policy == nil {
 		return httpcap.Disabled(logger), nil
 	}
 
-	client, err := httpcap.New(httpcap.Policy{
-		RootCAs:              roots,
+	capPolicy := httpcap.Policy{
+		RootCAs:              cfg.httpRoots,
 		AllowedHosts:         policy.AllowedHosts,
 		BlockPrivateNetworks: policy.BlockPrivateNetworks == nil || *policy.BlockPrivateNetworks,
 		Timeout:              policy.Timeout,
 		MaxRequestBytes:      policy.MaxRequestBytes,
 		MaxResponseBytes:     policy.MaxResponseBytes,
 		MaxRequestsPerCall:   policy.MaxRequestsPerCall,
-	}, logger)
+	}
+
+	var (
+		client *httpcap.Client
+		err    error
+	)
+
+	if cfg.httpTransport != nil {
+		client, err = httpcap.NewAnswered(capPolicy, cfg.httpTransport, logger)
+	} else {
+		client, err = httpcap.New(capPolicy, logger)
+	}
+
 	if err != nil {
 		return nil, err //nolint:wrapcheck // it wraps ErrInvalidHTTPPolicy (httpcap.ErrInvalidPolicy) with the reason
 	}
@@ -79,16 +92,22 @@ func httpClient(policy *HTTPPolicy, roots *x509.CertPool, logger *slog.Logger) (
 	return client, nil
 }
 
-// httpHandler returns the http_roundtrip handler of the instances of the plugin key in lang, enforcing the
-// Register call's policy, its panics reported and its requests counted in meters. A validation's requests
-// ([IsValidation]) are logged with validation=true.
-func (c *Container) httpHandler(reg *registration, key string, lang Language, owner *ownerTags,
-	meters *pluginMeters,
+// httpHandler returns the http_roundtrip handler of the instances of the plugin version id, enforcing the
+// Register call's policy, its panics reported, its requests counted in meters and traced in spans, the logged
+// and traced URLs and errors scrubbed of the version's secrets. A validation's requests ([IsValidation]) are
+// logged with validation=true.
+func (c *Container) httpHandler(reg *registration, id pluginID, meters *pluginMeters, spans *pluginSpans,
+	secrets *redact.Redactor,
 ) engine.HTTPFunc {
-	return reg.http.Handler(key, httpcap.Hooks{
-		Panicked: c.httpPanicked(key, lang, owner), Done: c.httpDone(key, lang, meters), Attr: owner.log,
-		Mark: validationMark,
-	})
+	hooks := &httpcap.Hooks{
+		Panicked: c.httpPanicked(id), Done: c.httpDone(id, meters), Attr: id.owner.log,
+		Mark: validationMark, Trace: spans.httpRequest,
+	}
+	if secrets != nil {
+		hooks.Scrub = secrets.String
+	}
+
+	return reg.http.Handler(id.key, hooks)
 }
 
 // validationMark is the attribute an HTTP request is logged with when it is a validation's.
@@ -102,18 +121,16 @@ func validationMark(ctx context.Context) slog.Attr {
 
 // httpDone returns the function the HTTP capability reports each request to: it counts the request in meters, a
 // panic in their instruments reported as a PanicError in [PhaseCallback] (the request goes on as it ended).
-func (c *Container) httpDone(key string, lang Language, meters *pluginMeters) func(context.Context, httpcap.Report) {
+func (c *Container) httpDone(id pluginID, meters *pluginMeters) func(context.Context, httpcap.Report) {
 	return func(ctx context.Context, report httpcap.Report) {
-		c.panics.callback(ctx, key, lang, meterMethod, func() { meters.requested(ctx, report) })
+		c.panics.callback(ctx, id.key, id.lang, meterMethod, func() { meters.requested(ctx, &report) })
 	}
 }
 
 // httpPanicked returns the function the HTTP capability passes its panics to: they become reported
 // PanicErrors in [PhaseHTTP], and the plugin's request fails with an internal error.
-func (c *Container) httpPanicked(key string, lang Language, owner *ownerTags) func(context.Context, any) {
+func (c *Container) httpPanicked(id pluginID) func(context.Context, any) {
 	return func(ctx context.Context, value any) {
-		c.panics.recovered(ctx, &PanicError{
-			Key: key, Language: lang, Phase: PhaseHTTP, Owner: owner.owner, tags: owner,
-		}, value)
+		c.panics.recovered(ctx, id.panicked(PhaseHTTP), value)
 	}
 }

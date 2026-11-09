@@ -1,2 +1,3 @@
+implements: github.com/heynemann/go-plg/internal/testcontract.Hosted@v1.0.0
 language: go
 entrypoint: .

@@ -72,7 +72,10 @@ func putLua(t *testing.T, store *plg.MemoryStorage, key, version, entry, source 
 		files[entry] = &fstest.MapFile{Data: []byte(source)}
 	}
 
-	desc := plg.Descriptor{Key: key, Language: plg.LanguageLua, Entrypoint: entry, Version: version}
+	desc := plg.Descriptor{
+		Key: key, Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageLua, Entrypoint: entry,
+		Version: version,
+	}
 	require.NoError(t, store.Put(&desc, files))
 }
 

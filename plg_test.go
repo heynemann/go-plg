@@ -30,6 +30,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(plg.GlobalTracingChild) != "" { // a process of TestTracingFollowsTheGlobalProvider's own
+		m.Run()
+
+		return
+	}
+
 	for _, contract := range []plg.Contract{pingerContract(), fastPingerContract()} {
 		err := plg.RegisterContract(contract)
 		if err != nil {
@@ -225,13 +231,28 @@ func emptyStorage() plg.RegisterOption {
 	return plg.WithStorage(plg.NewMemoryStorage("empty"))
 }
 
+// implementsOf is what the test plugins of the interface T declare they implement ([plg.Descriptor.Implements]):
+// T's package and name, at v1.0.0. The test binary's contract modules are its main module, version (devel).
+func implementsOf[T any]() string {
+	iface := reflect.TypeFor[T]()
+
+	return iface.PkgPath() + "." + iface.Name() + "@v1.0.0"
+}
+
+// manifestOf is a plugin.yaml of a plugin implementing T, with the given keys after its implements line.
+func manifestOf[T any](keys string) string {
+	return "implements: " + implementsOf[T]() + "\n" + keys
+}
+
 // goPluginStorage holds one Go plugin, "k".
 func goPluginStorage(t *testing.T) *plg.MemoryStorage {
 	t.Helper()
 
 	store := plg.NewMemoryStorage("go")
 	files := fstest.MapFS{"plugin.go": {Data: []byte("package p\n")}}
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: "plugin.go"}, files))
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+	}, files))
 
 	return store
 }
@@ -478,20 +499,37 @@ func TestRegisterArguments(t *testing.T) {
 		{
 			name: "nokey", want: plg.ErrInvalidDescriptor, msg: "storage s",
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Language: plg.LanguageGo, Entrypoint: "p.go"},
+				{Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go"},
 			}})},
 		},
 		{
 			name: "noentry", want: plg.ErrInvalidDescriptor, msg: "storage s",
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo},
+				{Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo},
+			}})},
+		},
+		{
+			name: "noimplements", want: plg.ErrInvalidDescriptor, msg: `storage s lists "k": implements is required`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
+				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go"},
+			}})},
+		},
+		{
+			name: "badimplements", want: plg.ErrInvalidDescriptor,
+			msg: `storage s lists "k": implements "example.com/c.Pinger@1.0.0": the version must be a canonical`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
+				{Key: "k", Implements: "example.com/c.Pinger@1.0.0", Language: plg.LanguageGo, Entrypoint: "p.go"},
 			}})},
 		},
 		{
 			name: "dupkey", want: plg.ErrDuplicateKey, msg: `"k": listed by storages one and two`,
 			opts: []plg.RegisterOption{
-				plg.WithStorage(listStorage{name: "one", descs: []plg.Descriptor{{Key: "k", Entrypoint: "a"}}}),
-				plg.WithStorage(listStorage{name: "two", descs: []plg.Descriptor{{Key: "k", Entrypoint: "b"}}}),
+				plg.WithStorage(listStorage{name: "one", descs: []plg.Descriptor{
+					{Key: "k", Implements: implementsOf[pinger](), Entrypoint: "a"},
+				}}),
+				plg.WithStorage(listStorage{name: "two", descs: []plg.Descriptor{
+					{Key: "k", Implements: "example.com/other.Iface@v2.0.0", Entrypoint: "b"},
+				}}),
 			},
 		},
 		{
@@ -513,7 +551,7 @@ func TestRegisterArguments(t *testing.T) {
 		{
 			name: "language", want: plg.ErrUnsupportedLanguage, msg: `plugin k (storage s)`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Key: "k", Language: "cobol", Entrypoint: "main.cbl"},
+				{Key: "k", Implements: implementsOf[pinger](), Language: "cobol", Entrypoint: "main.cbl"},
 			}})},
 		},
 		{name: "pool-empty", opts: withEmpty(plg.WithPool(0, 1)), want: plg.ErrInvalidOption, msg: "WithPool(0, 1)"},
@@ -535,7 +573,10 @@ func TestRegisterArguments(t *testing.T) {
 		{
 			name: "desc-limit-small", want: plg.ErrInvalidDescriptor, msg: `"k" with a memory limit of 65535 bytes`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 64<<10 - 1},
+				{
+					Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+					MemoryLimit: 64<<10 - 1,
+				},
 			}})},
 		},
 		{
@@ -545,7 +586,10 @@ func TestRegisterArguments(t *testing.T) {
 		{
 			name: "desc-limit-huge", want: plg.ErrInvalidDescriptor, msg: "4294967297 bytes",
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", MemoryLimit: 4<<30 + 1},
+				{
+					Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+					MemoryLimit: 4<<30 + 1,
+				},
 			}})},
 		},
 		{
@@ -553,15 +597,40 @@ func TestRegisterArguments(t *testing.T) {
 			want: plg.ErrInvalidDescriptor,
 			msg:  `"k": owner has too many labels: 33, limit 32`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go", Owner: &plg.Owner{Labels: labelMap(33)}},
+				{
+					Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+					Owner: &plg.Owner{Labels: labelMap(33)},
+				},
 			}})},
 		},
 		{
 			name: "desc-owner-long-string", want: plg.ErrInvalidDescriptor, msg: `"k": team.name: owner strings`,
 			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
-				Key: "k", Language: plg.LanguageGo, Entrypoint: "p.go",
+				Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
 				Owner: &plg.Owner{Team: plg.Team{Name: strings.Repeat("t", plg.MaxOwnerStringBytes+1)}},
 			}}})},
+		},
+		{
+			name: "desc-secret-name", want: plg.ErrInvalidDescriptor, msg: `"k": secrets: a secret name is 1 to 64`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
+				Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+				Secrets: []string{"ok", "not ok"},
+			}}})},
+		},
+		{
+			name: "desc-secret-twice", want: plg.ErrInvalidDescriptor, msg: `a secret is declared twice: "a"`,
+			opts: []plg.RegisterOption{plg.WithStorage(listStorage{name: "s", descs: []plg.Descriptor{{
+				Key: "k", Implements: implementsOf[pinger](), Language: plg.LanguageGo, Entrypoint: "p.go",
+				Secrets: []string{"a", "a"},
+			}}})},
+		},
+		{
+			name: "secrets-nil", opts: withEmpty(plg.WithSecrets(nil)), want: plg.ErrInvalidOption,
+			msg: "WithSecrets(nil)",
+		},
+		{
+			name: "secrets-twice", want: plg.ErrInvalidOption, msg: "WithSecrets given 2 times",
+			opts: []plg.RegisterOption{emptyStorage(), plg.WithSecrets(noSecret), plg.WithSecrets(noSecret)},
 		},
 		{
 			name: "go-guest-empty", opts: withEmpty(plg.WithGoGuest(nil)), want: plg.ErrInvalidOption,
@@ -625,7 +694,10 @@ func TestRegisterAcceptsTheLimitsOfPoolsAndMemory(t *testing.T) {
 
 	for _, limit := range []uint64{64 << 10, 4 << 30} {
 		store := listStorage{name: "s", descs: []plg.Descriptor{
-			{Key: "k", Language: "cobol", Entrypoint: "main.cbl", MemoryLimit: limit},
+			{
+				Key: "k", Implements: implementsOf[pinger](), Language: "cobol", Entrypoint: "main.cbl",
+				MemoryLimit: limit,
+			},
 		}}
 
 		err := plg.Register[pinger](t.Context(), ctr, "desc"+strconv.FormatUint(limit, 10), plg.WithStorage(store))
@@ -973,3 +1045,6 @@ func TestMemoryStorage(t *testing.T) {
 	err = store.Put(&plg.Descriptor{Key: "broken"}, brokenFS{})
 	require.ErrorIs(t, err, errStorage)
 }
+
+// noSecret is a WithSecrets resolver for tests that never read a secret.
+func noSecret(context.Context, plg.PluginInfo, string) (string, error) { return "", nil }

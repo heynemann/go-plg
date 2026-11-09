@@ -127,11 +127,11 @@ type panicReporter struct {
 	logger  *slog.Logger
 	onPanic func(context.Context, *PanicError)
 	meters  *instruments // nil counts nothing
-	events  *eventQueue  // the WithOnEvent queue; nil emits nothing
+	events  *eventQueue  // the container's events; nil emits nothing
 	// tally counts each PanicError kept in the history toward the plugin it names ([Info]); nil counts nothing.
 	// Set once, before the reporter is shared.
 	tally   func(*PanicError)
-	history panicHistory
+	history ring[*PanicError]
 	// unguarded makes the guarded loggers log straight to logger, without the callback boundary, so that tests
 	// can prove that a panic escaping where plg logs leaves nothing behind.
 	unguarded atomic.Bool
@@ -146,7 +146,7 @@ func newPanicReporter(logger *slog.Logger, onPanic func(context.Context, *PanicE
 		logger:  logger,
 		onPanic: onPanic,
 		meters:  meters,
-		history: panicHistory{ring: make([]atomic.Pointer[panicEntry], max(history, 0))},
+		history: newRing[*PanicError](history),
 	}
 }
 
@@ -230,11 +230,11 @@ func (r *panicReporter) guardedLogger(key string, lang Language) *slog.Logger {
 	return slog.New(&guardedHandler{handler: r.logger.Handler(), panics: r, key: key, lang: lang})
 }
 
-// pluginLogger is guardedLogger for the records about a plugin version: each carries its owner's log group.
-func (r *panicReporter) pluginLogger(key string, lang Language, owner *ownerTags) *slog.Logger {
-	logger := r.guardedLogger(key, lang)
-	if len(owner.log.Value.Group()) > 0 {
-		logger = slog.New(logger.Handler().WithAttrs([]slog.Attr{owner.log}))
+// pluginLogger is guardedLogger for the records about the plugin version id: each carries its owner's log group.
+func (r *panicReporter) pluginLogger(id pluginID) *slog.Logger {
+	logger := r.guardedLogger(id.key, id.lang)
+	if len(id.owner.log.Value.Group()) > 0 {
+		logger = slog.New(logger.Handler().WithAttrs([]slog.Attr{id.owner.log}))
 	}
 
 	return logger
@@ -336,68 +336,6 @@ func (r *panicReporter) log(ctx context.Context, failure *PanicError) {
 	}
 
 	r.logger.LogAttrs(ctx, slog.LevelError, "plg: plugin failure", attrs...)
-}
-
-// panicHistory keeps the newest PanicErrors in a ring, without locks: a writer takes the next sequence number
-// and stores its entry in that number's slot, unless a newer entry holds it already; a reader keeps only the
-// entries whose slot still holds the sequence number it expects, so entries overwritten or not yet stored
-// meanwhile are left out.
-type panicHistory struct {
-	ring []atomic.Pointer[panicEntry]
-	next atomic.Uint64 // sequence number of the next entry
-}
-
-type panicEntry struct {
-	pe  *PanicError
-	seq uint64
-}
-
-func (h *panicHistory) record(pe *PanicError) {
-	if len(h.ring) == 0 {
-		return
-	}
-
-	h.store(h.next.Add(1)-1, pe)
-}
-
-// store puts pe, numbered seq, in its slot. A writer delayed between taking its number and storing may find
-// the slot taken by an entry recorded after its own, one ring length later: it leaves that newer entry in place
-// (its own is out of the history already), so that the history holds the newest entries once writers are done.
-func (h *panicHistory) store(seq uint64, pe *PanicError) {
-	slot, entry := &h.ring[seq%uint64(len(h.ring))], &panicEntry{pe: pe, seq: seq}
-
-	for {
-		held := slot.Load()
-		if held != nil && held.seq > seq {
-			return
-		}
-
-		if slot.CompareAndSwap(held, entry) {
-			return
-		}
-	}
-}
-
-// recent returns the newest entries, oldest first.
-func (h *panicHistory) recent() []*PanicError {
-	size := uint64(len(h.ring))
-	end := h.next.Load()
-
-	if size == 0 || end == 0 {
-		return nil
-	}
-
-	start := end - min(end, size)
-	out := make([]*PanicError, 0, end-start)
-
-	for seq := start; seq < end; seq++ {
-		entry := h.ring[seq%size].Load()
-		if entry != nil && entry.seq == seq {
-			out = append(out, entry.pe)
-		}
-	}
-
-	return out
 }
 
 // RecentPanics returns the newest PanicErrors reported in the container, oldest first: at most the

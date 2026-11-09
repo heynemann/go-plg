@@ -10,9 +10,11 @@ import (
 func init() {
 	Symbols["github.com/heynemann/go-plg/plugin/plugin"] = map[string]reflect.Value{
 		// function, constant and variable definitions
-		"Error":   reflect.ValueOf(plugin.Error),
-		"Info":    reflect.ValueOf(plugin.Info),
-		"Warning": reflect.ValueOf(plugin.Warning),
+		"ErrNoGuest": reflect.ValueOf(&plugin.ErrNoGuest).Elem(),
+		"Error":      reflect.ValueOf(plugin.Error),
+		"Info":       reflect.ValueOf(plugin.Info),
+		"Secret":     reflect.ValueOf(plugin.Secret),
+		"Warning":    reflect.ValueOf(plugin.Warning),
 
 		// type definitions
 		"Issue":    reflect.ValueOf((*plugin.Issue)(nil)),

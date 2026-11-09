@@ -1,0 +1,3 @@
+implements: github.com/heynemann/go-plg/internal/testcontract.Family@v1.0.0
+language: go
+entrypoint: plugin.go

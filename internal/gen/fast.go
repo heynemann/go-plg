@@ -97,9 +97,20 @@ func isBasic(t types.Type, kind types.BasicKind) bool {
 	return ok && basic.Kind() == kind
 }
 
-// signatures returns the methods of iface as the wire encodes their calls, or false when a method does not
+// Plan plans the wire layout of methods, as go/types describes their types: the layout the host's reflective
+// codec gives the same types at run time (see [layout.Build]).
+func Plan(methods []layout.Signature[types.Type]) (*layout.Layout[types.Type], error) {
+	plan, err := layout.Build[types.Type](typesView{}, methods)
+	if err != nil {
+		return nil, fmt.Errorf("planning the wire layout: %w", err)
+	}
+
+	return plan, nil
+}
+
+// Signatures returns the methods of iface as the wire encodes their calls, or false when a method does not
 // take a context first and return an error last (registration then fails, and plg gen generates no fast path).
-func signatures(iface *types.Interface) ([]layout.Signature[types.Type], bool) {
+func Signatures(iface *types.Interface) ([]layout.Signature[types.Type], bool) {
 	methods := make([]layout.Signature[types.Type], 0, iface.NumMethods())
 
 	for method := range iface.Methods() {
@@ -231,12 +242,12 @@ func (g *fastGen) code(template string, vars ...string) string {
 // the interface cannot have any: its methods break the interface contract or use types the wire encoding
 // does not support (registration then fails at init, with the precise reason).
 func (g *fastGen) iface(body *bytes.Buffer, name string, iface *types.Interface) (fastIface, bool) {
-	sigs, ok := signatures(iface)
+	sigs, ok := Signatures(iface)
 	if !ok {
 		return fastIface{}, false
 	}
 
-	plan, err := layout.Build[types.Type](typesView{}, sigs)
+	plan, err := Plan(sigs)
 	if err != nil {
 		return fastIface{}, false
 	}

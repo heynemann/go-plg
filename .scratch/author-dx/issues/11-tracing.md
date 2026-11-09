@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests with the SDK's in-memory exporter: spans and attributes for a call, a Host call and an HTTP request (traceparent received by the test server), parent/child relationships, error status on failures, guest log records carrying the IDs
-- [ ] Benchmarks show no added allocations on calls with the no-op provider
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Tests with the SDK's in-memory exporter: spans and attributes for a call, a Host call and an HTTP request (traceparent received by the test server), parent/child relationships, error status on failures, guest log records carrying the IDs
+- [x] Benchmarks show no added allocations on calls with the no-op provider
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI run 42451722767 for `6e3a3af`: success)

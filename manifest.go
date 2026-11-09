@@ -1,14 +1,15 @@
 package plg
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"strconv"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/heynemann/go-plg/internal/contractref"
+	"github.com/heynemann/go-plg/internal/strictyaml"
 )
 
 // manifestName is the file describing a plugin directory of an [FSStorage].
@@ -26,9 +27,11 @@ const MaxManifestSize = 64 << 10
 type manifest struct {
 	MemoryLimit *manifestInt `yaml:"memoryLimit"`
 	Owner       *Owner       `yaml:"owner"`
+	Implements  string       `yaml:"implements"`
 	Language    Language     `yaml:"language"`
 	Entrypoint  string       `yaml:"entrypoint"`
 	Version     string       `yaml:"version"`
+	Secrets     []string     `yaml:"secrets"`
 }
 
 // manifestInt is a non-negative integer of a plugin.yaml. yaml's own decoding into an integer truncates a float
@@ -57,23 +60,7 @@ var (
 	errManifestLanguage    = errors.New(`language must be "go", "lua" or "typescript"`)
 	errManifestEntrypoint  = errors.New("entrypoint must be a slash-separated path inside the plugin directory")
 	errManifestMemoryLimit = fmt.Errorf("memoryLimit must be from %d bytes (one wasm page) to 4 GiB", minMemoryLimit)
-	errManifestEmpty       = errors.New("plugin.yaml holds no document")
-	errManifestDocuments   = errors.New("plugin.yaml must hold exactly one document")
-	errManifestMapping     = errors.New("plugin.yaml must be a mapping")
-	errManifestAnchor      = errors.New("anchors are not allowed")
-	errManifestAlias       = errors.New("aliases are not allowed")
-	errManifestMergeKey    = errors.New("merge keys (<<) are not allowed")
-	errManifestTag         = errors.New("tags other than YAML's core types are not allowed")
-	errManifestKey         = errors.New("mapping keys must be plain scalars")
-	errManifestDuplicate   = errors.New("duplicate key")
 )
-
-// allowedTags are the tags a plugin.yaml node may carry, written or implied: YAML's core schema. A timestamp is
-// implied by an unquoted date, which a string field takes verbatim.
-var allowedTags = map[string]bool{ //nolint:gochecknoglobals // a constant set; Go has no constant maps
-	"!!str": true, "!!int": true, "!!float": true, "!!bool": true, "!!null": true, "!!timestamp": true,
-	"!!map": true, "!!seq": true,
-}
 
 // ParseManifest parses and checks a plugin.yaml exactly as [FSStorage] does, for storages keeping the same
 // manifest in another place (an object store, a database). The returned Descriptor has no Key, and an empty
@@ -99,126 +86,32 @@ func decodeManifest(data []byte) (Descriptor, error) {
 		return Descriptor{}, errManifestSize
 	}
 
-	err := checkManifestTree(data)
+	var parsed manifest
+
+	err := strictyaml.Decode(data, manifestName, &parsed)
+	if err != nil {
+		return Descriptor{}, err //nolint:wrapcheck // strictyaml's errors name the file and the line
+	}
+
+	return checkManifest(&parsed)
+}
+
+// checkManifest checks the values of a decoded plugin.yaml and returns its descriptor, without a key.
+func checkManifest(parsed *manifest) (Descriptor, error) {
+	err := checkManifestCode(parsed)
 	if err != nil {
 		return Descriptor{}, err
 	}
 
-	// The tree is checked: no alias can expand, so decoding it again is bounded by the size cap.
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-
-	var parsed manifest
-
-	err = decoder.Decode(&parsed)
+	err = checkSecretNames(parsed.Secrets)
 	if err != nil {
-		return Descriptor{}, fmt.Errorf("parsing: %w", err)
+		return Descriptor{}, err
 	}
 
-	return checkManifest(parsed)
-}
-
-// checkManifestTree parses data into a node tree and checks it holds exactly one document, a mapping, within the
-// subset [ParseManifest] describes.
-func checkManifestTree(data []byte) error {
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-
-	var doc yaml.Node
-
-	err := decoder.Decode(&doc)
-	if errors.Is(err, io.EOF) {
-		return errManifestEmpty
+	desc := Descriptor{
+		Implements: parsed.Implements, Language: parsed.Language, Entrypoint: parsed.Entrypoint,
+		Version: parsed.Version, Secrets: parsed.Secrets,
 	}
-
-	if err != nil {
-		return fmt.Errorf("parsing: %w", err)
-	}
-
-	var next yaml.Node
-
-	err = decoder.Decode(&next)
-	if !errors.Is(err, io.EOF) {
-		if err != nil {
-			return fmt.Errorf("parsing: %w", err)
-		}
-
-		return errManifestDocuments
-	}
-
-	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
-		return errManifestMapping
-	}
-
-	return checkNode(doc.Content[0])
-}
-
-// checkNode checks node and the nodes below it against the subset [ParseManifest] describes.
-func checkNode(node *yaml.Node) error {
-	switch {
-	case node.Kind == yaml.AliasNode:
-		return fmt.Errorf("line %d: %w", node.Line, errManifestAlias)
-	case node.Anchor != "":
-		return fmt.Errorf("line %d: %w (&%s)", node.Line, errManifestAnchor, node.Anchor)
-	case node.Tag == "!!merge":
-		return fmt.Errorf("line %d: %w", node.Line, errManifestMergeKey)
-	case !allowedTags[node.Tag]:
-		return fmt.Errorf("line %d: %w (%s)", node.Line, errManifestTag, node.Tag)
-	}
-
-	if node.Kind == yaml.MappingNode {
-		err := checkKeys(node)
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, child := range node.Content {
-		err := checkNode(child)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// checkKeys checks that the keys of the mapping node are scalars, none of them repeated.
-func checkKeys(node *yaml.Node) error {
-	seen := make(map[string]bool, len(node.Content)/2)
-
-	for i := 0; i < len(node.Content); i += 2 {
-		key := node.Content[i]
-		if key.Tag == "!!merge" {
-			return fmt.Errorf("line %d: %w", key.Line, errManifestMergeKey)
-		}
-
-		if key.Kind != yaml.ScalarNode {
-			return fmt.Errorf("line %d: %w", key.Line, errManifestKey)
-		}
-
-		if seen[key.Value] {
-			return fmt.Errorf("line %d: %w %q", key.Line, errManifestDuplicate, key.Value)
-		}
-
-		seen[key.Value] = true
-	}
-
-	return nil
-}
-
-// checkManifest checks the values of a decoded plugin.yaml and returns its descriptor, without a key.
-func checkManifest(parsed manifest) (Descriptor, error) {
-	switch parsed.Language {
-	case LanguageGo, LanguageLua, LanguageTypeScript:
-	default:
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestLanguage, parsed.Language)
-	}
-
-	if parsed.Entrypoint == "" || !fs.ValidPath(parsed.Entrypoint) {
-		return Descriptor{}, fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
-	}
-
-	desc := Descriptor{Language: parsed.Language, Entrypoint: parsed.Entrypoint, Version: parsed.Version}
 
 	if parsed.MemoryLimit != nil {
 		limit := uint64(*parsed.MemoryLimit)
@@ -230,7 +123,7 @@ func checkManifest(parsed manifest) (Descriptor, error) {
 	}
 
 	if parsed.Owner != nil {
-		err := parsed.Owner.check()
+		err = parsed.Owner.check()
 		if err != nil {
 			return Descriptor{}, err
 		}
@@ -239,4 +132,25 @@ func checkManifest(parsed manifest) (Descriptor, error) {
 	}
 
 	return desc, nil
+}
+
+// checkManifestCode checks what a decoded plugin.yaml says of the plugin's code: the interface it implements, its
+// language and its entrypoint.
+func checkManifestCode(parsed *manifest) error {
+	_, err := contractref.Parse(parsed.Implements)
+	if err != nil {
+		return err //nolint:wrapcheck // it names the key and the value already
+	}
+
+	switch parsed.Language {
+	case LanguageGo, LanguageLua, LanguageTypeScript:
+	default:
+		return fmt.Errorf("%w, not %q", errManifestLanguage, parsed.Language)
+	}
+
+	if parsed.Entrypoint == "" || !fs.ValidPath(parsed.Entrypoint) {
+		return fmt.Errorf("%w, not %q", errManifestEntrypoint, parsed.Entrypoint)
+	}
+
+	return nil
 }

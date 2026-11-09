@@ -32,15 +32,29 @@ type lookalike interface {
 }
 
 // newContainer returns a container on the default on-disk compilation cache, so only the first test run on a
-// machine compiles the Go guest cold.
+// machine compiles the Go guest cold. Its bundlings get an hour, not the 10 s default: a small plugin bundles in
+// about 40 ms, but took over 10 s in a `make check` on a machine short of memory, failing a test about something
+// else. So every container of these tests that may bundle TypeScript comes from it. The tests of the bundling's
+// time limit set theirs (bundle_integration_test.go).
 func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	tb.Helper()
 
 	ctr := plg.New(opts...)
+	plg.SetBundleLimits(ctr, time.Hour, plg.BundleMemoryLimit)
 
 	tb.Cleanup(func() { assert.NoError(tb, ctr.Close(context.Background())) })
 
 	return ctr
+}
+
+// develIssue is the warning every load in a test binary reports: the contracts are in the binary's main module,
+// built from a checkout, so the plugins' pinned versions are not checked.
+func develIssue() plg.Issue {
+	return plg.Issue{
+		Severity: plg.SeverityWarning, Code: plg.CodeContractDevel, Field: "implements",
+		Message: "the service's contract module github.com/heynemann/go-plg is built from a local checkout, version " +
+			"(devel): the plugin's v1.0.0 is not checked",
+	}
 }
 
 // pluginFiles returns a Go test plugin's source directory.
@@ -414,7 +428,10 @@ func TestEntrypoints(t *testing.T) {
 			t.Parallel()
 
 			store := plg.NewMemoryStorage("mem")
-			desc := plg.Descriptor{Key: "k", Language: plg.LanguageGo, Entrypoint: tc.entrypoint}
+			desc := plg.Descriptor{
+				Key: "k", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo,
+				Entrypoint: tc.entrypoint,
+			}
 			require.NoError(t, store.Put(&desc, files))
 
 			name := "entry" + strconv.Itoa(i)
@@ -467,7 +484,10 @@ func TestRegisterReportsUnreadablePluginFiles(t *testing.T) {
 			t.Parallel()
 
 			store := listStorage{name: "s", files: files, descs: []plg.Descriptor{
-				{Key: "k", Language: plg.LanguageGo, Entrypoint: "pkg/plugin.go", Version: version},
+				{
+					Key: "k", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo,
+					Entrypoint: "pkg/plugin.go", Version: version,
+				},
 			}}
 
 			err := plg.Register[testcontract.Fooer](t.Context(), ctr, "fooer"+version, plg.WithStorage(store))
@@ -686,7 +706,7 @@ func TestClosedContainersKeepNoGuestMemory(t *testing.T) {
 
 				for range n {
 					synctest.Test(t, func(t *testing.T) {
-						ctr := plg.New()
+						ctr := newContainer(t)
 						registerFooersIn(t, lang, ctr, "fooer", map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
 
 						ref := getFooer(t, ctr, "fooer/ref")

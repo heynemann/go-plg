@@ -1,0 +1,19 @@
+cases:
+  - name: three products get 5% off
+    call: Discount
+    input:
+      order: {$ref: fixtures/three-products.yaml}
+    expect:
+      result: {cents: 200, reason: "3 products: 5% off"}
+  - name: two products get nothing
+    call: Discount
+    input:
+      order: {customer: bob, coupon: "", items: [{sku: tea, quantity: 9, unitCents: 100}, {sku: mug, quantity: 1, unitCents: 500}]}
+    expect:
+      result: {cents: 0, reason: ""}
+  - name: a service allowing 4% rejects the rule
+    call: Validate
+    input:
+      in: {maxPercent: 4, maxCents: 1000}
+    expect:
+      issues: [{severity: error, code: bundle.percent}]

@@ -1,0 +1,11 @@
+implements: github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0
+language: typescript
+entrypoint: plugin.ts
+owner:
+  maintainers:
+    - {name: Cy Okafor, email: cy@example.com, handle: "@cy"}
+  team: {name: promotions, department: marketing}
+  org: commerce
+  company: Example Shop
+  contact: {oncall: promotions-oncall, channel: "#promotions", email: promotions@example.com}
+  links: {repository: https://git.example.com/pricing/rules, runbook: https://git.example.com/pricing/rules/promotions.md}

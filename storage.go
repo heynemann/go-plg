@@ -100,6 +100,14 @@ type Descriptor struct {
 	Owner *Owner
 	// Key identifies the plugin within its Register call; its catalogue key is "<name>/<Key>".
 	Key string
+	// Implements names the interface the plugin implements and the version of the contract module it is written
+	// against: "<package path>.<Interface>@<version>", such as
+	// "example.com/contracts/rewards.Cohort@v1.4.0". Required. The package path is the interface's import path,
+	// the version the canonical semantic version of the module holding it (v1.4.0, not 1.4 or v1.4). A
+	// registration loads only the plugins implementing its own interface and skips the others, so one storage
+	// can hold the plugins of several interfaces. A plugin loads when the contract module the program was built
+	// with has the same major version and a minor version at least the plugin's; see [Register].
+	Implements string
 	// Language is the plugin's source language.
 	Language Language
 	// Entrypoint is a path inside the plugin's fs.FS. For Go it names the package directory or a .go file in
@@ -108,6 +116,10 @@ type Descriptor struct {
 	// Version identifies the plugin's revision. When it is empty, Register uses a content hash of the files it
 	// loads (see [FSStorage]).
 	Version string
+	// Secrets names the secrets the plugin may read, which the Register's [WithSecrets] resolves: each 1 to
+	// [MaxSecretName] ASCII letters, digits, '_', '-' or '.', starting with a letter, at most [MaxSecrets], none
+	// twice. Reading another name fails. Register keeps it: do not modify it once listed.
+	Secrets []string
 	// MemoryLimit is the plugin's per-instance memory limit in bytes, zero for the Register limit. It can only
 	// lower that limit.
 	MemoryLimit uint64
@@ -172,7 +184,7 @@ func (s *MemoryStorage) Delete(key string) {
 // List returns the stored plugins, sorted by key.
 func (s *MemoryStorage) List(context.Context) ([]Descriptor, error) {
 	descs := make([]Descriptor, 0, s.plugins.Size())
-	for _, p := range s.plugins.All() {
+	for _, p := range s.plugins.All() { //nolint:gocritic // rangeValCopy: xsync's iterator yields values
 		descs = append(descs, p.desc)
 	}
 
@@ -196,10 +208,14 @@ func (s *MemoryStorage) Open(_ context.Context, d *Descriptor) (fs.FS, error) {
 var errSymlinkOut = errors.New("symbolic link out of the plugin's files")
 
 // snapshotFiles returns an immutable copy of a plugin's files, as [Storage] describes, failing when ctx ends. A
-// [memfs.FS], which the built-in storages return, is one already.
+// [memfs.FS], which the built-in storages return, is one already, and so are an [Artifact]'s files.
 func snapshotFiles(ctx context.Context, files fs.FS) (*memfs.FS, error) {
-	if frozen, ok := files.(*memfs.FS); ok {
+	switch frozen := files.(type) {
+	case *memfs.FS:
 		return frozen, nil
+	case *Artifact:
+		return frozen.files, nil
+	default:
 	}
 
 	return copySnapshot(ctx, files, func(name string) (fs.File, error) {

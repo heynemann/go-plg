@@ -43,7 +43,8 @@ func writeManifest(t *testing.T, root, key, version, manifest string) {
 	t.Helper()
 
 	require.NoError(t, os.WriteFile(filepath.Join(root, key, "plugin.yaml"),
-		[]byte("language: lua\nentrypoint: plugin.lua\nversion: \""+version+"\"\n"+manifest), 0o600))
+		[]byte(manifestOf[testcontract.Fooer]("language: lua\nentrypoint: plugin.lua\nversion: \""+version+"\"\n"+
+			manifest)), 0o600))
 }
 
 // issueRecord is a "plg: plugin issue" log record.
@@ -104,7 +105,8 @@ func assertIssuesLogged(t *testing.T, logs []byte, report *plg.Report, owner map
 
 // TestLoadReportsFlagMissingOwnership registers plugins whose plugin.yaml lacks the owning team, a contact or
 // both: each loads, and its load report and the log carry one plg.ownership.missing warning naming what is
-// missing. A plugin with a team and a contact loads with no issue.
+// missing, after the warning of the test binary's contract checkout (plg.contract.devel). A plugin with a team and
+// a contact loads with that warning only.
 func TestLoadReportsFlagMissingOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -112,7 +114,7 @@ func TestLoadReportsFlagMissingOwnership(t *testing.T) {
 	missingContact := &plg.Issue{Severity: plg.SeverityWarning, Code: plg.CodeOwnershipMissing, Field: "owner.contact"}
 	missingTeam := &plg.Issue{Severity: plg.SeverityWarning, Code: plg.CodeOwnershipMissing, Field: "owner.team.name"}
 	tests := []struct {
-		want     *plg.Issue // nil: no issue
+		want     *plg.Issue // nil: no ownership issue
 		owner    plg.Owner
 		logOwner map[string]any
 		name     string
@@ -139,9 +141,10 @@ func TestLoadReportsFlagMissingOwnership(t *testing.T) {
 		},
 		{
 			name: "minimal", manifest: minimalOwner,
-			owner: plg.Owner{Team: plg.Team{Name: "payments"}, Contact: plg.Contact{Email: "payments@example.com"}},
+			owner:    plg.Owner{Team: plg.Team{Name: "payments"}, Contact: plg.Contact{Email: "payments@example.com"}},
+			logOwner: map[string]any{"team": "payments", "email": "payments@example.com"},
 		},
-		{name: "full", manifest: fullOwner, owner: wantFullOwner()},
+		{name: "full", manifest: fullOwner, owner: wantFullOwner(), logOwner: fullOwnerLog()},
 	}
 
 	var logs bytes.Buffer
@@ -171,12 +174,15 @@ func TestLoadReportsFlagMissingOwnership(t *testing.T) {
 		assert.LessOrEqual(t, report.Duration, after.Sub(before), tc.name)
 		assert.Positive(t, report.Duration, tc.name)
 
-		if tc.want == nil {
-			assert.Empty(t, report.Issues, tc.name)
-		} else {
-			require.Len(t, report.Issues, 1, tc.name)
+		require.NotEmpty(t, report.Issues, tc.name)
+		assert.Equal(t, develIssue(), report.Issues[0], "%s: the test binary's contract is a local checkout", tc.name)
 
-			issue := report.Issues[0]
+		if tc.want == nil {
+			assert.Len(t, report.Issues, 1, tc.name)
+		} else {
+			require.Len(t, report.Issues, 2, tc.name)
+
+			issue := report.Issues[1]
 			assert.Equal(
 				t,
 				*tc.want,
@@ -232,15 +238,26 @@ func TestRequiredOwnershipBlocksRegister(t *testing.T) {
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "owned",
 		plg.WithStorage(plg.NewFSStorage(owned)), plg.WithPool(1, 1), plg.WithRequiredOwnership()))
 
-	assert.Empty(t, inspect(t, ctr, "owned/p").Load.Issues)
+	assert.Equal(t, []plg.Issue{develIssue()}, inspect(t, ctr, "owned/p").Load.Issues)
 
 	require.NoError(t, ctr.Close(t.Context())) // every record is written
+
+	devel := develIssue()
+	assert.Equal(t, []issueRecord{
+		{
+			Owner: map[string]any{"team": "payments"}, Level: "WARN", Key: "blocked/p", Version: "1",
+			Severity: "warning", Code: devel.Code, Field: devel.Field, Issue: devel.Message,
+		},
+		{
+			Owner: map[string]any{"team": "payments"}, Level: "ERROR", Key: "blocked/p", Version: "1",
+			Severity: "error", Code: plg.CodeOwnershipMissing, Field: "owner.contact",
+			Issue: "plugin.yaml's owner lacks one of contact.oncall, contact.channel, contact.email",
+		},
+	}, issueRecords(t, logs.Bytes(), "blocked/p"))
 	assert.Equal(t, []issueRecord{{
-		Owner: map[string]any{"team": "payments"}, Level: "ERROR", Key: "blocked/p", Version: "1",
-		Severity: "error", Code: plg.CodeOwnershipMissing, Field: "owner.contact",
-		Issue: "plugin.yaml's owner lacks one of contact.oncall, contact.channel, contact.email",
-	}}, issueRecords(t, logs.Bytes(), "blocked/p"))
-	assert.Empty(t, issueRecords(t, logs.Bytes(), "owned/p"))
+		Owner: map[string]any{"team": "payments", "email": "payments@example.com"}, Level: "WARN", Key: "owned/p",
+		Version: "1", Severity: "warning", Code: devel.Code, Field: devel.Field, Issue: devel.Message,
+	}}, issueRecords(t, logs.Bytes(), "owned/p"), "only the contract's local checkout")
 }
 
 // TestRequiredOwnershipKeepsTheLastGoodVersion reloads, under WithRequiredOwnership, an update that drops the
@@ -290,7 +307,7 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	assert.Equal(t, 1, count())
 
 	served := inspect(t, ctr, "owned/p").Load
-	assert.Empty(t, served.Issues)
+	assert.Equal(t, []plg.Issue{develIssue()}, served.Issues)
 	assert.Nil(t, rejection("owned/p"), "no rejection after a good Register")
 
 	// An update without a contact is rejected; version 1 serves on.
@@ -307,10 +324,11 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	assert.Equal(t, "2", rejected.Version)
 	assert.Equal(t, plg.Owner{Team: plg.Team{Name: "payments"}}, rejected.Owner)
 	require.ErrorIs(t, rejected.Err, plg.ErrBlockingIssue)
-	require.Len(t, rejected.Issues, 1)
-	assert.Equal(t, plg.SeverityError, rejected.Issues[0].Severity)
-	assert.Equal(t, plg.CodeOwnershipMissing, rejected.Issues[0].Code)
-	assert.Equal(t, "owner.contact", rejected.Issues[0].Field)
+	require.Len(t, rejected.Issues, 2)
+	assert.Equal(t, develIssue(), rejected.Issues[0])
+	assert.Equal(t, plg.SeverityError, rejected.Issues[1].Severity)
+	assert.Equal(t, plg.CodeOwnershipMissing, rejected.Issues[1].Code)
+	assert.Equal(t, "owner.contact", rejected.Issues[1].Field)
 	assert.Same(t, served, inspect(t, ctr, "owned/p").Load, "the last good version keeps its report")
 
 	// A good version 3 replaces version 1 and clears the rejection.
@@ -320,7 +338,7 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 
 	served = inspect(t, ctr, "owned/p").Load
 	assert.Equal(t, "3", served.Version)
-	assert.Empty(t, served.Issues)
+	assert.Equal(t, []plg.Issue{develIssue()}, served.Issues)
 	assert.Nil(t, rejection("owned/p"), "a good load clears the rejection")
 
 	// Rejected again, then the storage lists version 3 again: unchanged, and the rejection goes.
@@ -347,8 +365,8 @@ func TestRequiredOwnershipKeepsTheLastGoodVersion(t *testing.T) {
 	newRejected := rejection("owned/q")
 	require.NotNil(t, newRejected)
 	assert.Equal(t, "1", newRejected.Version)
-	require.Len(t, newRejected.Issues, 1)
-	assert.Equal(t, "owner", newRejected.Issues[0].Field)
+	require.Len(t, newRejected.Issues, 2)
+	assert.Equal(t, "owner", newRejected.Issues[1].Field)
 
 	// The same key in both storages is a listing problem: rejected, and version 3 serves on.
 	require.NoError(t, os.RemoveAll(filepath.Join(extra, "q")))

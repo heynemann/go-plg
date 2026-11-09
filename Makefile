@@ -15,13 +15,16 @@ BUDGET_OUT := $(BIN)/budgets.txt
 
 # go test's -timeout, per test binary: a hang detector, not a speed limit, at about twice what the slowest binary
 # takes on CI (GitHub's 4-CPU ubuntu-latest), so that a hang fails the run within minutes while a slow runner does
-# not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package: 486-600+ s on CI when three of
-# its tests compiled the custom Go guest cold under the race detector, past go's 10-minute default; 383 s -> 215 s
-# on 4 CPUs here with a cold compilation cache once each guest compiled once (`make warm`, TestMain), so about
-# 350 s on CI, which ran it 1.6 times slower. The other runs take at most 124 s on CI (`make repeat`'s root
-# package). Benchmarks run outside -timeout.
-TEST_TIMEOUT := 12m
-SHORT_TEST_TIMEOUT := 5m
+# not (PLAN.md, "Test time"). TEST_TIMEOUT is `make test`'s, set by the root package, which runs alongside the other
+# packages' tests: 471-545 s on CI on main, then 515-792 s as the other packages' tests grew, killed twice by go
+# test at 13m12s (12m and a tenth; the binary's own alarm, 12m, times its tests but not its TestMain, which built
+# the custom Go guest cold). The same run on 4 CPUs here, with a cold go build cache as CI's: 401 s, and 342 s once
+# `make warm` fills the build cache; CI runs it 1.3-2 times slower, so about 450-690 s, and 25m.
+# SHORT_TEST_TIMEOUT is the other runs': `make repeat`'s root package took 124 s on CI, then 283 s (run
+# 42480219888) and past 300 s (run 42481291163, timed out at 5m) as the unit tests grew, so 10m. Benchmarks run
+# outside -timeout.
+TEST_TIMEOUT := 25m
+SHORT_TEST_TIMEOUT := 10m
 
 # golangci-lint is pinned and built with the repo's toolchain, into bin/, with a cache of its own. A binary built
 # with an older Go (a distro or Homebrew build) loads this go1.27.3 module without full type information and
@@ -104,9 +107,15 @@ TS_SRC := guestsrc/typescript
 # committed gzip-compressed (the module is about 14 MB).
 TS_BUNDLER := guest/typescript/bundler.wasm.gz
 TS_BUNDLER_RAW := $(BIN)/bundler.wasm
+# The TypeScript checker plg validate runs on TypeScript plugins (internal/tscheck): Microsoft's TypeScript compiler
+# written in Go (typescript-go's tsgo command, pinned by the module guestsrc/tscheck, which keeps it out of plg's
+# go.mod) compiled to a wasip1 command with the pinned Go, committed gzip-compressed (the module is about 50 MB).
+# Only the plg command links it.
+TS_CHECKER := internal/tscheck/tsgo.wasm.gz
+TS_CHECKER_RAW := $(BIN)/tsgo.wasm
 
 .PHONY: check fmt-check lint warm test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest \
-	lua-guest ts-guest ts-bundler verify-guests clean
+	lua-guest ts-guest ts-bundler ts-checker verify-guests clean
 
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
@@ -125,9 +134,21 @@ $(GOLANGCI_LINT):
 # Compile the linked guests into the default compilation cache (`plg warm`), without the race detector: under it
 # wazero's compiler runs about ten times slower (the Go guest: 4 s cold natively, 40-65 s under -race on 4 CPUs),
 # and a cold cache is what CI gets whenever a guest artifact changes its cache key. The compiled code is the same,
-# so the race-instrumented tests read it from the cache like any other run's.
+# so the race-instrumented tests read it from the cache like any other run's. -validate compiles the TypeScript
+# compiler plg validate runs too (about 10 s cold), which internal/cli's tests use.
+# Then fill the go build cache with what every custom Go guest build shares (`plg build-guest`, and plg validate
+# of a plugin naming guest packages: the root package's TestMain, internal/buildguest, internal/cli, cmd/plg),
+# built as internal/buildguest builds it: the yaegi command for this machine (-trimpath) and the default guest's
+# packages for wasip1 (-trimpath -buildvcs=false -buildmode=c-shared). CI's build cache is stale, not empty:
+# setup-go restores it with the modules under a key from go.sum and the Go version only, saved by the first job
+# to end once that key is new and never again until it changes, so it holds what that job built from the tree
+# of its day and lacks what it did not build or what changed since; each of those tests compiled that itself,
+# several at once, while the root package ran: 60 CPU-seconds once here, after which the root package's TestMain
+# takes 5 s instead of 26 s (65 CPU-seconds) and internal/buildguest's tests 8 s instead of 44 s, on 4 CPUs.
 warm:
-	go run ./cmd/plg warm
+	go run ./cmd/plg warm -validate
+	go build -trimpath -o /dev/null github.com/traefik/yaegi/cmd/yaegi
+	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o /dev/null ./guestsrc/golang
 
 # Unit and integration tests together, race detector on, random order, coverage over every package. -parallel 8
 # caps the parallel subtests (each holding wasm instances under the race detector): the root package's run peaks
@@ -195,7 +216,7 @@ symbols: $(BIN)/yaegi
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '^Options$$' encoding/json
 	cd $(GUEST_SYMBOLS) && GOOS=wasip1 GOARCH=wasm $(BIN)/yaegi extract -name symbols -exclude '$(GUEST_HTTP_EXCLUDE)' net/http
 
-guests: go-guest lua-guest ts-guest ts-bundler
+guests: go-guest lua-guest ts-guest ts-bundler ts-checker
 
 # Build the Go guest artifact (yaegi + internal/goguest compiled to a wasip1 reactor), then compress it.
 go-guest:
@@ -235,10 +256,18 @@ ts-bundler:
 	GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared -o $(TS_BUNDLER_RAW) ./guestsrc/tsbundle
 	go run scripts/gzipwasm.go $(TS_BUNDLER_RAW) $(TS_BUNDLER)
 
+# Build the TypeScript checker (typescript-go's tsgo compiled to a wasip1 command), then compress it.
+ts-checker:
+	mkdir -p $(BIN)
+	cd guestsrc/tscheck && GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -o $(TS_CHECKER_RAW) \
+		github.com/microsoft/typescript-go/cmd/tsgo
+	go run scripts/gzipwasm.go $(TS_CHECKER_RAW) $(TS_CHECKER)
+
 # Rebuild everything generated from source and fail if it differs from what is committed.
 verify-guests: symbols guests
-	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER)
-	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER))"
+	git diff --exit-code -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER) $(TS_CHECKER)
+	test -z "$$(git status --porcelain -- $(GUEST_SYMBOLS) $(GO_GUEST) $(LUA_GUEST) $(TS_GUEST) $(TS_BUNDLER) \
+		$(TS_CHECKER))"
 
 clean:
 	rm -rf $(BIN) $(COVERAGE) $(BENCH_OUT) examples/$(COVERAGE)

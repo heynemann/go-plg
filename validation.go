@@ -22,7 +22,8 @@ const defaultValidationTimeout = 10 * time.Second
 // function failed (returned an error or panicked) for a plugin, which then cannot be validated.
 const CodeValidationInput = "plg.validation.input"
 
-// PluginInfo describes the plugin version a [WithValidation] function is asked the validation input of.
+// PluginInfo describes a plugin version: the one a [WithValidation] function is asked the validation input of, or
+// a [WithSecrets] function a secret of.
 type PluginInfo struct {
 	Key      string
 	Version  string
@@ -106,18 +107,22 @@ func IsValidation(ctx context.Context) bool {
 
 // validationSpec is a WithValidation option: the validation input's type and the function returning it.
 type validationSpec struct {
-	input   func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
-	typ     reflect.Type
-	missing bool // the function is nil
+	input func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
+	typ   reflect.Type
+	// described is the input as the Go dispatcher writes it, when plg validate gave it (the Go interpreter's types
+	// are unnamed): the contract's source declares it, as checked; nil describes typ.
+	described *goabi.Type
+	missing   bool // the function is nil
 }
 
 // validation is a Register call's validation, checked once: the input function, the codecs of the input and of
 // the issues Validate returns, the Validate Go plugins must declare and the guest method index it is called at.
 type validation struct {
-	input  func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
-	typ    reflect.Type
-	codec  *wire.Codec // of the input
-	issues *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
+	input     func(ctx context.Context, info *PluginInfo) (reflect.Value, error)
+	typ       reflect.Type
+	described *goabi.Type // the input as the Go dispatcher writes it; nil: goabi.TypeOf(typ)
+	codec     *wire.Codec // of the input
+	issues    *wire.Codec // of []Issue, which Validate's []plugin.Issue encodes as
 	// scriptIssues is the codec of []scriptIssue, which describes the issues to the script guests: the same
 	// encoding as issues.
 	scriptIssues *wire.Codec
@@ -167,7 +172,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 
 	typ := spec.typ
 
-	err = checkValidationInput(contr, typ)
+	name, err := inputName(contr, &spec)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +180,7 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 	var planner wire.Planner
 
 	val := &validation{
-		input: spec.input, typ: typ, timeout: cfg.validationTimeout, policy: policy,
+		input: spec.input, typ: typ, described: spec.described, timeout: cfg.validationTimeout, policy: policy,
 		index: uint32(len(contr.methods)), //nolint:gosec // G115: an interface has far fewer than 2^32 methods
 	}
 
@@ -192,9 +197,24 @@ func newValidation(contr *contract, cfg *registerConfig) (*validation, error) {
 		return nil, fmt.Errorf("%w: WithValidation input %s: %w", ErrInvalidOption, typ, err)
 	}
 
-	val.want = "Validate(ctx context.Context, in " + typ.String() + ") ([]plugin.Issue, error)"
+	val.want = "Validate(ctx context.Context, in " + name + ") ([]plugin.Issue, error)"
 
 	return val, nil
+}
+
+// inputName checks the validation input of spec against the contract, unless plg validate described it from the
+// contract's source, which declares it, and returns how Go plugins write its type.
+func inputName(contr *contract, spec *validationSpec) (string, error) {
+	if spec.described != nil {
+		return spec.described.String(), nil
+	}
+
+	err := checkValidationInput(contr, spec.typ)
+	if err != nil {
+		return "", err
+	}
+
+	return spec.typ.String(), nil
 }
 
 // checkValidationOptions checks the Register call's validation timeout and on-demand policy, returning the
@@ -212,18 +232,18 @@ func checkValidationOptions(cfg *registerConfig) (ValidationPolicy, error) {
 func checkValidationInput(contr *contract, typ reflect.Type) error {
 	if typ.Name() == "" || typ.PkgPath() == "" || strings.ContainsRune(typ.Name(), '[') {
 		return fmt.Errorf("%w: WithValidation input %s %w %s", ErrInvalidOption, typ, errValidationType,
-			contr.iface.PkgPath())
+			contr.pkgPath)
 	}
 
 	err := checkData(typ, map[reflect.Type]bool{})
 	if err != nil {
 		return fmt.Errorf("%w: WithValidation input %s %w %s: %w", ErrInvalidOption, typ, errValidationType,
-			contr.iface.PkgPath(), err)
+			contr.pkgPath, err)
 	}
 
-	if typ.PkgPath() != contr.iface.PkgPath() {
+	if typ.PkgPath() != contr.pkgPath {
 		return fmt.Errorf("%w: WithValidation input %s %w %s of %s, whose source Go plugins interpret; it is in %s",
-			ErrInvalidOption, typ, errValidationType, contr.iface.PkgPath(), contr.iface, typ.PkgPath())
+			ErrInvalidOption, typ, errValidationType, contr.pkgPath, contr.described.Type, typ.PkgPath())
 	}
 
 	return nil
@@ -242,13 +262,20 @@ func (c *Container) validate(ctx context.Context, reg *registration, src *source
 	}
 
 	info := PluginInfo{
-		Owner: *src.desc.owner(), Key: launch.key, Version: src.desc.Version, Language: src.desc.Language,
+		Owner: *src.desc.owner(), Key: launch.id.key, Version: src.desc.Version, Language: launch.id.lang,
 		Storage: src.storeName,
 	}
 
 	err := c.runValidation(ctx, val, launch, &info, src.limit, extra, report)
+
+	return explainNoValidate(err, src, files, val)
+}
+
+// explainNoValidate returns err, or for errNoValidate the [ErrValidation] saying what Validate the plugin src,
+// with the files loaded, lacks.
+func explainNoValidate(err error, src *source, files *memfs.FS, val *validation) error {
 	if errors.Is(err, errNoValidate) {
-		err = fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
+		return fmt.Errorf("%w: %s", ErrValidation, src.loader.missingValidate(files, src.desc.Entrypoint, val))
 	}
 
 	return err
@@ -370,10 +397,8 @@ func (c *Container) validationInput(ctx context.Context, val *validation, launch
 	}()
 
 	if panicked != nil {
-		failure := &PanicError{
-			Key: info.Key, Language: info.Language, Phase: PhaseCallback, Method: "WithValidation",
-			Owner: launch.owner.owner, tags: launch.owner,
-		}
+		failure := launch.id.panicked(PhaseCallback)
+		failure.Method = "WithValidation"
 		c.panics.recovered(ctx, failure, panicked)
 
 		return nil, fmt.Errorf("%w: %v", errInputPanic, panicked)
@@ -444,12 +469,20 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 				c.validateFailed(ctx, launch, inst, fmt.Errorf("%w: issues: %w", engine.ErrABI, err)))
 		}
 
+		scrub := launch.secrets.redactor()
+
+		for i := range issues {
+			issue := &issues[i]
+			issue.Code, issue.Message, issue.Field = scrub.String(issue.Code), scrub.String(issue.Message),
+				scrub.String(issue.Field)
+		}
+
 		return issues, false, nil
 	case wire.StatusLoad:
 		return nil, false, errNoValidate
 	case wire.StatusError:
 		return nil, false, fmt.Errorf("%w: Validate returned an error: %w", ErrValidation, &PluginError{
-			Key: launch.key, Method: goabi.ValidateMethod, Message: res.Message, Owner: launch.owner.owner,
+			Key: launch.id.key, Method: goabi.ValidateMethod, Message: res.Message, Owner: launch.id.owner.owner,
 		})
 	case wire.StatusConvert:
 		return nil, false, fmt.Errorf("%w: Validate returned issues that cannot cross the plugin boundary: %s",
@@ -465,10 +498,8 @@ func (c *Container) validateResult(ctx context.Context, val *validation, launch 
 // validateFailed reports a Validate call the guest failed (a panic, a trap, its deadline, a broken ABI), with
 // what the guest wrote to stderr meanwhile.
 func (c *Container) validateFailed(ctx context.Context, launch *launcher, inst instance, value any) *PanicError {
-	failure := &PanicError{
-		Key: launch.key, Language: launch.lang, Phase: PhaseCall, Method: goabi.ValidateMethod, Value: value,
-		Guest: inst.Guest(), Owner: launch.owner.owner, tags: launch.owner,
-	}
+	failure := launch.id.panicked(PhaseCall)
+	failure.Method, failure.Value, failure.Guest = goabi.ValidateMethod, value, inst.Guest()
 	c.panics.report(ctx, failure)
 
 	return failure
@@ -484,6 +515,6 @@ func (c *Container) closeValidation(ctx context.Context, launch *launcher, inst 
 
 	if err != nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a validation instance failed",
-			slog.String("key", launch.key), launch.owner.log, slog.String("error", err.Error()))
+			slog.String("key", launch.id.key), launch.id.owner.log, slog.String("error", err.Error()))
 	}
 }

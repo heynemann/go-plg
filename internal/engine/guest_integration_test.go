@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -189,8 +191,10 @@ func TestGoGuestReportsLoadFailures(t *testing.T) {
 }
 
 // TestCompileCacheAcrossProcesses compiles the Go guest in two fresh processes sharing one cache directory:
-// the first compiles cold, the second loads the persisted result. The helper is built without the race
-// detector, which slows wazero's own Go code several-fold, so the timings are the ones a service sees.
+// the first compiles cold and persists the result, the second loads it. wazero writes an entry on every miss
+// (a new file renamed into place) and only reads on a hit, so a process that leaves the directory's files as
+// they were hit the cache. The helper is built without the race detector, which slows wazero's own Go code
+// several-fold, so the logged timings are the ones a service sees.
 func TestCompileCacheAcrossProcesses(t *testing.T) {
 	t.Parallel()
 
@@ -204,18 +208,29 @@ func TestCompileCacheAcrossProcesses(t *testing.T) {
 	cold := compileInProcess(t, helper, dir)
 	warm := compileInProcess(t, helper, dir)
 
-	t.Logf("go guest compile: cold %v, warm %v", cold, warm)
-	assert.Less(t, warm, time.Second, "a warm cache loads well under a second")
-	assert.Less(t, warm*5, cold, "the second process hits the disk cache")
+	t.Logf("go guest compile: cold %v, warm %v", cold.duration, warm.duration)
+	require.NotEqual(t, cold.before, cold.after, "the first process compiled cold and persisted the result")
+	assert.Equal(t, warm.before, warm.after, "the second process hit the cache: a miss writes an entry")
 }
 
-// compileInProcess runs the helper once and returns the compile duration it logged.
-func compileInProcess(t *testing.T, helper, dir string) time.Duration {
+// cacheRun is one helper process's compile: the cache directory's files before and after it ran, and the
+// duration it logged.
+type cacheRun struct {
+	before, after map[string]string
+	duration      time.Duration
+}
+
+// compileInProcess runs the helper once on the cache in dir.
+func compileInProcess(t *testing.T, helper, dir string) cacheRun {
 	t.Helper()
+
+	run := cacheRun{before: cacheEntries(t, dir)}
 
 	//nolint:gosec // G204: runs the helper built above
 	out, err := exec.CommandContext(t.Context(), helper, dir).Output()
 	require.NoError(t, err, string(out))
+
+	run.after = cacheEntries(t, dir)
 
 	compiled := regexp.MustCompile(`"msg":"plg: guest compiled",.*"duration":(\d+)`)
 
@@ -225,11 +240,38 @@ func compileInProcess(t *testing.T, helper, dir string) time.Duration {
 			ns, err := strconv.ParseInt(string(m[1]), 10, 64)
 			require.NoError(t, err)
 
-			return time.Duration(ns)
+			run.duration = time.Duration(ns)
+
+			return run
 		}
 	}
 
 	require.FailNow(t, "the helper did not log its compile", string(out))
 
-	return 0
+	return run
+}
+
+// cacheEntries returns the files below a compilation cache directory with their sizes and modification times.
+func cacheEntries(t *testing.T, dir string) map[string]string {
+	t.Helper()
+
+	entries := map[string]string{}
+
+	err := filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("cache entry %s: %w", name, err)
+		}
+
+		entries[name] = strconv.FormatInt(info.Size(), 10) + " " + info.ModTime().String()
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return entries
 }

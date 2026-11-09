@@ -203,19 +203,23 @@ func TestCancellingStopsTheCopyOfPluginFiles(t *testing.T) {
 	assert.Equal(t, 3, files.reads, "no read after the cancellation")
 }
 
-// listingRoot returns a directory of plugins holding the plugin directory p, with create called with each of
-// names in it.
-func listingRoot(t *testing.T, names []string, create func(t *testing.T, name string)) string {
+// listingPlugin returns the empty plugin directory p, inside a directory of plugins of its own.
+func listingPlugin(t *testing.T) string {
 	t.Helper()
 
 	plugin := filepath.Join(t.TempDir(), "p")
 	require.NoError(t, os.Mkdir(plugin, 0o750))
 
-	for _, name := range names {
-		create(t, filepath.Join(plugin, name))
-	}
+	return plugin
+}
 
-	return filepath.Dir(plugin)
+// createIn calls create with each of names in the directory dir.
+func createIn(t *testing.T, dir string, names []string, create func(t *testing.T, name string)) {
+	t.Helper()
+
+	for _, name := range names {
+		create(t, filepath.Join(dir, name))
+	}
 }
 
 func emptyFile(t *testing.T, name string) {
@@ -241,7 +245,9 @@ func numbered(n int, format string) []string {
 // TestPluginListingsOverTheLimitsStopEarly opens plugin directories of twice as many empty files or directories as
 // MaxPluginEntries, or of names twice as long together as MaxPluginPathBytes: each fails with ErrPluginTooLarge,
 // naming the plugin and an entry, and allocates less than copying a plugin exactly at the limit, so the listing
-// stopped at the limit. Plugins at the limits are copied.
+// stopped at the limit. Plugins at the limits are copied. Each plugin over the limits is the one at them with as
+// many entries again, added once it was copied: creating the entries is most of the test's time (an empty
+// directory takes about half a millisecond to create on a disk here), and the test runs alone.
 //
 //nolint:paralleltest // runtime.MemStats.TotalAlloc over one Open measures only it while no other test runs
 func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
@@ -260,14 +266,14 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 		name    string
 		named   string
 		atLimit []string
-		over    []string
-		copied  int // the entries of the copy's top directory: its files (empty directories are left out)
+		more    []string // added to the plugin at the limits, which takes it over them
+		copied  int      // the entries of the copy's top directory: its files (empty directories are left out)
 	}{
 		{
 			name:    "empty files",
 			create:  emptyFile,
 			atLimit: numbered(entries, "f%05d"),
-			over:    numbered(2*entries, "f%05d"),
+			more:    numbered(2*entries, "f%05d")[entries:],
 			named:   `\bp: .*\bf\d{5}\b`,
 			copied:  entries,
 		},
@@ -275,14 +281,14 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 			name:    "empty directories",
 			create:  emptyDir,
 			atLimit: numbered(entries, "d%05d"),
-			over:    numbered(2*entries, "d%05d"),
+			more:    numbered(2*entries, "d%05d")[entries:],
 			named:   `\bp: .*\bd\d{5}\b`,
 		},
 		{
 			name:    "long paths",
 			create:  emptyFile,
 			atLimit: exact,
-			over:    longNames,
+			more:    longNames[long:],
 			named:   `\bp: .*\b\d{5}x{250}\b`,
 			copied:  len(exact),
 		},
@@ -290,8 +296,10 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			atLimit := plg.NewFSStorage(listingRoot(t, tc.atLimit, tc.create))
-			over := plg.NewFSStorage(listingRoot(t, tc.over, tc.create))
+			plugin := listingPlugin(t)
+			createIn(t, plugin, tc.atLimit, tc.create)
+
+			store := plg.NewFSStorage(filepath.Dir(plugin))
 
 			var (
 				files fs.FS
@@ -299,7 +307,7 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 			)
 
 			copied := allocatedBy(func() {
-				files, err = atLimit.Open(t.Context(), &plg.Descriptor{Key: "p"})
+				files, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 			})
 
 			require.NoError(t, err, "at the limits")
@@ -308,8 +316,10 @@ func TestPluginListingsOverTheLimitsStopEarly(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, top, tc.copied)
 
+			createIn(t, plugin, tc.more, tc.create)
+
 			stopped := allocatedBy(func() {
-				_, err = over.Open(t.Context(), &plg.Descriptor{Key: "p"})
+				_, err = store.Open(t.Context(), &plg.Descriptor{Key: "p"})
 			})
 			t.Logf(
 				"copying the plugin at the limits allocated %d bytes, failing over them %d: %v",

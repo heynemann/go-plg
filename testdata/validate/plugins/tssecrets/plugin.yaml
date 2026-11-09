@@ -1,0 +1,7 @@
+implements: example.com/shop/pricing.Rule@v1.0.0
+language: typescript
+entrypoint: plugin.ts
+owner:
+  team: {name: pricing}
+  contact: {channel: "#pricing"}
+secrets: [coupon_token]

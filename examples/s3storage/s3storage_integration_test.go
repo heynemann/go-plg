@@ -126,6 +126,12 @@ func ownerOf(t *testing.T, dir string) *plg.Owner {
 
 const isListingVersion = `^s3:[0-9a-f]{64}$`
 
+// ruleImplements is the interface the example plugins declare they implement.
+const ruleImplements = "github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0"
+
+// luaManifest is the plugin.yaml of the Lua plugins the tests put.
+const luaManifest = "implements: " + ruleImplements + "\nlanguage: lua\nentrypoint: main.lua\n"
+
 func TestStorageListsPluginDirectories(t *testing.T) {
 	t.Parallel()
 
@@ -150,14 +156,17 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 	}
 
 	assert.Equal(t, []plg.Descriptor{
-		{Key: "bulk", Language: plg.LanguageGo, Entrypoint: ".", Version: descs[0].Version, Owner: ownerOf(t, "bulk")},
 		{
-			Key: "coupon", Language: plg.LanguageTypeScript, Entrypoint: "rule.ts", Version: descs[1].Version,
-			Owner: ownerOf(t, "coupon"),
+			Key: "bulk", Implements: ruleImplements, Language: plg.LanguageGo, Entrypoint: ".",
+			Version: descs[0].Version, Owner: ownerOf(t, "bulk"),
 		},
 		{
-			Key: "loyalty", Language: plg.LanguageLua, Entrypoint: "rule.lua", Version: descs[2].Version,
-			Owner: ownerOf(t, "loyalty"),
+			Key: "coupon", Implements: ruleImplements, Language: plg.LanguageTypeScript, Entrypoint: "rule.ts",
+			Version: descs[1].Version, Owner: ownerOf(t, "coupon"),
+		},
+		{
+			Key: "loyalty", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "rule.lua",
+			Version: descs[2].Version, Owner: ownerOf(t, "loyalty"),
 		},
 	}, descs, "sorted by key")
 
@@ -186,7 +195,7 @@ func TestStorageAtTheBucketRoot(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\nversion: \"7\"\n")
+	put(t, client, bucket, "p/plugin.yaml", luaManifest+"version: \"7\"\n")
 	put(t, client, bucket, "p/main.lua", "")
 
 	store := s3storage.New(client, bucket)
@@ -196,7 +205,9 @@ func TestStorageAtTheBucketRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(
 		t,
-		[]plg.Descriptor{{Key: "p", Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "7"}},
+		[]plg.Descriptor{{
+			Key: "p", Implements: ruleImplements, Language: plg.LanguageLua, Entrypoint: "main.lua", Version: "7",
+		}},
 		descs,
 		"a manifest's version wins",
 	)
@@ -207,9 +218,9 @@ func TestStorageVersionsFollowTheObjects(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 	put(t, client, bucket, "p/main.lua", "return 1")
-	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "q/plugin.yaml", luaManifest)
 	put(t, client, bucket, "q/main.lua", "return 1")
 
 	store := s3storage.New(client, bucket)
@@ -292,9 +303,9 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 	put(t, client, bucket, "p/main.lua", "")
-	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "q/plugin.yaml", luaManifest)
 
 	counting := &countingClient{Client: client}
 	store := s3storage.New(counting, bucket)
@@ -314,7 +325,7 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 	list()
 	assert.Equal(t, int64(2), counting.gets.Load(), "a poll with nothing changed downloads nothing")
 
-	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: init.lua\n")
+	put(t, client, bucket, "p/plugin.yaml", "implements: "+ruleImplements+"\nlanguage: lua\nentrypoint: init.lua\n")
 
 	descs := list()
 
@@ -323,7 +334,7 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 
 	remove(t, client, bucket, "q/plugin.yaml")
 	list()
-	put(t, client, bucket, "q/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "q/plugin.yaml", luaManifest)
 	list()
 	assert.Equal(t, int64(4), counting.gets.Load(), "a plugin that comes back is read again")
 }
@@ -334,13 +345,14 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 	client := startMinIO(t)
 
 	tests := map[string]map[string]string{
-		"no manifest": {"p/main.lua": ""},
-		"malformed":   {"p/plugin.yaml": `{"language":"lua"`},
-		"unknown key": {"p/plugin.yaml": "language: lua\nentrypoint: main.lua\nmemory_limit: 1\n"},
+		"no manifest":   {"p/main.lua": ""},
+		"malformed":     {"p/plugin.yaml": `{"language":"lua"`},
+		"unknown key":   {"p/plugin.yaml": luaManifest + "memory_limit: 1\n"},
+		"no implements": {"p/plugin.yaml": "language: lua\nentrypoint: main.lua\n"},
 		"too large": {
-			"p/plugin.yaml": "language: lua\nentrypoint: main.lua\n" + strings.Repeat(" ", 64<<10),
+			"p/plugin.yaml": luaManifest + strings.Repeat(" ", 64<<10),
 		},
-		"one bad of many": {"a/plugin.yaml": "language: lua\nentrypoint: main.lua\n", "p/plugin.yaml": `[]`},
+		"one bad of many": {"a/plugin.yaml": luaManifest, "p/plugin.yaml": `[]`},
 	}
 
 	for name, objects := range tests {
@@ -364,7 +376,7 @@ func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	manifest := "language: lua\nentrypoint: main.lua\n"
+	manifest := luaManifest
 	put(t, client, bucket, "p/plugin.yaml", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
 
 	descs, err := s3storage.New(client, bucket).List(t.Context())
@@ -377,23 +389,32 @@ func TestStorageOpenFailures(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	manifest := "language: lua\nentrypoint: main.lua\n"
+
+	const limit = 200
+
+	manifest := luaManifest
 	put(t, client, bucket, "big/plugin.yaml", manifest)
-	put(t, client, bucket, "big/main.lua", strings.Repeat("-", 100-len(manifest))) // 100 bytes together, main.lua first
-	put(t, client, bucket, "odd/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(
+		t,
+		client,
+		bucket,
+		"big/main.lua",
+		strings.Repeat("-", limit-len(manifest)),
+	) // limit bytes together, main.lua first
+	put(t, client, bucket, "odd/plugin.yaml", luaManifest)
 	put(t, client, bucket, "odd/a/main.lua", "")
 
-	store := s3storage.New(client, bucket, s3storage.WithMaxPluginSize(100))
+	store := s3storage.New(client, bucket, s3storage.WithMaxPluginSize(limit))
 
 	files, err := store.Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.NoError(t, err, "exactly at the limit")
 	require.NoError(t, fstest.TestFS(files, "plugin.yaml", "main.lua"))
 
-	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(99)).
+	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(limit-1)).
 		Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.ErrorContains(t, err, "too large", "one byte over the limit")
 
-	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(int64(101-len(manifest)))).
+	_, err = s3storage.New(client, bucket, s3storage.WithMaxPluginSize(int64(limit+1-len(manifest)))).
 		Open(t.Context(), &plg.Descriptor{Key: "big"})
 	require.ErrorContains(t, err, "too large", "main.lua fits, plugin.yaml no longer does")
 
@@ -514,7 +535,7 @@ func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "many/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "many/plugin.yaml", luaManifest)
 
 	const (
 		pages    = 100
@@ -576,7 +597,7 @@ func TestStorageDownloadFailures(t *testing.T) {
 
 	client := startMinIO(t)
 	bucket := newBucket(t, client)
-	put(t, client, bucket, "p/plugin.yaml", "language: lua\nentrypoint: main.lua\n")
+	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 
 	failing := &failingClient{Client: client}
 	store := s3storage.New(failing, bucket)

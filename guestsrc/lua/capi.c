@@ -9,6 +9,8 @@
 **                           makes a request through the Register's HTTP policy, following redirects, and
 **                           returns {status = 200, headers = {name = "v1, v2"}, body = "..."}, or nil and the
 **                           reason the host refused or failed it.
+**   secrets.get(name)       returns the value of a secret plugin.yaml declares (plg.WithSecrets resolves it), or
+**                           raises a Lua error with the host's reason.
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +25,7 @@ IMPORT("host_call") uint32_t plg_host_call(uint32_t method, uint32_t ptr, uint32
 IMPORT("http_roundtrip") uint32_t plg_http_roundtrip(uint32_t ptr, uint32_t len);
 IMPORT("take_result") void plg_take_result(uint32_t ptr, uint32_t len);
 IMPORT("http_start") uint32_t plg_http_start(uint32_t call, uint32_t ptr, uint32_t len);
+IMPORT("secret") uint32_t plg_secret(uint32_t ptr, uint32_t len);
 
 /*
 ** The scratch of a Host call or a blocking http request: the request being encoded, the answer being decoded and a
@@ -170,6 +173,38 @@ void plg_open_host(lua_State *L) {
     lua_setfield(L, -2, plg_the_schema.methods[i].name);
   }
   lua_setglobal(L, "host");
+}
+
+/* ---- secrets ---- */
+
+/* secret_read reads the secret named by the string at index 1 in a region: its value, or the host's reason. */
+static int secret_read(lua_State *L, uint32_t arg) {
+  (void)arg;
+  size_t len;
+  const char *name = lua_tolstring(L, 1, &len);
+  plg_reader r = take(L, plg_secret(addr(name), (uint32_t)len));
+  uint8_t status = *r.p++;
+  const char *text;
+  size_t n;
+  if (!plg_read_str(&r, &text, &n) || r.p != r.end) {
+    lua_pushliteral(L, "secrets.get: malformed answer");
+    return -1;
+  }
+  lua_pushlstring(L, text, n);
+  return status == PLG_OK ? 1 : -1;
+}
+
+static int secrets_get(lua_State *L) {
+  luaL_checkstring(L, 1);
+  lua_settop(L, 1);
+  return region(L, secret_read, 0);
+}
+
+void plg_open_secrets(lua_State *L) {
+  lua_createtable(L, 0, 1);
+  lua_pushcfunction(L, secrets_get);
+  lua_setfield(L, -2, "get");
+  lua_setglobal(L, "secrets");
 }
 
 /* ---- http ---- */

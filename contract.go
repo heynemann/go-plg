@@ -8,6 +8,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 
+	"github.com/heynemann/go-plg/internal/contractref"
 	"github.com/heynemann/go-plg/internal/contractsrc"
 	"github.com/heynemann/go-plg/internal/goabi"
 	"github.com/heynemann/go-plg/internal/layout"
@@ -46,12 +47,18 @@ type Contract struct {
 }
 
 // contract is a registered Contract, prepared once: the method plans, the source snapshot, the dispatcher and
-// init payload of its Go plugins, and the generated adapter constructor, if any.
+// init payload of its Go plugins, the generated adapter constructor, if any, and the module providing the
+// interface's package in the program's build info. plg validate prepares one from the contract's source instead
+// (see offline.go): it has no reflect type, adapter or Fast, and its module is the one plg validate resolved.
 type contract struct {
-	iface      reflect.Type
+	iface      reflect.Type     // nil for plg validate's
+	described  *goabi.Interface // the interface as the Go dispatcher writes it
 	adapter    reflect.Type
 	fast       func(plgimpl.Invoker) any
 	source     *memfs.FS
+	module     contractref.Module
+	pkgPath    string // the interface's package
+	name       string // the interface's name
 	dispatcher []byte
 	payload    []byte
 	methods    []*method
@@ -114,39 +121,26 @@ func prepareContract(spec *Contract) (*contract, error) {
 		return nil, err
 	}
 
-	prepared := &contract{iface: spec.Interface, adapter: spec.Adapter}
-
-	prepared.source, err = snapshotSource(spec.Source)
-	if err != nil {
-		return nil, err
-	}
-
-	// The interface passed validation, so the payload encodes, and the dispatcher renders unless anonymous
-	// structs embed different types under one alias name, or an alias named as one of the dispatcher's own.
-	prepared.dispatcher, err = goabi.RenderDispatcher(spec.Interface, nil, nil)
+	// The interface passed validation, so it can be described.
+	described, err := goabi.InterfaceOf(spec.Interface)
 	if err != nil {
 		return nil, fmt.Errorf("rendering the Go dispatcher: %w", err)
 	}
 
-	payload := goabi.InitPayload{GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath}
-
-	var planner wire.Planner // shared by the methods, so each type is planned once
-
-	for i, field := range fields {
-		var meth *method
-
-		meth, err = newMethod(&planner, spec.Interface, i, field)
-		if err != nil {
-			return nil, err
-		}
-
-		prepared.methods = append(prepared.methods, meth)
-		payload.Methods = append(payload.Methods, meth.name)
+	prepared := &contract{
+		iface: spec.Interface, described: described, adapter: spec.Adapter,
+		module: contractref.Built(spec.Interface.PkgPath()), pkgPath: spec.Interface.PkgPath(),
+		name: spec.Interface.Name(),
 	}
 
-	prepared.payload, err = payload.Append(nil)
+	sigs := make([]reflect.Method, spec.Interface.NumMethod())
+	for i := range sigs {
+		sigs[i] = spec.Interface.Method(i)
+	}
+
+	err = prepared.prepare(spec.Source, sigs, fields)
 	if err != nil {
-		return nil, fmt.Errorf("encoding the Go init payload: %w", err)
+		return nil, err
 	}
 
 	prepared.fast, err = checkFast(spec)
@@ -155,6 +149,52 @@ func prepareContract(spec *Contract) (*contract, error) {
 	}
 
 	return prepared, nil
+}
+
+// prepare snapshots the contract's source, plans its methods sigs (in method index order, with the adapter's field
+// of each when it has an adapter, else nil), and renders the dispatcher and init payload of its Go plugins.
+func (ct *contract) prepare(source fs.FS, sigs []reflect.Method, fields []int) error {
+	var err error
+
+	ct.source, err = snapshotSource(source)
+	if err != nil {
+		return err
+	}
+
+	// The interface passed validation, so the payload encodes, and the dispatcher renders unless anonymous
+	// structs embed different types under one alias name, or an alias named as one of the dispatcher's own.
+	ct.dispatcher, err = goabi.Render(ct.described, nil, nil)
+	if err != nil {
+		return fmt.Errorf("rendering the Go dispatcher: %w", err)
+	}
+
+	payload := goabi.InitPayload{GoPath: goabi.GoPath, Dispatch: goabi.DispatchImportPath}
+
+	var planner wire.Planner // shared by the methods, so each type is planned once
+
+	for i := range sigs {
+		field := -1
+		if fields != nil {
+			field = fields[i]
+		}
+
+		var meth *method
+
+		meth, err = newMethod(&planner, &sigs[i], i, field)
+		if err != nil {
+			return err
+		}
+
+		ct.methods = append(ct.methods, meth)
+		payload.Methods = append(payload.Methods, meth.name)
+	}
+
+	ct.payload, err = payload.Append(nil)
+	if err != nil {
+		return fmt.Errorf("encoding the Go init payload: %w", err)
+	}
+
+	return nil
 }
 
 // checkFast checks the generated adapter of spec, if any: it must implement the interface and have been

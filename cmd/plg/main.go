@@ -2,18 +2,38 @@
 //
 //	//go:generate go run github.com/heynemann/go-plg/cmd/plg gen Fooer
 //
-// generates the adapter plg calls plugins through, and registers it with the package's source. See
+// generates the adapter plg calls plugins through, and registers it with the package's source, checking the
+// interfaces' plg directives (//plg:limits, //plg:guest-packages, //plg:validation). See
 // [github.com/heynemann/go-plg.Contract]. `plg warm` fills the compilation cache with the guests plg ships (see
-// [github.com/heynemann/go-plg.Warm]), and `plg build-guest` builds a custom Go guest with extra packages (see
-// [github.com/heynemann/go-plg.WithGoGuest]); `plg` without arguments prints the usage.
+// [github.com/heynemann/go-plg.Warm]), `plg build-guest` builds a custom Go guest with extra packages (see
+// [github.com/heynemann/go-plg.WithGoGuest]), and `plg status` and `plg events` show an environment's plugins
+// and their events through its admin handler (see [github.com/heynemann/go-plg.AdminHandler]), named by a
+// profile of ~/.config/plg/profiles.yaml, and `plg validate` checks a plugin directory before it is registered:
+// it resolves the contract module the plugin pins with the go command and loads the plugin in the real guest,
+// under the contract's //plg:limits and, for a Go plugin of a contract with //plg:guest-packages, in that custom
+// guest, built and cached; `plg types` writes a Lua or TypeScript plugin's typings, `plg init` starts a plugin of
+// an interface (manifest, typings, a skeleton and example tests), `plg dev` validates a plugin again on each change
+// and calls its methods from a prompt, and `plg pack` validates a plugin, or every plugin of an author repository,
+// and writes each as a reproducible .plg artifact (see [github.com/heynemann/go-plg.OpenArtifact]); `plg` without
+// arguments prints the usage.
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/heynemann/go-plg/internal/cli"
 )
 
 func main() {
-	os.Exit(cli.Main(os.Args[1:], ".", os.Stderr))
+	dir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "plg:", err)
+
+		os.Exit(1)
+	}
+
+	os.Exit(cli.Main(os.Args[1:], &cli.Env{
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Environ: os.Environ, Dir: dir,
+	}))
 }

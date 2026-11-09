@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"reflect"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -45,8 +44,8 @@ const meterName = "github.com/heynemann/go-plg"
 //     Register and reloads;
 //   - plg.plugin.reload.failures {key}: plugins a reload could not load (a new one skipped, an updated one kept
 //     at its last good version), and reloads that could not list their storages (key is the Register name);
-//   - plg.plugin.skipped {key, language}: listed plugins left out because the Register does not enable their
-//     language, at each Register and reload;
+//   - plg.plugin.skipped {key, language, reason}: listed plugins left out, at each Register and reload, because
+//     they implement another interface (reason interface) or the Register does not enable their language (language);
 //   - plg.plugin.validations {key, language, trigger, outcome}: validations ([WithValidation]) run at a load
 //     (trigger load), by [Check] (trigger check) or on demand ([Validate], [ValidateAll]; trigger on_demand),
 //     outcome being passed, failed (an issue of severity error, or Validate failed: see [WithValidation]) or
@@ -125,7 +124,8 @@ func newInstruments(provider metric.MeterProvider) (*instruments, error) {
 	inst.refills = counter("plg.pool.refills", "{instance}", "Instances started by the pool refiller.")
 	inst.loads = counter("plg.plugin.loads", "{load}", "Plugin versions loaded.")
 	inst.reloadFailures = counter("plg.plugin.reload.failures", "{failure}", "Plugins a reload could not load.")
-	inst.skipped = counter("plg.plugin.skipped", "{plugin}", "Plugins skipped: their language is not enabled.")
+	inst.skipped = counter("plg.plugin.skipped", "{plugin}",
+		"Plugins skipped: another interface, or a language not enabled.")
 	inst.validations = counter("plg.plugin.validations", "{validation}", "Plugin validations run.")
 	inst.validationIssues = counter("plg.plugin.validation.issues", "{issue}", "Issues plugin validations found.")
 	inst.httpRequests = counter("plg.http.requests", "{request}", "HTTP requests made by plugins.")
@@ -272,13 +272,14 @@ func (c *Container) countReloadFailure(ctx context.Context, key string, owner *O
 	})
 }
 
-// countSkipped counts a listed plugin, owned by owner, skipped for its language.
-func (c *Container) countSkipped(ctx context.Context, key string, lang Language, owner *Owner) {
+// countSkipped counts a listed plugin, owned by owner, skipped for the reason kind.
+func (c *Container) countSkipped(ctx context.Context, key string, lang Language, owner *Owner, kind skipKind) {
 	tags := owner.metricAttrs()
 
 	c.panics.callback(ctx, key, lang, meterMethod, func() {
 		c.meters.skipped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key),
-			attribute.String("language", string(lang)), tags[0], tags[1], tags[2]))
+			attribute.String("language", string(lang)), attribute.String("reason", string(kind)), tags[0], tags[1],
+			tags[2]))
 	})
 }
 
@@ -336,11 +337,12 @@ func (c *Container) countValidation(ctx context.Context, reg *registration, laun
 		}
 	}
 
-	tags := launch.owner.metrics
-	key, lang := attribute.String("key", launch.key), attribute.String("language", string(launch.lang))
+	id := launch.id
+	tags := id.owner.metrics
+	key, lang := attribute.String("key", id.key), attribute.String("language", string(id.lang))
 	when := attribute.String("trigger", trigger)
 
-	c.panics.callback(ctx, launch.key, launch.lang, meterMethod, func() {
+	c.panics.callback(ctx, id.key, id.lang, meterMethod, func() {
 		c.meters.validations.Add(ctx, 1, metric.WithAttributes(key, lang, when,
 			attribute.String("outcome", outcome), tags[0], tags[1], tags[2]))
 
@@ -421,11 +423,11 @@ type pluginMeters struct {
 	http         [3]measure                          // {key, outcome}, by httpcap.Outcome
 }
 
-// newPluginMeters returns the measurements of the version of plugin key in lang serving iface.
-func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerTags, iface reflect.Type,
-) *pluginMeters {
-	keyAttr, langAttr := attribute.String("key", key), attribute.String("language", string(lang))
-	plugin := []attribute.KeyValue{keyAttr, owner.metrics[0], owner.metrics[1], owner.metrics[2]}
+// newPluginMeters returns the measurements of the plugin version id serving iface.
+func newPluginMeters(inst *instruments, id pluginID, methods []*method) *pluginMeters {
+	keyAttr, langAttr := attribute.String("key", id.key), attribute.String("language", string(id.lang))
+	tags := id.owner.metrics
+	plugin := []attribute.KeyValue{keyAttr, tags[0], tags[1], tags[2]}
 	with := func(attrs ...attribute.KeyValue) measure { return measureOf(append(attrs, plugin...)...) }
 
 	meters := &pluginMeters{
@@ -435,18 +437,18 @@ func newPluginMeters(inst *instruments, key string, lang Language, owner *ownerT
 		observe:      []metric.ObserveOption{metric.WithAttributeSet(attribute.NewSet(plugin...))},
 		refillOK:     with(attribute.String("outcome", "ok")).add,
 		refillFailed: with(attribute.String("outcome", "failed")).add,
-		calls:        make([][callOutcomes]measure, iface.NumMethod()),
+		calls:        make([][callOutcomes]measure, len(methods)),
 		statuses:     xsync.NewMap[int, []metric.AddOption](),
 	}
 
 	for i := range meters.calls {
-		methodAttr := attribute.String("method", iface.Method(i).Name)
+		methodAttr := attribute.String("method", methods[i].name)
 		for o := range callOutcomes {
 			meters.calls[i][o] = with(langAttr, methodAttr, attribute.String("outcome", o.String()))
 		}
 	}
 
-	for o, name := range []string{"ok", "refused", "failed"} {
+	for o, name := range httpOutcomes {
 		meters.http[o] = with(attribute.String("outcome", name))
 	}
 
@@ -466,8 +468,11 @@ func (m *pluginMeters) called(ctx context.Context, index uint32, elapsed time.Du
 	}
 }
 
+// httpOutcomes are the outcome attribute values of an HTTP request's measurements and span, by httpcap.Outcome.
+var httpOutcomes = [...]string{"ok", "refused", "failed"} //nolint:gochecknoglobals // immutable attribute values
+
 // requested records an HTTP request of the plugin.
-func (m *pluginMeters) requested(ctx context.Context, report httpcap.Report) {
+func (m *pluginMeters) requested(ctx context.Context, report *httpcap.Report) {
 	requests := m.http[report.Outcome].add
 	if report.Outcome == httpcap.OutcomeOK {
 		requests = m.status(report.Status)

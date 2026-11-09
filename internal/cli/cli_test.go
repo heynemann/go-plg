@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,15 +35,23 @@ func contractDir(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// plgIn runs plg with args in dir, its output to stdout and stderr, in an environment without variables.
+func plgIn(args []string, dir string, stdout, stderr io.Writer) int {
+	return cli.Main(args, &cli.Env{
+		Stdout: stdout, Stderr: stderr, Environ: func() []string { return nil }, Dir: dir,
+	})
+}
+
 func TestGen(t *testing.T) {
 	t.Parallel()
 
 	dir := contractDir(t, map[string]string{"c.go": fooer})
 
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
 
-	require.Equal(t, 0, cli.Main([]string{"gen", "Fooer"}, dir, &stderr))
+	require.Equal(t, 0, plgIn([]string{"gen", "Fooer"}, dir, &stdout, &stderr))
 	assert.Empty(t, stderr.String(), "gen is silent on success")
+	assert.Empty(t, stdout.String(), "gen is silent on success")
 
 	src, err := fs.ReadFile(os.DirFS(dir), "fooer_plg.go")
 	require.NoError(t, err)
@@ -50,7 +59,7 @@ func TestGen(t *testing.T) {
 	assert.Contains(t, string(src), "type plgFooer struct {")
 	assert.Contains(t, string(src), "type plgFooerFast struct {", "fast paths by default")
 
-	require.Equal(t, 0, cli.Main([]string{"gen", "-fast=false", "Fooer"}, dir, &stderr))
+	require.Equal(t, 0, plgIn([]string{"gen", "-fast=false", "Fooer"}, dir, &stdout, &stderr))
 
 	src, err = fs.ReadFile(os.DirFS(dir), "fooer_plg.go")
 	require.NoError(t, err)
@@ -133,15 +142,50 @@ func TestErrors(t *testing.T) {
 			name: "build-guest unknown flag", args: []string{"build-guest", "-pkgs", "x"}, code: 2,
 			prefix: "plg build-guest: flag provided but not defined: -pkgs\n\nusage:",
 		},
+		{
+			name: "status with two keys", args: []string{"status", "a/b", "c/d"}, code: 2,
+			prefix: "plg status: name at most one plugin key\n\nusage:",
+		},
+		{
+			name: "status with a key and a team", args: []string{"status", "a/b", "-team", "payments"}, code: 2,
+			prefix: "plg status: -team filters the list of plugins: name a key or a team, not both\n\nusage:",
+		},
+		{
+			name: "status in an unknown format", args: []string{"status", "--format", "yaml"}, code: 2,
+			prefix: "plg status: -format must be table or json, not \"yaml\"\n\nusage:",
+		},
+		{
+			name: "status unknown flag", args: []string{"status", "-all"}, code: 2,
+			prefix: "plg status: flag provided but not defined: -all\n\nusage:",
+		},
+		{name: "status help", args: []string{"status", "-h"}, code: 2, prefix: "usage: plg <command>"},
+		{
+			// The environment has no variables: no HOME, no XDG_CONFIG_HOME.
+			name: "status without a home", args: []string{"status"}, code: 1,
+			prefix: "plg status: finding plg/profiles.yaml: neither XDG_CONFIG_HOME (absolute) nor HOME is set\n",
+		},
+		{
+			name: "events without a key", args: []string{"events", "-profile", "prod"}, code: 2,
+			prefix: "plg events: name one plugin key\n\nusage:",
+		},
+		{
+			name: "events with two keys", args: []string{"events", "a/b", "--", "-c"}, code: 2,
+			prefix: "plg events: name one plugin key\n\nusage:",
+		},
+		{
+			name: "events flag without a value", args: []string{"events", "a/b", "-profile"}, code: 2,
+			prefix: "plg events: flag needs an argument: -profile\n\nusage:",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var stderr bytes.Buffer
+			var stdout, stderr bytes.Buffer
 
-			assert.Equal(t, tc.code, cli.Main(tc.args, contractDir(t, tc.files), &stderr))
+			assert.Equal(t, tc.code, plgIn(tc.args, contractDir(t, tc.files), &stdout, &stderr))
+			assert.Empty(t, stdout.String(), "errors go to stderr")
 			assert.True(t, strings.HasPrefix(stderr.String(), tc.prefix), stderr.String())
 			assert.Contains(t, stderr.String(), tc.contains)
 			assert.True(t, strings.HasSuffix(stderr.String(), "\n"), "the message ends its line")
@@ -158,7 +202,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errClosed }
 func TestUnwritableStderrStillFails(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 1, cli.Main(nil, t.TempDir(), failingWriter{}))
-	assert.Equal(t, 0, cli.Main([]string{"gen", "Fooer"}, contractDir(t, map[string]string{"c.go": fooer}),
-		failingWriter{}), "success writes nothing")
+	assert.Equal(t, 1, plgIn(nil, t.TempDir(), io.Discard, failingWriter{}))
+	assert.Equal(t, 0, plgIn([]string{"gen", "Fooer"}, contractDir(t, map[string]string{"c.go": fooer}),
+		io.Discard, failingWriter{}), "success writes nothing")
 }

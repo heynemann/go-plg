@@ -295,6 +295,7 @@ static void open_sandbox(lua_State *L) {
   lua_pop(L, 1);
   plg_open_host(L);
   plg_open_http(L);
+  plg_open_secrets(L);
 }
 
 /* callable reports whether the value at idx can be called. */

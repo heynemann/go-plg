@@ -237,3 +237,18 @@ func newOwnerTags(owner *Owner, version, storage string) *ownerTags {
 
 // noOwner are the tags of a plugin without an owner, and of what is no plugin.
 var noOwner = newOwnerTags(&Owner{}, "", "") //nolint:gochecknoglobals // immutable, shared by owner-less reports
+
+// pluginID identifies a plugin version on its reports, log records, measurements and spans: its key, its language
+// and its owner's tags. prepareLaunch builds it once per version, and what serves the version's instances (its
+// meters, spans, launcher, pool and HTTP and Host handlers) stores and reads it; it is passed by value, so it
+// allocates nothing.
+type pluginID struct {
+	owner *ownerTags
+	key   string
+	lang  Language
+}
+
+// panicked returns the PanicError of a panic of the version id in phase; the caller sets what else it knows.
+func (id pluginID) panicked(phase Phase) *PanicError {
+	return &PanicError{Key: id.key, Language: id.lang, Phase: phase, Owner: id.owner.owner, tags: id.owner}
+}

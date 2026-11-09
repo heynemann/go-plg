@@ -108,6 +108,7 @@ type Node[T any] struct {
 type Field[T any] struct {
 	Node   *Node[T]
 	GoName string
+	Name   string // the name Lua and TypeScript see: the `json` tag name, else the Go name
 }
 
 // Signature is a method as the wire encodes its calls: the parameters after the context and the results
@@ -249,7 +250,7 @@ func (l *Layout[T]) planStruct(view View[T], node *Node[T], fields []RawField[T]
 			return fmt.Errorf("field %v.%s: %w", node.Type, raw.Name, err)
 		}
 
-		node.Fields = append(node.Fields, Field[T]{Node: elem, GoName: raw.Name})
+		node.Fields = append(node.Fields, Field[T]{Node: elem, GoName: raw.Name, Name: name})
 	}
 
 	return nil

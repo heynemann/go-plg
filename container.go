@@ -47,8 +47,9 @@ type Container struct {
 	// the container logs itself; a plugin version's instances and pool log through guarded loggers of their own.
 	logger       *slog.Logger
 	panics       *panicReporter
-	events       *eventQueue // the WithOnEvent function's; nil without one
+	events       *eventQueue // keeps every event for Events, and delivers it to the WithOnEvent function if any
 	meters       *instruments
+	tracing      *tracing
 	observation  metric.Registration                 // the callback observing the pools' gauges
 	runtimes     *xsync.Map[uint64, *engine.Runtime] // by memory limit
 	modules      *xsync.Map[moduleKey, *compiledGuest]
@@ -96,10 +97,12 @@ func New(opts ...Option) *Container {
 	ctr.panics.tally = ctr.countPanic
 	ctr.instrument(&cfg)
 
+	ctr.tracing = newTracing(cfg.tracerProvider, ctr.panics)
+
 	// After the instruments: a panic in the logger's handler on the engine's warning is counted in them.
 	ctr.engine = engine.New(context.Background(), engine.Options{Logger: ctr.logger, CacheDir: cfg.cacheDir})
 
-	ctr.events = newEventQueue(cfg.onEvent, ctr.panics, ctr.logger)
+	ctr.events = newEventQueue(ctr.keepEvent, cfg.onEvent, ctr.panics, ctr.logger)
 	ctr.panics.events = ctr.events
 
 	return ctr

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestout"
@@ -86,24 +87,27 @@ type launcher struct {
 	// ([panicReporter.guardedLogger]), since its records are logged inside the guest's steps.
 	output  *slog.Logger
 	panics  *panicReporter
-	owner   *ownerTags
+	spans   *pluginSpans   // the version's spans; nil traces nothing
+	secrets *pluginSecrets // the version's secrets, whose values the results' messages and output are scrubbed of
+	id      pluginID       // the version, on its reports and log records
 	opts    engine.InstanceOptions
-	key     string
-	lang    Language
 	payload []byte
+	// createTimeout bounds each instance's Create, and not its instantiation before it; 0 does not.
+	createTimeout time.Duration
 }
 
-// start starts an instance, mounting the plugin's files, and runs the plugin's Create. A guest that panics,
-// traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate]. Until start returns the
-// instance, it is start's to close: a failed Create closes it, and so does a panic on the way to the pool.
+// start starts an instance, mounting the plugin's files, and runs the plugin's Create, within createTimeout when
+// set. A guest that panics, traps or breaks the ABI meanwhile fails with a reported [PanicError] in [PhaseCreate].
+// Until start returns the instance, it is start's to close: a failed Create closes it, and so does a panic on the
+// way to the pool.
 //
 //nolint:ireturn // it is the pool's spawn function, which returns the pool's instance interface
 func (l *launcher) start(ctx context.Context) (instance, error) {
-	out := guestout.New(l.output, l.key)
+	out := guestout.New(l.output, l.id.key, l.secrets.redactor())
 	opts := l.opts
 	opts.Stdout, opts.Stderr = out.Stdout(), out.Stderr()
 
-	out.Begin()
+	out.Begin(ctx)
 
 	inst, err := l.mod.Instantiate(ctx, &opts)
 	if err != nil {
@@ -120,7 +124,16 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 		}
 	}()
 
-	err = l.create(ctx, inst, out)
+	createCtx := ctx
+
+	if l.createTimeout > 0 {
+		var cancel context.CancelFunc
+
+		createCtx, cancel = context.WithTimeout(ctx, l.createTimeout)
+		defer cancel()
+	}
+
+	err = l.create(createCtx, inst, out)
 	created = true
 
 	if err != nil {
@@ -135,6 +148,7 @@ func (l *launcher) start(ctx context.Context) (instance, error) {
 func (l *launcher) create(ctx context.Context, inst *engine.Instance, out *guestout.Capture) error {
 	res, err := inst.Init(ctx, l.payload)
 	out.End(ctx)
+	l.scrub(&res)
 
 	switch {
 	case errors.Is(err, engine.ErrStopped):
@@ -167,16 +181,14 @@ func (l *launcher) discardUnstarted(ctx context.Context, inst closer) {
 	err := inst.Close(ended)
 	if err != nil {
 		l.output.LogAttrs(ctx, slog.LevelWarn, "plg: closing a discarded instance failed",
-			slog.String("key", l.key), slog.String("error", err.Error()))
+			slog.String("key", l.id.key), slog.String("error", err.Error()))
 	}
 }
 
 // failed reports a step (Create, Close) the guest failed, with what it wrote to stderr meanwhile.
 func (l *launcher) failed(ctx context.Context, phase Phase, value any, out *guestout.Capture) *PanicError {
-	failure := &PanicError{
-		Key: l.key, Language: l.lang, Phase: phase, Value: value, Guest: out.Guest(), Owner: l.owner.owner,
-		tags: l.owner,
-	}
+	failure := l.id.panicked(phase)
+	failure.Value, failure.Guest = value, out.Guest()
 	l.panics.report(ctx, failure)
 
 	return failure
@@ -192,6 +204,23 @@ func guestFailure(res engine.Result) any {
 	return fmt.Errorf("%w %s: %s", errGuestStatus, res.Status, res.Message)
 }
 
+// scrub scrubs the plugin version's secrets from the message of res, a guest's answer, unless it succeeded: the
+// message is the plugin's error, panic value or reason, which plg reports.
+func (l *launcher) scrub(res *engine.Result) {
+	if res.Status != wire.StatusOK {
+		res.Message = l.secrets.redactor().String(res.Message)
+	}
+}
+
+// scrubStep scrubs the results of a multiplexed step as [launcher.scrub] does.
+func (l *launcher) scrubStep(step *engine.Step) {
+	l.scrub(&step.Failure)
+
+	for i := range step.Done {
+		l.scrub(&step.Done[i].Result)
+	}
+}
+
 // guestInstance is a guest instance and the capture of its output: each step (call, close) begins and ends a
 // capture step, so that a failure reports what the guest wrote to stderr meanwhile.
 type guestInstance struct {
@@ -203,29 +232,32 @@ type guestInstance struct {
 
 // Start starts a call on a multiplexing guest, capturing the step's output like a call's.
 func (g *guestInstance) Start(ctx context.Context, call, method uint32, args []byte) (engine.Step, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	step, err := g.Instance.Start(ctx, call, method, args)
 	g.out.End(ctx)
+	g.launcher.scrubStep(&step)
 
 	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
 
 // Resume delivers an HTTP answer to a multiplexing guest, capturing the step's output like a call's.
 func (g *guestInstance) Resume(ctx context.Context, request uint32, answer []byte) (engine.Step, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	step, err := g.Instance.Resume(ctx, request, answer)
 	g.out.End(ctx)
+	g.launcher.scrubStep(&step)
 
 	return step, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
 
 func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (engine.Result, error) {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	res, err := g.Instance.Call(ctx, method, args)
 	g.out.End(ctx)
+	g.launcher.scrub(&res)
 
 	return res, err //nolint:wrapcheck // the instance's errors are wrapped where they become call errors
 }
@@ -234,7 +266,7 @@ func (g *guestInstance) Call(ctx context.Context, method uint32, args []byte) (e
 // with that error; a guest that panics, traps, is stopped by ctx or breaks the ABI meanwhile fails with a reported
 // [PanicError] in [PhaseClose].
 func (g *guestInstance) Close(ctx context.Context) error {
-	g.out.Begin()
+	g.out.Begin(ctx)
 
 	err := g.Instance.Close(ctx)
 	g.out.End(ctx)
@@ -246,6 +278,8 @@ func (g *guestInstance) Close(ctx context.Context) error {
 	value := any(err)
 
 	if closeErr, ok := errors.AsType[*engine.CloseError](err); ok {
+		closeErr.Message = g.launcher.secrets.redactor().String(closeErr.Message)
+
 		if closeErr.Status == wire.StatusError {
 			return err //nolint:wrapcheck // the pool wraps close errors with the instance
 		}

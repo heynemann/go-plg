@@ -32,7 +32,7 @@ type RuntimeOptions struct {
 
 // Runtime is a wazero runtime: every instance it creates has the same memory limit and is stopped
 // preemptively when the context of its current call ends. Its guests may import the plg host module
-// (http_roundtrip, host_call, take_result). It is safe for concurrent use.
+// (http_roundtrip, host_call, secret, take_result). It is safe for concurrent use.
 type Runtime struct {
 	rt     wazero.Runtime
 	logger *slog.Logger
@@ -174,6 +174,8 @@ type InstanceOptions struct {
 	HTTPRefuses func(n, size int) bool
 	// Host serves the instance's calls to its Host; nil means the plugin has no Host.
 	Host HostFunc
+	// Secret serves the instance's secret reads; nil refuses them all with [ErrNoSecrets].
+	Secret SecretFunc
 	// Mounts are the instance's only file system access.
 	Mounts []Mount
 }
@@ -184,41 +186,16 @@ type InstanceOptions struct {
 // cryptographic random source, the given mounts, the argument list ["plugin"] and HTTP only through opts.HTTP; no
 // environment and no sockets.
 func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Instance, error) {
-	fsCfg := wazero.NewFSConfig()
-	for _, mnt := range opts.Mounts {
-		fsCfg = fsCfg.WithFSMount(mnt.FS, mnt.GuestPath)
-	}
+	state, name := newHostState(opts, m.rt), m.rt.moduleName("plg-instance-")
 
-	// The host imports find the instance's state by its module name, unique within the runtime.
-	name := "plg-instance-" + strconv.FormatUint(m.rt.names.Add(1), 10)
-	state := newHostState(opts, m.rt)
-	m.rt.hosts.Store(name, state)
-
-	// The state is stored before closing is read, and Close sets closing before it looks for the instances to
-	// stop: either Close finds this one, or this one sees closing and never starts.
-	guestCtx, cancel, ok := state.enter(ctx)
-	if ok && m.rt.closing.Load() {
-		state.leave(ctx, cancel)
-
-		ok = false
-	}
-
+	guestCtx, cancel, ok := m.enterNew(ctx, name, state)
 	if !ok {
-		m.rt.hosts.Delete(name)
-
 		return nil, fmt.Errorf("instantiating guest %s: %w", m.name, ErrStopped)
 	}
 
-	cfg := wazero.NewModuleConfig().
-		WithName(name).
+	cfg := sandbox(name, opts.Mounts, opts.Stdout, opts.Stderr).
 		WithStartFunctions("_initialize").
-		WithArgs("plugin").
-		WithSysWalltime().
-		WithSysNanotime().
-		WithRandSource(rand.Reader).
-		WithFSConfig(fsCfg).
-		WithStdout(orDiscard(opts.Stdout)).
-		WithStderr(orDiscard(opts.Stderr))
+		WithArgs("plugin")
 
 	mod, err := m.rt.rt.InstantiateModule(guestCtx, m.cm, cfg)
 
@@ -247,6 +224,58 @@ func (m *Module) Instantiate(ctx context.Context, opts *InstanceOptions) (*Insta
 	}
 
 	return inst, nil
+}
+
+// moduleName returns a guest module name new to the runtime, prefix and a number: the host imports find the
+// guest's state by it.
+func (r *Runtime) moduleName(prefix string) string {
+	return prefix + strconv.FormatUint(r.names.Add(1), 10)
+}
+
+// enterNew registers state under the guest's module name and enters the guest's first run under ctx, returning
+// what [hostState.enter] returns. The state is stored before closing is read, and Close sets closing before it
+// looks for the guests to stop: either Close finds this one, or this one sees closing and never starts. When it
+// must not start, enterNew removes the state again and returns false.
+func (m *Module) enterNew(ctx context.Context, name string, state *hostState,
+) (context.Context, context.CancelCauseFunc, bool) {
+	m.rt.hosts.Store(name, state)
+
+	guestCtx, cancel, ok := state.enter(ctx)
+	if ok && m.rt.closing.Load() {
+		state.leave(ctx, cancel)
+
+		ok = false
+	}
+
+	if !ok {
+		m.rt.hosts.Delete(name)
+
+		return nil, nil, false
+	}
+
+	return guestCtx, cancel, true
+}
+
+// sandbox returns the configuration of the guest module named name, instance or command: it has clocks, a
+// cryptographic random source, mounts as its only file system and stdout and stderr (nil discards) as its output;
+// no environment, arguments or sockets, which the caller adds as it needs, and wazero's default start function
+// (_start), which the caller replaces.
+//
+//nolint:ireturn // wazero's module configuration is an interface
+func sandbox(name string, mounts []Mount, stdout, stderr io.Writer) wazero.ModuleConfig {
+	fsCfg := wazero.NewFSConfig()
+	for _, mnt := range mounts {
+		fsCfg = fsCfg.WithFSMount(mnt.FS, mnt.GuestPath)
+	}
+
+	return wazero.NewModuleConfig().
+		WithName(name).
+		WithSysWalltime().
+		WithSysNanotime().
+		WithRandSource(rand.Reader).
+		WithFSConfig(fsCfg).
+		WithStdout(orDiscard(stdout)).
+		WithStderr(orDiscard(stderr))
 }
 
 func orDiscard(w io.Writer) io.Writer {

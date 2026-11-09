@@ -856,9 +856,7 @@ func benchLatency(b *testing.B, lang contractLanguage, opts ...plg.RegisterOptio
 	srv := latencyServer(b, latencyDelay)
 	baseline := heapInUse()
 
-	ctr := plg.New()
-
-	b.Cleanup(func() { assert.NoError(b, ctr.Close(context.Background())) })
+	ctr := newContainer(b)
 
 	store := lang.storage(b, "web", map[string]string{"fetch": "fetcher"})
 	opts = append(opts, plg.WithStorage(store), plg.WithHTTP(openPolicy(hostOf(b, srv.URL))))

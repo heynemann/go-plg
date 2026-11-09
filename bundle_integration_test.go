@@ -53,9 +53,9 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 
 	ctr := newContainer(t)
 
-	// The plugins meant to load do so under the default limits: a small plugin bundles in about 40 ms, but in more
+	// The plugins meant to load do so under newContainer's hour: a small plugin bundles in about 40 ms, but in more
 	// than 2 s on a busy CI runner under the race detector. Only the plugins that never bundle in time run under
-	// the short one.
+	// the short limit.
 	first := tsFooer(t, ctr, `Foo: (s: string) => s`)
 	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => "v1 " + s`)))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))
@@ -76,7 +76,12 @@ func TestTypeScriptBundlingStopsAtItsTimeLimit(t *testing.T) {
 	}
 
 	// A reload of such a plugin fails the same way, and the version before it serves on.
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key:        "p",
+		Implements: implementsOf[testcontract.Fooer](),
+		Language:   plg.LanguageTypeScript,
+		Entrypoint: "plugin.ts",
+	},
 		exportStarLayers(24)))
 
 	err := plg.ReloadInterface(t.Context(), ctr, "reloaded")
@@ -118,7 +123,12 @@ func TestTypeScriptBundlingStopsWithItsContext(t *testing.T) {
 	// A reload bundling such a plugin stops when the container closes.
 	store := tsSource(t, tsPlugin(fooerMembers(`Foo: (s: string) => s`)))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "reloaded", plg.WithStorage(store)))
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key:        "p",
+		Implements: implementsOf[testcontract.Fooer](),
+		Language:   plg.LanguageTypeScript,
+		Entrypoint: "plugin.ts",
+	},
 		nestedArrows(40)))
 
 	waiting, stop := context.WithTimeout(t.Context(), 500*time.Millisecond)
@@ -134,7 +144,7 @@ func TestTypeScriptBundlingHasAMemoryLimit(t *testing.T) {
 	t.Parallel()
 
 	ctr := newContainer(t)
-	plg.SetBundleLimits(ctr, time.Minute, 32<<20)
+	plg.SetBundleLimits(ctr, time.Hour, 32<<20) // only the memory limit is under test: newContainer's hour
 
 	tsFooer(t, ctr, `Foo: (s: string) => s`) // a small plugin bundles within 32 MiB
 
@@ -157,16 +167,12 @@ func TestTypeScriptBundlingTimeGrowsWithThePlugin(t *testing.T) {
 	t.Parallel()
 
 	ctr := newContainer(t)
-	plg.SetBundleLimits(ctr, time.Nanosecond, plg.BundleMemoryLimit)
 
+	// A plugin with files it never imports bundles and serves, here under newContainer's hour: a real bundling's
+	// duration says nothing deterministic about its limit, so only the plugins that never bundle in time run
+	// under the short one below.
 	files := tsPlugin(fooerMembers(`Foo: (s: string) => s`))
-
-	err := plg.Register[testcontract.Fooer](t.Context(), ctr, "bare", plg.WithStorage(tsSource(t, files)))
-	require.ErrorIs(t, err, plg.ErrLoad)
-	require.ErrorContains(t, err, "bare/p (storage mem): bundling the TypeScript plugin failed: "+
-		"bundling took longer than its time limit, 1ms", "a nanosecond and 5 s per MiB of a small plugin")
-
-	files["padding.bin"] = &fstest.MapFile{Data: make([]byte, 1<<20)} // 5 s more, imported or not
+	files["padding.bin"] = &fstest.MapFile{Data: make([]byte, 128<<10)}
 	require.NoError(
 		t,
 		plg.Register[testcontract.Fooer](t.Context(), ctr, "padded", plg.WithStorage(tsSource(t, files))),
@@ -175,6 +181,27 @@ func TestTypeScriptBundlingTimeGrowsWithThePlugin(t *testing.T) {
 	out, err := getFooer(t, ctr, "padded/p").Foo(t.Context(), "x")
 	require.NoError(t, err)
 	assert.Equal(t, "x", out)
+
+	plg.SetBundleLimits(ctr, time.Nanosecond, plg.BundleMemoryLimit)
+
+	// 40 nested typed arrows never bundle in time, so each limit is reached and reported: a nanosecond and 5 s per
+	// MiB of the plugin's files, imported or not.
+	for _, tc := range []struct {
+		name  string
+		limit string
+		size  int
+	}{
+		{name: "sixteenth", size: 64 << 10, limit: "313ms"}, // 312.5 ms and a nanosecond
+		{name: "eighth", size: 128 << 10, limit: "625ms"},
+	} {
+		files := nestedArrows(40)
+		files["padding.bin"] = &fstest.MapFile{Data: make([]byte, tc.size-len(files["plugin.ts"].Data))}
+
+		err := plg.Register[testcontract.Fooer](t.Context(), ctr, tc.name, plg.WithStorage(tsSource(t, files)))
+		require.ErrorIs(t, err, plg.ErrLoad, tc.name)
+		require.ErrorContains(t, err, tc.name+"/p (storage mem): bundling the TypeScript plugin failed: "+
+			"bundling took longer than its time limit, "+tc.limit, tc.name)
+	}
 }
 
 // TestTypeScriptBundlesAsEsbuildDoes holds the bundler guest to esbuild run natively: the same bundle of a plugin

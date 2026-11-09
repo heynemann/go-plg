@@ -87,11 +87,7 @@ func openPolicy(hosts ...string) plg.HTTPPolicy {
 func httpContainer(t *testing.T, logs io.Writer) *plg.Container {
 	t.Helper()
 
-	ctr := plg.New(plg.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
-
-	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
-
-	return ctr
+	return newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
 }
 
 // fetcherIn registers lang's fetcher plugin under name with opts in ctr, and returns it: its key is
@@ -664,7 +660,7 @@ func TestPluginHTTPUpgradesAreRefused(t *testing.T) {
 			t.Helper()
 
 			srv := upgradingServer(t)
-			ctr := plg.New(plg.WithLogger(slog.New(slog.DiscardHandler)))
+			ctr := newContainer(t, plg.WithLogger(slog.New(slog.DiscardHandler)))
 			plug := fetcherIn(t, lang, ctr, "upgrade", plg.WithHTTP(openPolicy(hostOf(t, srv.URL))))
 
 			_, err := plug.Foo(t.Context(), "GET "+srv.URL)
@@ -682,7 +678,7 @@ func TestPluginHTTPUpgradesAreRefused(t *testing.T) {
 			t.Helper()
 
 			srv := upgradingServer(t)
-			ctr := plg.New(plg.WithLogger(slog.New(slog.DiscardHandler)))
+			ctr := newContainer(t, plg.WithLogger(slog.New(slog.DiscardHandler)))
 			plug := muxFetcher(t, lang, ctr, "upgrade", srv.Server, 2)
 
 			first, second := callLater(t.Context(), plug, "GET "+srv.URL), callLater(t.Context(), plug, "GET "+srv.URL)
@@ -714,9 +710,7 @@ func benchFetcher(b *testing.B, lang contractLanguage) benchTarget {
 	}))
 	b.Cleanup(srv.Close)
 
-	ctr := plg.New()
-
-	b.Cleanup(func() { assert.NoError(b, ctr.Close(context.Background())) })
+	ctr := newContainer(b)
 
 	store := lang.storage(b, "web", map[string]string{"fetch": "fetcher"})
 	require.NoError(b, plg.Register[testcontract.Fooer](b.Context(), ctr, "web", plg.WithStorage(store),

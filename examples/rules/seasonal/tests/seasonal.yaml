@@ -1,0 +1,19 @@
+cases:
+  - name: the SUMMER coupon takes 8% off
+    call: Discount
+    input:
+      order: {customer: bob, coupon: SUMMER, items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    expect:
+      result: {cents: 360, reason: "coupon SUMMER: 8% off"}
+  - name: other orders get nothing
+    call: Discount
+    input:
+      order: {customer: bob, coupon: "", items: [{sku: tea, quantity: 10, unitCents: 450}]}
+    expect:
+      result: {cents: 0, reason: ""}
+  - name: a service allowing 5% rejects the rule
+    call: Validate
+    input:
+      in: {maxPercent: 5, maxCents: 1000}
+    expect:
+      issues: [{severity: error, code: seasonal.percent}]

@@ -2,6 +2,7 @@ package plg_test
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -73,14 +74,28 @@ func putSkipped(t *testing.T, store *plg.MemoryStorage, key, version string, own
 	t.Helper()
 
 	require.NoError(t, store.Put(&plg.Descriptor{
-		Key: key, Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts", Version: version, Owner: owner,
+		Key: key, Implements: implementsOf[pinger](), Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts",
+		Version: version, Owner: owner,
 	}, fstest.MapFS{"plugin.ts": {Data: []byte("export function Create() {}\n")}}))
+}
+
+// assertSkipped checks that event is the Skipped event of key, whose report says why: reason.
+func assertSkipped(t *testing.T, event *plg.Event, key string, reason error) {
+	t.Helper()
+
+	require.NotNil(t, event.Report, key)
+	assert.Equal(t, key, event.Report.Key)
+	assert.Equal(t, event.Version, event.Report.Version, key)
+	assert.Equal(t, event.Owner, event.Report.Owner, key)
+	require.ErrorIs(t, event.Report.Err, reason, key)
+	assert.Nil(t, event.Panic, key)
 }
 
 // TestOnEventReportsSkippedAndListingProblems follows the events of plugins that never load: a key listed by two
 // storages is rejected at Register (which fails) and at a reload (which keeps the rest), with its listing problem
-// as the report's Err and what the second storage lists of it; a plugin in a language the Register leaves out is
-// skipped at Register and at every reload, with its descriptor's version, language, storage and owner.
+// as the report's Err and what the second storage lists of it; a plugin in a language the Register leaves out and
+// one implementing another interface are skipped at Register and at every reload, with their descriptor's
+// version, language, storage and owner, and a report whose Err is why.
 func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	t.Parallel()
 
@@ -94,6 +109,10 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 	putSkipped(t, first, "skipped", "3", &owner)
 	putSkipped(t, first, "dup", "1", &owner)
 	putSkipped(t, second, "dup", "1", &owner)
+	require.NoError(t, second.Put(&plg.Descriptor{
+		Key: "other", Implements: "example.com/contracts/rewards.Cohort@v1.0.0", Language: plg.LanguageLua,
+		Entrypoint: "plugin.lua", Version: "5", Owner: &owner,
+	}, fstest.MapFS{"plugin.lua": {Data: []byte("function Create() return {} end\n")}}))
 
 	err := plg.Register[pinger](t.Context(), ctr, "dups", plg.WithStorage(first), plg.WithStorage(second),
 		plg.WithLuaPlugins())
@@ -114,15 +133,23 @@ func TestOnEventReportsSkippedAndListingProblems(t *testing.T) {
 		skipped := nextEvent(t, events)
 		assertEvent(t, &skipped, plg.EventSkipped, "ok/"+key, map[string]string{"dup": "1", "skipped": "3"}[key],
 			plg.LanguageTypeScript, "first", &owner)
-		assert.Nil(t, skipped.Report, key)
-		assert.Nil(t, skipped.Panic, key)
+		assertSkipped(t, &skipped, "ok/"+key, plg.ErrUnsupportedLanguage)
 	}
+
+	other := nextEvent(t, events)
+	assertEvent(t, &other, plg.EventSkipped, "ok/other", "5", plg.LanguageLua, "second", &owner)
+	assertSkipped(t, &other, "ok/other", plg.ErrOtherInterface)
 
 	putSkipped(t, second, "dup", "1", &owner)
 	require.ErrorIs(t, plg.ReloadInterface(t.Context(), ctr, "ok"), plg.ErrDuplicateKey)
 
 	skipped := nextEvent(t, events)
 	assertEvent(t, &skipped, plg.EventSkipped, "ok/skipped", "3", plg.LanguageTypeScript, "first", &owner)
+	assertSkipped(t, &skipped, "ok/skipped", plg.ErrUnsupportedLanguage)
+
+	other = nextEvent(t, events)
+	assertEvent(t, &other, plg.EventSkipped, "ok/other", "5", plg.LanguageLua, "second", &owner)
+	assertSkipped(t, &other, "ok/other", plg.ErrOtherInterface)
 
 	rejected = nextEvent(t, events)
 	assertEvent(t, &rejected, plg.EventRejected, "ok/dup", "1", plg.LanguageTypeScript, "second", &owner)
@@ -213,4 +240,85 @@ func TestCloseStopsDeliveringEventsAtItsDeadline(t *testing.T) {
 
 	awaitClosed(t, plg.EventsStopped(ctr))
 	assert.Equal(t, 1, delivered, "the queued events were not delivered")
+}
+
+// TestEventsKeepEachPluginsNewestHundred follows two skipped plugins through Register and 150 reloads, one of them
+// changing version each time: Events gives each key its own events, the newest 100 oldest first, exactly as the
+// WithOnEvent function got them. A key its storages stop listing is forgotten (Events fails as Info does) and
+// starts afresh once listed again; unknown keys fail with ErrNotFound, and a closed container with ErrClosed.
+func TestEventsKeepEachPluginsNewestHundred(t *testing.T) {
+	t.Parallel()
+
+	const reloads = 150
+
+	delivered := make(chan plg.Event, 2*(reloads+1))
+	ctr := plg.New(sendEvents(delivered))
+	owner := plg.Owner{Team: plg.Team{Name: "search"}}
+	store := plg.NewMemoryStorage("store")
+	putSkipped(t, store, "moving", "0", &owner)
+	putSkipped(t, store, "still", "1", nil)
+
+	require.NoError(t, plg.Register[pinger](t.Context(), ctr, "keep", plg.WithStorage(store), plg.WithLuaPlugins()))
+
+	moving := keptEvents(t, ctr, "keep/moving")
+	require.Len(t, moving, 1)
+	assertEvent(t, &moving[0], plg.EventSkipped, "keep/moving", "0", plg.LanguageTypeScript, "store", &owner)
+
+	for i := 1; i <= reloads; i++ {
+		putSkipped(t, store, "moving", strconv.Itoa(i), &owner)
+		require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+	}
+
+	got := map[string][]plg.Event{}
+
+	for range 2 * (reloads + 1) {
+		e := nextEvent(t, delivered)
+		got[e.Key] = append(got[e.Key], e)
+	}
+
+	moving, still := keptEvents(t, ctr, "keep/moving"), keptEvents(t, ctr, "keep/still")
+	require.Len(t, moving, 100)
+	require.Len(t, still, 100)
+	assert.Equal(t, got["keep/moving"][reloads+1-100:], moving, "the newest the function got, oldest first")
+	assert.Equal(t, got["keep/still"][reloads+1-100:], still)
+
+	for i := range moving {
+		assertEvent(t, &moving[i], plg.EventSkipped, "keep/moving", strconv.Itoa(reloads-99+i),
+			plg.LanguageTypeScript, "store", &owner)
+		assertEvent(t, &still[i], plg.EventSkipped, "keep/still", "1", plg.LanguageTypeScript, "store",
+			&plg.Owner{})
+	}
+
+	store.Delete("still")
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+
+	_, err := plg.Events(ctr, "keep/still")
+	require.ErrorIs(t, err, plg.ErrNotFound, "forgotten with its listing")
+
+	putSkipped(t, store, "still", "2", nil)
+	require.NoError(t, plg.ReloadInterface(t.Context(), ctr, "keep"))
+
+	still = keptEvents(t, ctr, "keep/still")
+	require.Len(t, still, 1, "listed again, it starts afresh")
+	assert.Equal(t, "2", still[0].Version)
+
+	for _, key := range []string{"keep/none", "keep", "other/moving", ""} {
+		_, err = plg.Events(ctr, key)
+		require.ErrorIs(t, err, plg.ErrNotFound, key)
+	}
+
+	require.NoError(t, ctr.Close(t.Context()))
+
+	_, err = plg.Events(ctr, "keep/moving")
+	require.ErrorIs(t, err, plg.ErrClosed)
+}
+
+// keptEvents returns what plg.Events says of the plugin with the given key.
+func keptEvents(t *testing.T, ctr *plg.Container, key string) []plg.Event {
+	t.Helper()
+
+	events, err := plg.Events(ctr, key)
+	require.NoError(t, err)
+
+	return events
 }

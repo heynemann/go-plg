@@ -301,3 +301,51 @@ func TestAddTree(t *testing.T) {
 	bad := failingFS{fstest.MapFS{"sub/bad": {Data: []byte("x")}}}
 	require.ErrorIs(t, failing.AddTree("p", bad, "sub"), errDiskOnFire)
 }
+
+// TestFilesYieldsInWalkOrder lists every file with its contents in the order fs.WalkDir visits them, which is
+// not the order of the sorted paths ("a/b" before "a.txt": the directory a sorts before a.txt), and stops when
+// told to.
+func TestFilesYieldsInWalkOrder(t *testing.T) {
+	t.Parallel()
+
+	fsys := build(t, map[string]string{"a.txt": "1", "a/b": "2", "a/c/d": "3", "b": "4", "a/a": "5"})
+
+	var walked []string
+
+	require.NoError(t, fs.WalkDir(fsys, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() {
+			walked = append(walked, name)
+		}
+
+		return err
+	}))
+
+	var names, contents []string
+
+	for name, data := range fsys.Files() {
+		names = append(names, name)
+		contents = append(contents, string(data))
+	}
+
+	assert.Equal(t, []string{"a/a", "a/b", "a/c/d", "a.txt", "b"}, names)
+	assert.Equal(t, walked, names)
+	assert.Equal(t, []string{"5", "2", "3", "1", "4"}, contents)
+
+	for _, stop := range []int{1, 3, 4} { // inside a directory, inside a nested one, at the top
+		var first []string
+
+		for name := range fsys.Files() {
+			first = append(first, name)
+			if len(first) == stop {
+				break
+			}
+		}
+
+		assert.Equal(t, names[:stop], first)
+	}
+
+	empty := build(t, nil)
+	for name := range empty.Files() {
+		t.Fatalf("an empty tree yielded %s", name)
+	}
+}

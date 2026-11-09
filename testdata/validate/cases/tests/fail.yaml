@@ -1,0 +1,98 @@
+# Cases every pricing plugin fails, each for its own reason, whatever its language.
+httpPolicy:
+  allowedHosts: [coupons.example.com]
+cases:
+  - name: another total
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - {method: Tier, result: gold}
+    expect:
+      result: {total: 1000, discount: 0, reasons: [gold, gift]}
+
+  - name: an unexpected error
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - {method: Tier, error: the directory is down}
+    expect:
+      result: {total: 900, discount: 100, reasons: [gold]}
+
+  - name: another error
+    call: Coupon
+    input: {code: NOPE}
+    http:
+      - {url: "https://coupons.example.com/codes/NOPE", status: 404}
+    expect:
+      error: expired
+
+  - name: no error
+    call: Split
+    input: {cents: 10, parts: 2}
+    expect:
+      error: no parts
+
+  - name: a stub called less than declared
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - {method: Tier, result: gold, times: 2}
+    expect:
+      result: {total: 900, discount: 100, reasons: [gold]}
+
+  - name: a host call no stub matches
+    call: Quote
+    input:
+      order: {$ref: fixtures/order.yaml}
+    host:
+      - {method: Tier, args: {customer: bob}, result: gold}
+
+  - name: a request no stub matches
+    call: Coupon
+    input: {code: SAVE10}
+    http:
+      - {url: "https://coupons.example.com/codes/SAVE20", body: "20"}
+
+  - name: a typo in an input
+    call: Quote
+    input:
+      order:
+        customer: alice
+        lines: [{sku: apple, qtty: 2, cents: 300}]
+
+  - name: a typo in an expectation
+    call: Split
+    input: {cents: 10, parts: 2}
+    expect:
+      result: [[5, 5], zero]
+
+  - name: an input of another type
+    call: Split
+    input: {cents: ten, parts: 2}
+
+  - name: a missing fixture
+    call: Quote
+    input:
+      order: {$ref: fixtures/missing.yaml}
+
+  - name: a panic
+    call: Spin
+    input: {mode: panic}
+
+  - name: a timeout
+    call: Spin
+    input: {mode: loop}
+
+  - name: other issues
+    call: Validate
+    input:
+      in: {maxPercent: 5}
+    expect:
+      issues: []
+
+  - name: an unknown method
+    call: Price
+    input: {order: {}}

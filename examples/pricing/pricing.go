@@ -28,7 +28,9 @@ type Discount struct {
 	Cents  int64  `json:"cents"`
 }
 
-// Rule is a pricing rule. Each plugin is one rule.
+// Rule is a pricing rule. Each plugin is one rule, which validates itself against the service's Limits.
+//
+//plg:validation Limits
 type Rule interface {
 	// Discount returns the discount the rule grants order.
 	Discount(ctx context.Context, order Order) (Discount, error)

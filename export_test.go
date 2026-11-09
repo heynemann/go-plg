@@ -9,8 +9,10 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/heynemann/go-plg/internal/artifact"
 	"github.com/heynemann/go-plg/internal/engine"
 	"github.com/heynemann/go-plg/internal/guestreg"
+	"github.com/heynemann/go-plg/internal/offline"
 	"github.com/heynemann/go-plg/plgimpl"
 )
 
@@ -20,12 +22,31 @@ const MuxGrace = muxGrace
 // BundleMemoryLimit is the bundler's memory limit.
 const BundleMemoryLimit = bundleMemoryLimit
 
+// GlobalTracingChild is the environment variable set in the process TestTracingFollowsTheGlobalProvider runs
+// itself in: TestMain then runs the tests without preparing the guests, which that test does not use.
+const GlobalTracingChild = "PLG_TEST_GLOBAL_TRACING_CHILD"
+
 // WithHTTPRoots makes the plugins' https requests trust roots instead of the system's certificate authorities, so
 // tests can reach their own https servers.
 func WithHTTPRoots(roots *x509.CertPool) RegisterOption {
 	return func(c *registerConfig) {
 		c.httpRoots = roots
 	}
+}
+
+// RegisterBuiltWith is Register[T] in a program built with T's contract module at version: its plugins' pinned
+// versions are checked against version, as a program whose build info records it would check them.
+func RegisterBuiltWith[T any](ctx context.Context, ctr *Container, name, version string, opts ...RegisterOption) error {
+	iface := reflect.TypeFor[T]()
+
+	reg, err := ctr.prepare(iface, name, opts)
+	if err != nil {
+		return err
+	}
+
+	reg.module.Version, reg.module.Dir = version, ""
+
+	return ctr.registerPrepared(ctx, iface, reg)
 }
 
 // Hold takes an instance of the plugin with the given key, as a call in flight would, until the returned
@@ -139,7 +160,7 @@ func LoadedVersion(ctx context.Context, store Storage, desc *Descriptor) (string
 		return "", err
 	}
 
-	return contentVersion(frozen, ".")
+	return artifact.Digest(frozen), nil
 }
 
 // OpenSwapping opens the plugin directory desc names as s.Open does, calling beforeOpen with the
@@ -281,7 +302,7 @@ func HostHandler(iface reflect.Type, opt RegisterOption, key string, ctr *Contai
 		return nil, err
 	}
 
-	return hst.handler(key, LanguageGo, noOwner, ctr.panics), nil
+	return hst.handler(pluginID{owner: noOwner, key: key, lang: LanguageGo}, ctr.panics, nil), nil
 }
 
 // UseGenericBinder makes c serve every contract with the generic binder, ignoring the fast paths plg gen
@@ -333,4 +354,10 @@ func GenericResults(call plgimpl.Call) []reflect.Value {
 // DecodeAnswer decodes the results of a plugin's successful answer body into call, as every binder does.
 func DecodeAnswer(body []byte, call plgimpl.Call) error {
 	return decodeResults(body, call)
+}
+
+// LuaSyntaxErrors compiles the .lua files among files in the Lua guest, as plg validate does, and returns the
+// errors of those that do not compile.
+func LuaSyntaxErrors(ctx context.Context, files fs.FS, opts *offline.Options) ([]string, error) {
+	return checkLuaSyntax(ctx, files, opts)
 }

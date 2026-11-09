@@ -6,9 +6,9 @@ At Register and reload, a registration loads only plugins whose declared interfa
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests: manifest parsing of `implements` (valid forms, missing, malformed, versions), one storage holding plugins of two interfaces serving two registrations, incompatible major and newer-minor rejections, `(devel)` warning
-- [ ] Build-info version detection is tested (including a module replaced locally)
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Tests: manifest parsing of `implements` (valid forms, missing, malformed, versions), one storage holding plugins of two interfaces serving two registrations, incompatible major and newer-minor rejections, `(devel)` warning
+- [x] Build-info version detection is tested (including a module replaced locally)
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI run 42452446859 for `26c8313`: success)

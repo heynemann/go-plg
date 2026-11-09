@@ -162,6 +162,7 @@ func TestDescriptorMemoryLimitOnlyLowersTheRegisterLimit(t *testing.T) {
 		store := plg.NewMemoryStorage(tc.name)
 		desc := plg.Descriptor{
 			Key:         "k",
+			Implements:  implementsOf[testcontract.Fooer](),
 			Language:    plg.LanguageGo,
 			Entrypoint:  ".",
 			Version:     "v1",

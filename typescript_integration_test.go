@@ -35,13 +35,21 @@ func tsCorpus(keys ...string) *plg.FSStorage {
 	return plg.NewFSStorageFromFS("hostile", only{os.DirFS(filepath.Join("testdata", "hostile", "typescript")), keys})
 }
 
-// tsSource is a memory storage holding one TypeScript plugin, key "p", made of files.
+// tsSource is a memory storage holding one TypeScript plugin of testcontract.Fooer, key "p", made of files.
 func tsSource(tb testing.TB, files fstest.MapFS) *plg.MemoryStorage {
 	tb.Helper()
 
+	return tsSourceOf[testcontract.Fooer](tb, files)
+}
+
+// tsSourceOf is a memory storage holding one TypeScript plugin implementing T, key "p", made of files.
+func tsSourceOf[T any](tb testing.TB, files fstest.MapFS) *plg.MemoryStorage {
+	tb.Helper()
+
 	store := plg.NewMemoryStorage("mem")
-	require.NoError(tb, store.Put(&plg.Descriptor{Key: "p", Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts"},
-		files))
+	require.NoError(tb, store.Put(&plg.Descriptor{
+		Key: "p", Implements: implementsOf[T](), Language: plg.LanguageTypeScript, Entrypoint: "plugin.ts",
+	}, files))
 
 	return store
 }
@@ -333,7 +341,7 @@ func tsShaper(t *testing.T, members string) (testcontract.Shaper, *plg.Container
 
 	ctr := newContainer(t)
 	require.NoError(t, plg.Register[testcontract.Shaper](t.Context(), ctr, "shaper",
-		plg.WithStorage(tsSource(t, tsPlugin(shaperMembers(members)))), plg.WithPool(1, 1)))
+		plg.WithStorage(tsSourceOf[testcontract.Shaper](t, tsPlugin(shaperMembers(members)))), plg.WithPool(1, 1)))
 
 	shaper, err := plg.Get[testcontract.Shaper](t.Context(), ctr, "shaper/p")
 	require.NoError(t, err)
@@ -460,7 +468,9 @@ func TestTypeScriptPluginsDefaultTo64MiB(t *testing.T) {
 
 	ctr := loggedContainer(t, &logs)
 	store := tsSource(t, tsPlugin(fooerMembers("")))
-	require.NoError(t, store.Put(&plg.Descriptor{Key: "go", Language: plg.LanguageGo, Entrypoint: "plugin.go"},
+	require.NoError(t, store.Put(&plg.Descriptor{
+		Key: "go", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+	},
 		pluginFiles("fooer")))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "mixed", plg.WithStorage(store),
 		plg.WithPool(1, 1)))
@@ -493,7 +503,7 @@ func TestTypeScriptHostArgumentsThatDoNotFitReject(t *testing.T) {
 		Keys: (keys: object) => host.Keys(keys)`)
 	ctr := newContainer(t)
 	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "hosted",
-		plg.WithStorage(tsSource(t, src)), plg.WithHost[testcontract.Host](newTestHost())))
+		plg.WithStorage(tsSourceOf[testcontract.Hosted](t, src)), plg.WithHost[testcontract.Host](newTestHost())))
 
 	hosted, err := plg.Get[testcontract.Hosted](t.Context(), ctr, "hosted/p")
 	require.NoError(t, err)
@@ -631,7 +641,7 @@ func TestTypeScriptReentrantHostCallsKeepTheirOwnArguments(t *testing.T) {
 
 			recorder := &sumRecorder{testHost: newTestHost(), sums: make(chan string, 8)}
 			opts := append([]plg.RegisterOption{
-				plg.WithStorage(tsSource(t, tsPlugin(reentrantMembers))), plg.WithPool(1, 1),
+				plg.WithStorage(tsSourceOf[testcontract.Hosted](t, tsPlugin(reentrantMembers))), plg.WithPool(1, 1),
 				plg.WithHost[testcontract.Host](recorder), plg.WithHTTP(openPolicy(hostOf(t, srv.URL))),
 			}, mode.opts...)
 			ctr := newContainer(t)
@@ -710,10 +720,11 @@ func TestTypeScriptDetachedBuffersFailToCross(t *testing.T) {
 
 	ctr := newContainer(t)
 	require.NoError(t, plg.Register[testcontract.Hosted](t.Context(), ctr, "detached",
-		plg.WithStorage(tsSource(t, tsPlugin(detachedMembers))), plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit),
+		plg.WithStorage(tsSourceOf[testcontract.Hosted](t, tsPlugin(detachedMembers))), plg.WithPool(1, 1),
+		plg.WithMemoryLimit(hostileLimit),
 		plg.WithHost[testcontract.Host](newTestHost()), plg.WithHTTP(openPolicy(hostOf(t, srv.URL)))))
 	require.NoError(t, plg.Register[testcontract.Shaper](t.Context(), ctr, "shaper",
-		plg.WithStorage(tsSource(t, tsPlugin(shaperMembers(`Reverse: (b: Uint8Array) => {
+		plg.WithStorage(tsSourceOf[testcontract.Shaper](t, tsPlugin(shaperMembers(`Reverse: (b: Uint8Array) => {
 			if (b.length === 0) return new Uint8Array(0);
 			const d = b.length === 1 ? new Uint8Array(3) : new ArrayBuffer(3);
 			((d as any).buffer ?? d).transfer();
@@ -899,7 +910,7 @@ func TestTypeScriptCloseRunsThePluginsClose(t *testing.T) {
 
 	var logs bytes.Buffer
 
-	ctr := plg.New(plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+	ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
 	tsFooer(t, ctr, `async Close() { await null; console.log("closing", typeof this.Spin); }`, plg.WithPool(1, 1))
 
 	store := tsSource(t, tsPlugin(fooerMembers(`Close() { throw new Error("cannot close"); }`)))
@@ -990,7 +1001,7 @@ func BenchmarkHTTPRoundTripTypeScriptParallel(b *testing.B) {
 func TestABrokenMultiplexedInstanceSkipsItsHangingClose(t *testing.T) {
 	t.Parallel()
 
-	ctr := plg.New()
+	ctr := newContainer(t)
 	plg.SetCloseTimeout(ctr, 100*time.Millisecond)
 
 	plug := tsFooer(t, ctr, `Close() { for (;;) {} },

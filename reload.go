@@ -240,7 +240,7 @@ func (c *Container) reloadRound(ctx context.Context, reg *registration) (err err
 func (c *Container) refresh(ctx context.Context, reg *registration, changes *reloadChanges) error {
 	current := c.generations(reg)
 
-	found, err := c.relistPlugins(ctx, reg.name, reg.cfg)
+	found, err := c.relistPlugins(ctx, reg)
 	if err != nil {
 		err = fmt.Errorf("plg: reloading %s: %w", reg.name, err)
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: reload failed", slog.String("name", reg.name),
@@ -255,6 +255,14 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 	listed := make(map[string]bool, len(srcs)+len(problems)+len(found.skipped))
 	errs := make([]error, 0, len(problems)+1)
 
+	for i := range found.skipped { // before the problems, as they are found in the listing
+		key := reg.name + "/" + found.skipped[i].src.desc.Key
+		listed[key] = false
+		rej := skipRejection(key, &found.skipped[i])
+		reg.entry(key).rejection.Store(rej)
+		c.events.source(ctx, EventSkipped, key, &found.skipped[i].src, rej.report)
+	}
+
 	for i := range problems {
 		key := reg.name + "/" + problems[i].desc.Key
 		listed[key] = true
@@ -263,12 +271,6 @@ func (c *Container) refresh(ctx context.Context, reg *registration, changes *rel
 		c.events.problem(ctx, rej)
 
 		errs = append(errs, c.rejected(ctx, key, &noOwner.owner, current[key], problems[i].err))
-	}
-
-	for i := range found.skipped {
-		key := reg.name + "/" + found.skipped[i].desc.Key
-		listed[key] = false
-		reg.entry(key).rejection.Store(skipRejection(&found.skipped[i]))
 	}
 
 	for i := range srcs {
@@ -468,7 +470,7 @@ func (c *Container) apply(ctx context.Context, reg *registration, current map[st
 
 	for _, gen := range changes.removed {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin removed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version))
 	}
 
 	return nil
@@ -501,13 +503,7 @@ func (c *Container) retire(ctx context.Context, gen *plugin) {
 func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 	defer func() {
 		if v := recover(); v != nil {
-			failure := &PanicError{
-				Key:      gen.key,
-				Language: gen.desc.Language,
-				Phase:    PhaseClose,
-				Owner:    *gen.desc.owner(),
-				tags:     gen.pool.owner,
-			}
+			failure := gen.pool.id.panicked(PhaseClose)
 			c.panics.recovered(ctx, failure, v)
 
 			gen.closeErr = errors.Join(gen.closeErr, failure)
@@ -535,10 +531,10 @@ func (c *Container) closeRetired(ctx context.Context, gen *plugin) {
 
 	if err != nil {
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "plg: closing a plugin version failed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version), slog.String("error", err.Error()))
 	} else {
 		c.logger.LogAttrs(ctx, slog.LevelInfo, "plg: plugin version closed", slog.String("key", gen.key),
-			gen.pool.owner.log, slog.String("version", gen.desc.Version))
+			gen.pool.id.owner.log, slog.String("version", gen.desc.Version))
 	}
 }
 

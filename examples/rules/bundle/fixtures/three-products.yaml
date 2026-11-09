@@ -1,0 +1,6 @@
+customer: ada
+coupon: ""
+items:
+  - {sku: tea, quantity: 10, unitCents: 200}
+  - {sku: mug, quantity: 1, unitCents: 1000}
+  - {sku: spoon, quantity: 2, unitCents: 500}

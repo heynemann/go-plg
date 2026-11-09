@@ -49,14 +49,27 @@ func checkInterface(iface reflect.Type) error {
 		return errUnnamed
 	case strings.ContainsRune(iface.Name(), '['):
 		return errGeneric
-	case iface.NumMethod() == 0:
+	}
+
+	sigs := make([]reflect.Method, iface.NumMethod())
+	for i := range sigs {
+		sigs[i] = iface.Method(i)
+	}
+
+	return checkMethods(sigs)
+}
+
+// checkMethods checks the methods of an interface against the interface contract: there is at least one, and
+// each is exported, takes a context.Context first, returns an error last and uses only data types in between.
+func checkMethods(sigs []reflect.Method) error {
+	if len(sigs) == 0 {
 		return errNoMethods
 	}
 
-	for m := range iface.Methods() {
-		err := checkMethod(&m)
+	for i := range sigs {
+		err := checkMethod(&sigs[i])
 		if err != nil {
-			return fmt.Errorf("method %s: %w", m.Name, err)
+			return fmt.Errorf("method %s: %w", sigs[i].Name, err)
 		}
 	}
 

@@ -59,8 +59,9 @@ func TestInfoFollowsAPluginThroughEveryStatus(t *testing.T) {
 	served := inspect(t, ctr, key)
 	require.NotNil(t, served.Load)
 	assert.Equal(t, plg.Report{
-		At: served.Load.At, Owner: validatorOwner(), Key: key, Version: "1", Duration: served.Load.Duration,
-	}, *served.Load, "a clean load")
+		At: served.Load.At, Owner: validatorOwner(), Key: key, Version: "1", Issues: []plg.Issue{develIssue()},
+		Duration: served.Load.Duration,
+	}, *served.Load, "a clean load, but for the test binary's contract checkout")
 	assert.False(t, served.Load.At.Before(before) || served.LoadedAt.After(after), "loaded by the Register")
 	assert.Equal(t, served.Load.At.Add(served.Load.Duration), served.LoadedAt)
 	assert.Positive(t, served.Pool.Memory, "the instance's linear memory")
@@ -123,6 +124,7 @@ func TestInfoFollowsAPluginThroughEveryStatus(t *testing.T) {
 	assert.Equal(t, plg.Report{
 		At: lastGood.Rejection.At, Err: lastGood.Rejection.Err, Owner: validatorOwner(), Key: key, Version: "2",
 		Issues: []plg.Issue{
+			develIssue(),
 			{Severity: plg.SeverityError, Code: "validator.broken", Message: "broken", Field: "max"},
 			{Severity: plg.SeverityWarning, Code: "validator.slow", Message: "slow"},
 		},
@@ -214,11 +216,16 @@ func TestPluginsIsSafeUnderConcurrentReloads(t *testing.T) {
 
 	owner := validatorOwner()
 	store := plg.NewMemoryStorage("churn")
-	put := func(key, version string, by *plg.Owner) {
+	put := func(key, version string, pluginOwner *plg.Owner) {
 		t.Helper()
 
 		require.NoError(t, store.Put(&plg.Descriptor{
-			Key: key, Language: plg.LanguageLua, Entrypoint: "plugin.lua", Version: version, Owner: by,
+			Key:        key,
+			Implements: implementsOf[testcontract.Fooer](),
+			Language:   plg.LanguageLua,
+			Entrypoint: "plugin.lua",
+			Version:    version,
+			Owner:      pluginOwner,
 		}, luaLanguage().files("fooer")))
 	}
 

@@ -8,15 +8,18 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/guestout"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 func TestMain(m *testing.M) {
@@ -25,11 +28,14 @@ func TestMain(m *testing.M) {
 
 // record is one logged line.
 type record struct {
-	msg    string
-	key    string
-	stream string
-	line   string
-	level  slog.Level
+	ctx     context.Context //nolint:containedctx // the context the record was logged with, for the test to check
+	msg     string
+	key     string
+	stream  string
+	line    string
+	traceID string
+	spanID  string
+	level   slog.Level
 }
 
 // lines is a slog handler keeping every record.
@@ -42,17 +48,21 @@ func (l *lines) WithAttrs([]slog.Attr) slog.Handler     { return l }
 func (l *lines) WithGroup(string) slog.Handler          { return l }
 
 //nolint:gocritic // hugeParam: slog.Handler fixes the signature
-func (l *lines) Handle(_ context.Context, rec slog.Record) error {
-	got := record{level: rec.Level, msg: rec.Message}
+func (l *lines) Handle(ctx context.Context, rec slog.Record) error {
+	got := record{ctx: ctx, level: rec.Level, msg: rec.Message}
 
-	rec.Attrs(func(a slog.Attr) bool {
-		switch a.Key {
+	rec.Attrs(func(attr slog.Attr) bool {
+		switch attr.Key {
 		case "key":
-			got.key = a.Value.String()
+			got.key = attr.Value.String()
 		case "stream":
-			got.stream = a.Value.String()
+			got.stream = attr.Value.String()
 		case "line":
-			got.line = a.Value.String()
+			got.line = attr.Value.String()
+		case "trace_id":
+			got.traceID = attr.Value.String()
+		case "span_id":
+			got.spanID = attr.Value.String()
 		default: // the budget of a truncation notice
 		}
 
@@ -78,9 +88,14 @@ func (l *lines) texts(stream string) []string {
 }
 
 func newCapture() (*guestout.Capture, *lines) {
+	return newScrubbingCapture(nil)
+}
+
+// newScrubbingCapture returns a capture scrubbing the values secrets holds, and its records.
+func newScrubbingCapture(secrets *redact.Redactor) (*guestout.Capture, *lines) {
 	handler := &lines{}
 
-	return guestout.New(slog.New(handler), "fooer/p"), handler
+	return guestout.New(slog.New(handler), "fooer/p", secrets), handler
 }
 
 func write(t *testing.T, w io.Writer, chunks ...string) {
@@ -97,7 +112,7 @@ func TestLinesAreLoggedWithTheKeyAndStream(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	write(t, capture.Stdout(), "hello ", "world\nsecond\n\nthird")
 	write(t, capture.Stderr(), "oops\n")
@@ -122,11 +137,57 @@ func TestLinesAreLoggedWithTheKeyAndStream(t *testing.T) {
 	assert.Len(t, logs.records, 5, "nothing pending: End logs nothing")
 }
 
+// stepKey marks the context of a step, for TestLinesCarryTheirStepsContextAndSpan.
+type stepKey struct{}
+
+func TestLinesCarryTheirStepsContextAndSpan(t *testing.T) {
+	t.Parallel()
+
+	span := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 15: 0x01},
+		SpanID:     trace.SpanID{0x0c, 7: 0x02},
+		TraceFlags: trace.FlagsSampled,
+	})
+	traced := trace.ContextWithSpanContext(context.WithValue(t.Context(), stepKey{}, "call"), span)
+
+	capture, logs := newCapture()
+	write(t, capture.Stdout(), "before any step\n")
+
+	capture.Begin(traced)
+	write(t, capture.Stdout(), "in the call\npartial")
+	capture.End(context.WithValue(traced, stepKey{}, "end"))
+
+	capture.Begin(context.WithValue(t.Context(), stepKey{}, "untraced"))
+	write(t, capture.Stderr(), "untraced\n")
+	capture.End(t.Context())
+	write(t, capture.Stdout(), "after the steps\n")
+
+	require.Len(t, logs.records, 5)
+
+	want := []struct {
+		step            any
+		traceID, spanID string
+	}{
+		{step: nil},
+		{step: "call", traceID: "0a0b0000000000000000000000000001", spanID: "0c00000000000002"},
+		{step: "end", traceID: "0a0b0000000000000000000000000001", spanID: "0c00000000000002"},
+		{step: "untraced"},
+		{step: nil},
+	}
+
+	for i, rec := range logs.records {
+		assert.Equal(t, want[i].step, rec.ctx.Value(stepKey{}), "record %d (%s) is logged with its step's context",
+			i, rec.line)
+		assert.Equal(t, want[i].traceID, rec.traceID, "record %d (%s)", i, rec.line)
+		assert.Equal(t, want[i].spanID, rec.spanID, "record %d (%s)", i, rec.line)
+	}
+}
+
 func TestLongLinesAreLoggedInPieces(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	exact := strings.Repeat("a", guestout.MaxLine)
 	write(t, capture.Stdout(), exact+"\n")
@@ -149,7 +210,7 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	line := strings.Repeat("x", 1000) + "\n"
 	perStep := guestout.StepBudget / len(line)
 
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	for range 2 * perStep {
 		write(t, capture.Stderr(), line)
@@ -176,7 +237,7 @@ func TestEachStepLogsWithinItsBudget(t *testing.T) {
 	write(t, capture.Stdout(), "other stream\n")
 	assert.Equal(t, []string{"other stream"}, logs.texts("stdout"), "each stream has its own budget")
 
-	capture.Begin()
+	capture.Begin(t.Context())
 	write(t, capture.Stderr(), "next step\n")
 	assert.Equal(t, "next step", logs.texts("stderr")[perStep+1], "Begin renews the budget")
 }
@@ -185,7 +246,7 @@ func TestEmptyLinesCountAgainstTheBudget(t *testing.T) {
 	t.Parallel()
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	write(t, capture.Stdout(), strings.Repeat("\n", 4_000_000))
 	capture.End(t.Context())
@@ -202,7 +263,7 @@ func TestGuestReturnsTheStepsStderr(t *testing.T) {
 	assert.Empty(t, capture.Guest(), "nothing written yet")
 
 	write(t, capture.Stderr(), "from instantiation\n")
-	capture.Begin()
+	capture.Begin(t.Context())
 	assert.Empty(t, capture.Guest(), "a new step starts empty")
 
 	write(t, capture.Stdout(), "not stderr\n")
@@ -214,7 +275,7 @@ func TestGuestKeepsTheLastBytesOfALongStep(t *testing.T) {
 	t.Parallel()
 
 	capture, _ := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	var all bytes.Buffer
 
@@ -231,7 +292,7 @@ func TestGuestKeepsTheLastBytesOfALongStep(t *testing.T) {
 	write(t, capture.Stderr(), huge)
 	assert.Equal(t, huge[len(huge)-guestout.TailSize:], capture.Guest(), "one write larger than the ring")
 
-	capture.Begin()
+	capture.Begin(t.Context())
 	write(t, capture.Stderr(), "after\n")
 	assert.Equal(t, "after\n", capture.Guest(), "only the new step, though the ring holds more")
 }
@@ -267,7 +328,7 @@ func TestOutputPastTheBudgetIsNotScanned(t *testing.T) {
 	copy(data[size-guestout.TailSize:], strings.Repeat("y", guestout.TailSize))
 
 	capture, logs := newCapture()
-	capture.Begin()
+	capture.Begin(t.Context())
 
 	var (
 		n     int
@@ -302,26 +363,26 @@ func TestOutputPastTheBudgetIsNotScanned(t *testing.T) {
 
 // BenchmarkStep is what every call pays for the capture when the guest writes nothing: Begin and End.
 func BenchmarkStep(b *testing.B) {
-	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 	ctx := b.Context()
 
 	b.ReportAllocs()
 
 	for b.Loop() {
-		capture.Begin()
+		capture.Begin(ctx)
 		capture.End(ctx)
 	}
 }
 
 // BenchmarkStderrLine is one traceback-sized line written to stderr: kept in the tail and logged.
 func BenchmarkStderrLine(b *testing.B) {
-	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 	line := []byte("/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)\n")
 
 	b.ReportAllocs()
 
 	for b.Loop() {
-		capture.Begin() // a fresh step: within the budget, so the line is logged
+		capture.Begin(b.Context()) // a fresh step: within the budget, so the line is logged
 
 		_, err := capture.Stderr().Write(line)
 		if err != nil {
@@ -335,14 +396,14 @@ func BenchmarkStderrLine(b *testing.B) {
 func BenchmarkNewlineFreeWrite(b *testing.B) {
 	for _, mib := range []int{1, 8, 64} {
 		b.Run(fmt.Sprintf("%dMiB", mib), func(b *testing.B) {
-			capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p")
+			capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", nil)
 			data := bytes.Repeat([]byte("x"), mib<<20)
 
 			b.SetBytes(int64(len(data)))
 			b.ReportAllocs()
 
 			for b.Loop() {
-				capture.Begin()
+				capture.Begin(b.Context())
 
 				_, err := capture.Stderr().Write(data)
 				if err != nil {
@@ -350,5 +411,185 @@ func BenchmarkNewlineFreeWrite(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// secretValues returns a redactor holding the value tok-123456 of the secret api_key.
+func secretValues() *redact.Redactor {
+	secrets := &redact.Redactor{}
+	secrets.Add("api_key", "tok-123456")
+
+	return secrets
+}
+
+func TestSecretsAreScrubbedFromLinesAndTheTail(t *testing.T) {
+	t.Parallel()
+
+	capture, logs := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	write(t, capture.Stdout(), "token tok-", "123456 sent\n")
+	write(t, capture.Stderr(), "failed with tok-123456\n")
+	assert.Equal(t, []string{"token [secret api_key] sent"}, logs.texts("stdout"), "a value split across writes")
+	assert.Equal(t, []string{"failed with [secret api_key]"}, logs.texts("stderr"))
+	assert.Equal(t, "failed with [secret api_key]\n", capture.Guest())
+
+	capture.End(t.Context())
+}
+
+func TestCuttingALongLineNeverSplitsASecret(t *testing.T) {
+	t.Parallel()
+
+	capture, logs := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	// The value straddles MaxLine: a cut at MaxLine would leave "tok-12" and "3456" in two records.
+	head := strings.Repeat("a", guestout.MaxLine-6)
+	write(t, capture.Stdout(), head+"tok-123456"+strings.Repeat("b", 10)+"\n")
+	capture.End(t.Context())
+
+	got := logs.texts("stdout")
+	require.Len(t, got, 2)
+	assert.Equal(t, head+"[secret api_key]"+strings.Repeat("b", 10), got[0]+got[1])
+	assert.Less(t, len(got[0]), len(head)+1, "the cut moved before the value")
+
+	for _, piece := range got {
+		assert.NotContains(t, piece, "tok-")
+		assert.NotContains(t, piece, "3456")
+	}
+}
+
+func TestTheTailDropsTheEndOfACutSecret(t *testing.T) {
+	t.Parallel()
+
+	capture, _ := newScrubbingCapture(secretValues())
+	capture.Begin(t.Context())
+
+	// The tail's first bytes would be "3456", the end of a value whose start fell out of it.
+	rest := strings.Repeat("x", guestout.TailSize-4)
+	write(t, capture.Stderr(), "tok-123456"+rest)
+
+	got := capture.Guest()
+	assert.NotContains(t, got, "3456")
+	assert.True(t, strings.HasSuffix(rest, got), "only the start is dropped")
+	assert.GreaterOrEqual(t, len(got), len(rest)-len("tok-123456"), "at most a value's length is dropped")
+
+	capture.End(t.Context())
+}
+
+// onlyFiller fails unless each record, without the masks it holds, is made of filler bytes only: no fragment of
+// a value shows.
+func onlyFiller(t *testing.T, records []string, filler string) {
+	t.Helper()
+
+	for i, r := range records {
+		r = strings.ReplaceAll(r, redact.Mask("api_key"), "")
+		r = strings.ReplaceAll(r, redact.Mask("cert"), "")
+		assert.Empty(t, strings.Trim(r, filler), "record %d shows part of a value", i)
+	}
+}
+
+// TestALongSecretLeavesShortOnesWhole: a value longer than half of MaxLine (a PEM key, say) neither leaves a short
+// one straddling MaxLine split across records nor is split itself.
+func TestALongSecretLeavesShortOnesWhole(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	cert := strings.Repeat("P", 3000)
+	secrets.Add("cert", cert)
+
+	capture, logs := newScrubbingCapture(secrets)
+	capture.Begin(t.Context())
+
+	filler := strings.Repeat("a", 2000)
+	line := strings.Repeat("a", guestout.MaxLine-6) + "tok-123456" + filler + cert + filler + "tok-123456" + filler
+	write(t, capture.Stdout(), line, "\n")
+	capture.End(t.Context())
+
+	got := logs.texts("stdout")
+	require.Greater(t, len(got), 1, "logged in pieces")
+
+	scrubbed := strings.ReplaceAll(strings.ReplaceAll(line, "tok-123456", "[secret api_key]"), cert, "[secret cert]")
+	assert.Equal(t, scrubbed, strings.Join(got, ""), "no value was split")
+	onlyFiller(t, got, "a")
+}
+
+// TestASecretLongerThanMaxLineIsScrubbed: a value longer than MaxLine is logged as its mask, printed on a line of
+// its own or within a longer one, in one write or across many.
+func TestASecretLongerThanMaxLineIsScrubbed(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	cert := strings.Repeat("Q", 5000)
+	secrets.Add("cert", cert)
+
+	capture, logs := newScrubbingCapture(secrets)
+	capture.Begin(t.Context())
+
+	write(t, capture.Stdout(), cert+"\n")
+	assert.Equal(t, []string{"[secret cert]"}, logs.texts("stdout"), "printed whole")
+
+	line := strings.Repeat("x", 10000) + cert + strings.Repeat("x", 3000) + "\n"
+	for chunk := range slices.Chunk([]byte(line), 1000) {
+		write(t, capture.Stderr(), string(chunk))
+	}
+
+	got := logs.texts("stderr")
+	assert.Equal(t, strings.ReplaceAll(line[:len(line)-1], cert, "[secret cert]"), strings.Join(got, ""),
+		"within a longer line, across writes")
+	onlyFiller(t, got, "x")
+	assert.Equal(t, strings.ReplaceAll(line, cert, "[secret cert]"), capture.Guest())
+
+	capture.End(t.Context())
+}
+
+// TestTheTailScrubsASecretLongerThanHalfOfIt: stderr's ring grows to twice the longest value, read in the middle
+// of a step, keeping what it held: a tail that would start within the value holds it whole, or drops its end.
+func TestTheTailScrubsASecretLongerThanHalfOfIt(t *testing.T) {
+	t.Parallel()
+
+	secrets := secretValues()
+	capture, _ := newScrubbingCapture(secrets)
+	cert := strings.Repeat("Q", 40000)
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), "start ")
+	secrets.Add("cert", strings.Repeat("R", 20000))
+	write(t, capture.Stderr(), "end")
+	assert.Equal(t, "start end", capture.Guest(), "the ring grew keeping what it held")
+	capture.End(t.Context())
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), strings.Repeat("x", 50000))
+	secrets.Add("cert", cert)
+	write(t, capture.Stderr(), cert+strings.Repeat("y", 30000))
+	assert.Equal(t, "[secret cert]"+strings.Repeat("y", 30000), capture.Guest(),
+		"the last TailSize bytes would start within the value: it is kept whole")
+	capture.End(t.Context())
+
+	capture.Begin(t.Context())
+	write(t, capture.Stderr(), cert+strings.Repeat("y", 60000))
+	assert.Equal(t, strings.Repeat("y", guestout.TailSize), capture.Guest(), "the end of a cut value is dropped")
+	capture.End(t.Context())
+}
+
+// BenchmarkScrubbedStderrLine is BenchmarkStderrLine for a plugin that read two secrets: the line, holding
+// neither, is scrubbed too.
+func BenchmarkScrubbedStderrLine(b *testing.B) {
+	secrets := secretValues()
+	secrets.Add("db_password", "hunter2-hunter2")
+
+	capture := guestout.New(slog.New(slog.DiscardHandler), "fooer/p", secrets)
+	line := []byte("/gopath/src/plg.local/plugin/plugin.go:64:2: panic: plg.local/plugin.deeper(...)\n")
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		capture.Begin(b.Context())
+
+		_, err := capture.Stderr().Write(line)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }

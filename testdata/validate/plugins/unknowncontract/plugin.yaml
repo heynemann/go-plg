@@ -1,0 +1,6 @@
+implements: example.com/nosuch/cohort.Provider@v1.0.0
+language: lua
+entrypoint: plugin.lua
+owner:
+  team: {name: growth}
+  contact: {channel: "#growth"}

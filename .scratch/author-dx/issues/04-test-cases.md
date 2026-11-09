@@ -4,9 +4,9 @@
 
 **Blocked by:** 02 (plg validate: resolve the contract and load the plugin offline)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tests of the runner itself for Go, Lua and TS plugins: passing and failing results, errors, issues, Host stubs (matching, counts, unmatched), HTTP stubs (matching, unmatched, policy), fixtures with $ref, type errors in inputs and expectations, and a case that panics or times out
-- [ ] Failure output shows the case, the expected and actual values (diff for structs)
-- [ ] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
-- [ ] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket
+- [x] Tests of the runner itself for Go, Lua and TS plugins: passing and failing results, errors, issues, Host stubs (matching, counts, unmatched), HTTP stubs (matching, unmatched, policy), fixtures with $ref, type errors in inputs and expectations, and a case that panics or times out
+- [x] Failure output shows the case, the expected and actual values (diff for structs)
+- [x] README and PLAN.md ("Author developer experience" section plus an implementation-log entry) updated
+- [x] Meets [RULES.md](../../../RULES.md): lint clean (`make fmt-check lint`), happy path and edge cases tested (no test theater), integration tests with real plugins/guests where touched, benchmarks for hot paths touched, containers cleaned up via `t.Cleanup` (§7), `make check` passes, the CI run for the pushed commit is green, one commit titled exactly as this ticket (CI: run 42472553664 for `00ff89c`: success)

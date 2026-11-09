@@ -116,7 +116,7 @@ func writePlugin(tb testing.TB, root, key, source string) {
 	dir := filepath.Join(root, key)
 	require.NoError(tb, os.MkdirAll(dir, 0o750))
 	require.NoError(tb, os.WriteFile(filepath.Join(dir, "plugin.yaml"),
-		[]byte("language: go\nentrypoint: plugin.go\n"), 0o600))
+		[]byte(manifestOf[testcontract.Fooer]("language: go\nentrypoint: plugin.go\n")), 0o600))
 	require.NoError(tb, os.WriteFile(filepath.Join(dir, "plugin.go"), []byte(source), 0o600))
 }
 
@@ -124,7 +124,10 @@ func writePlugin(tb testing.TB, root, key, source string) {
 func putVersioned(tb testing.TB, store *plg.MemoryStorage, key, version string) {
 	tb.Helper()
 
-	desc := plg.Descriptor{Key: key, Language: plg.LanguageGo, Entrypoint: "plugin.go", Version: version}
+	desc := plg.Descriptor{
+		Key: key, Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageGo, Entrypoint: "plugin.go",
+		Version: version,
+	}
 	require.NoError(tb, store.Put(&desc, fstest.MapFS{"plugin.go": {Data: []byte(versioned(version, ""))}}))
 }
 

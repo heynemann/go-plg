@@ -24,10 +24,9 @@ type method struct {
 	index   uint32          // the method index of plg_call
 }
 
-// newMethod plans the method with the given index; planner is shared by the contract's methods, so each type
+// newMethod plans sig, the method with the given index; planner is shared by the contract's methods, so each type
 // of the contract is planned once.
-func newMethod(planner *wire.Planner, iface reflect.Type, index, field int) (*method, error) {
-	sig := iface.Method(index)
+func newMethod(planner *wire.Planner, sig *reflect.Method, index, field int) (*method, error) {
 	fn := sig.Type
 	plan := &method{
 		typ:     fn,
@@ -235,11 +234,13 @@ func (c *Container) call(ctx context.Context, key string, meth *method, call plg
 }
 
 // call runs one method call on an instance of the plugin, waiting for one while all are busy, and records it in
-// the plugin's call metrics.
+// the plugin's call metrics and its span.
 func (p *plugin) call(ctx context.Context, meth *method, call plgimpl.Call) error {
 	start := time.Now()
+	ctx, span := p.spans.call(ctx, meth.index)
 	err := p.callInstance(ctx, meth, call)
 	p.pool.called(ctx, meth.index, time.Since(start), err)
+	p.spans.called(ctx, span, err)
 
 	return err
 }
@@ -274,10 +275,8 @@ func (p *plugin) exchange(ctx context.Context, held *slot, meth *method, call pl
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				failure := &PanicError{
-					Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Owner: *p.desc.owner(),
-					tags: p.pool.owner,
-				}
+				failure := p.pool.id.panicked(PhaseCall)
+				failure.Method = meth.name
 				p.pool.panics.recovered(ctx, failure, v)
 
 				discard, err = true, failure
@@ -357,10 +356,8 @@ func decodeResults(body []byte, call plgimpl.Call) error {
 
 // failed reports a call the guest failed, with what the guest wrote to stderr meanwhile.
 func (p *plugin) failed(ctx context.Context, held *slot, meth *method, value any) *PanicError {
-	failure := &PanicError{
-		Key: p.key, Language: p.desc.Language, Phase: PhaseCall, Method: meth.name, Value: value,
-		Guest: held.inst.Guest(), Owner: *p.desc.owner(), tags: p.pool.owner,
-	}
+	failure := p.pool.id.panicked(PhaseCall)
+	failure.Method, failure.Value, failure.Guest = meth.name, value, held.inst.Guest()
 	p.pool.panics.report(ctx, failure)
 
 	return failure

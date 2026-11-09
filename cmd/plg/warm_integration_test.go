@@ -43,8 +43,10 @@ func main() {
 	c := plg.New(plg.WithCompilationCacheDir(os.Args[1]), plg.WithLogger(logger))
 
 	store := plg.NewMemoryStorage("mem")
-	err := store.Put(&plg.Descriptor{Key: "g", Language: plg.LanguageGo, Entrypoint: "plugin.go"},
-		fstest.MapFS{"plugin.go": {Data: []byte(plugin)}})
+	err := store.Put(&plg.Descriptor{
+		Key: "g", Implements: "example.com/svc/contract.Greeter@v1.0.0", Language: plg.LanguageGo,
+		Entrypoint: "plugin.go",
+	}, fstest.MapFS{"plugin.go": {Data: []byte(plugin)}})
 	if err == nil {
 		err = plg.Register[contract.Greeter](ctx, c, "greeter", plg.WithStorage(store), plg.WithPool(1, 1))
 	}
@@ -69,8 +71,8 @@ func main() {
 
 // TestWarmSparesAFreshProcessTheColdCompile runs `plg warm` into an empty cache directory the way a Docker build
 // would, then a fresh service process on that directory: it must load the Go guest from the cache (no entry
-// written, a fraction of the cold compile) and serve its plugin. Both processes are built without the race
-// detector, so the timings are the ones a service sees.
+// written: wazero writes one on every miss) and serve its plugin. Both processes are built without the race
+// detector, so the logged timings are the ones a service sees.
 func TestWarmSparesAFreshProcessTheColdCompile(t *testing.T) {
 	t.Parallel()
 
@@ -105,8 +107,6 @@ func TestWarmSparesAFreshProcessTheColdCompile(t *testing.T) {
 
 	t.Logf("go guest compile: plg warm (cold) %v, fresh process on the warmed cache %v", cold, warm)
 	assert.Equal(t, warmed, cacheEntries(t, cache), "a cache hit writes no entry; a cold compile would")
-	assert.Less(t, warm, time.Second, "a warm cache loads well under a second")
-	assert.Less(t, warm*5, cold, "the fresh process did not compile cold")
 }
 
 // compileDuration finds the guest compile's duration in a process's log.

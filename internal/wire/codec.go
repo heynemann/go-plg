@@ -285,7 +285,7 @@ func (p *Planner) fillStruct(n *node) error {
 			return fmt.Errorf("%w: %s: unexported field %s", ErrUnsupported, n.typ, structField.Name)
 		}
 
-		name, ok := fieldName(&structField)
+		name, ok := FieldName(&structField)
 		if !ok {
 			n.skipped = append(n.skipped, structField.Index[0])
 
@@ -312,10 +312,10 @@ func (p *Planner) fillStruct(n *node) error {
 	return nil
 }
 
-// fieldName returns the name a struct field has for other guest languages: its `json` tag name, else its Go
+// FieldName returns the name a struct field has for other guest languages: its `json` tag name, else its Go
 // name (an embedded struct is one field named after its type, not flattened). It reports false for a field
 // tagged `json:"-"`, which does not cross at all.
-func fieldName(sf *reflect.StructField) (string, bool) {
+func FieldName(sf *reflect.StructField) (string, bool) {
 	tag, tagged := sf.Tag.Lookup("json")
 	name, _, _ := strings.Cut(tag, ",")
 

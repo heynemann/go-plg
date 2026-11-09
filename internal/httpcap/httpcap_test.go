@@ -17,10 +17,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/httpabi"
 	"github.com/heynemann/go-plg/internal/httpcap"
+	"github.com/heynemann/go-plg/internal/redact"
 )
 
 func TestMain(m *testing.M) {
@@ -121,7 +123,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 
 	var reports []httpcap.Report
 
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: panicked,
 		Done:     func(_ context.Context, r httpcap.Report) { reports = append(reports, r) },
 	})
@@ -140,6 +142,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 		assert.NotEqual(t, httpcap.OutcomeOK, got.report.Outcome)
 		assert.Zero(t, got.report.Status)
 		assert.Zero(t, got.report.Received)
+		assert.Error(t, got.report.Err, "a refusal or failure says why")
 
 		got.refused = hostErr.Message
 
@@ -150,6 +153,7 @@ func serveWith(ctx context.Context, t *testing.T, client *httpcap.Client, panick
 	assert.Equal(t, httpcap.OutcomeOK, got.report.Outcome)
 	assert.Equal(t, resp.Status, got.report.Status)
 	assert.Equal(t, len(out)-len(prefix), got.report.Received, "the encoded response")
+	assert.NoError(t, got.report.Err)
 
 	got.resp = resp
 
@@ -351,7 +355,7 @@ func TestRequestLogsCarryTheHooksAttr(t *testing.T) {
 	client := httpcap.Disabled(slog.New(slog.NewJSONHandler(&logs, nil)))
 	client.Close()
 
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: unexpectedPanic(t),
 		Done:     func(context.Context, httpcap.Report) {},
 		Attr:     slog.Group("owner", slog.String("team", "payments")),
@@ -456,7 +460,7 @@ func TestRequestsEndWithTheirContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan []byte)
 	reports := make(chan httpcap.Report, 1)
-	handler := client.Handler("web/p", httpcap.Hooks{
+	handler := client.Handler("web/p", &httpcap.Hooks{
 		Panicked: unexpectedPanic(t),
 		Done:     func(_ context.Context, r httpcap.Report) { reports <- r },
 	})
@@ -516,6 +520,77 @@ func TestHandlerRecoversPanics(t *testing.T) {
 	assert.Equal(t, httpcap.ErrInternal.Error(), got.refused, "the plugin is told about an internal error")
 	assert.Equal(t, []any{"transport bug"}, recovered, "the panic went to the panicked function, once")
 	assert.Equal(t, httpcap.OutcomeFailed, got.report.Outcome)
+	require.ErrorIs(t, got.report.Err, httpcap.ErrInternal)
+}
+
+// spanContext returns a sampled span context with the given span ID and tracestate.
+func spanContext(t *testing.T, span byte, state string) trace.SpanContext {
+	t.Helper()
+
+	ts, err := trace.ParseTraceState(state)
+	require.NoError(t, err)
+
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x0a, 15: 0x01}, SpanID: trace.SpanID{7: span}, TraceFlags: trace.FlagsSampled,
+		TraceState: ts,
+	})
+}
+
+// TestRequestsCarryTheirSpanContext: a request carries the span context of its context in traceparent and
+// tracestate, replacing the plugin's own, which go through when the context holds none. With a Trace hook, the
+// request is made with the hook's context and its span ended once with the request's report, refusals included.
+func TestRequestsCarryTheirSpanContext(t *testing.T) {
+	t.Parallel()
+
+	type propagated struct{ parent, state string }
+
+	got := make(chan propagated, 1)
+	srv := newServer(t, func(_ http.ResponseWriter, req *http.Request) {
+		got <- propagated{req.Header.Get("Traceparent"), req.Header.Get("Tracestate")}
+	})
+	client, _ := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
+
+	const pluginParent = "00-0b000000000000000000000000000002-0000000000000009-01"
+
+	plugins := http.Header{"Tracestate": {"p=1"}}
+	plugins["traceparent"] = []string{pluginParent} // as a script plugin may write it
+
+	serve(t.Context(), t, client, request("GET", srv.URL, plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{pluginParent, "p=1"}, <-got, "no span context: the plugin's own")
+
+	caller := trace.ContextWithSpanContext(t.Context(), spanContext(t, 1, "c=1"))
+	serve(caller, t, client, request("GET", srv.URL, plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{"00-0a000000000000000000000000000001-0000000000000001-01", "c=1"}, <-got,
+		"the caller's span context replaces the plugin's")
+
+	var ended []httpcap.Report
+
+	handler := client.Handler("web/p", &httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(context.Context, httpcap.Report) {},
+		Trace: func(ctx context.Context) (context.Context, httpcap.SpanEnd) {
+			assert.Equal(t, caller, ctx, "the hook starts from the call's context")
+
+			return trace.ContextWithSpanContext(ctx, spanContext(t, 2, "")),
+				func(report httpcap.Report) { ended = append(ended, report) }
+		},
+	})
+
+	handler(caller, nil, request("GET", srv.URL+"/items?token=secret", plugins.Clone(), ""), 1)
+	assert.Equal(t, propagated{"00-0a000000000000000000000000000001-0000000000000002-01", ""}, <-got,
+		"the hook's span, and no plugin tracestate beside it")
+	require.Len(t, ended, 1, "the span is ended once")
+	assert.Equal(t, "GET", ended[0].Method)
+	assert.Equal(t, srv.URL+"/items", ended[0].URL, "no query")
+	assert.Equal(t, http.StatusOK, ended[0].Status)
+	assert.Equal(t, httpcap.OutcomeOK, ended[0].Outcome)
+	require.NoError(t, ended[0].Err)
+
+	handler(caller, nil, request("POST", "http://refused.example/x", nil, ""), 1)
+	require.Len(t, ended, 2, "a refused request's span is ended too")
+	assert.Equal(t, "POST", ended[1].Method)
+	assert.Equal(t, httpcap.OutcomeRefused, ended[1].Outcome)
+	require.ErrorIs(t, ended[1].Err, httpcap.ErrHostNotAllowed)
 }
 
 // benchTarget is a handler allowed to reach a loopback server answering "ok", and a GET for it.
@@ -524,7 +599,8 @@ type benchTarget struct {
 	req     []byte
 }
 
-func benchClient(b *testing.B) benchTarget {
+// benchClient returns a benchTarget whose handler's Scrub hook is scrub (nil: none).
+func benchClient(b *testing.B, scrub func(string) string) benchTarget {
 	b.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -540,15 +616,32 @@ func benchClient(b *testing.B) benchTarget {
 	require.NoError(b, err)
 	b.Cleanup(client.Close)
 
-	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}}
+	hooks := httpcap.Hooks{Panicked: unexpectedPanic(b), Done: func(context.Context, httpcap.Report) {}, Scrub: scrub}
 
-	return benchTarget{handler: client.Handler("bench/p", hooks), req: request(http.MethodGet, srv.URL, nil, "")}
+	return benchTarget{handler: client.Handler("bench/p", &hooks), req: request(http.MethodGet, srv.URL, nil, "")}
 }
 
 // BenchmarkRoundTrip is the host side of one plugin request (checks, request, response encoding) against a
 // loopback server, without the guest.
 func BenchmarkRoundTrip(b *testing.B) {
-	target := benchClient(b)
+	benchRoundTrip(b, nil)
+}
+
+// BenchmarkRoundTripScrubbed is BenchmarkRoundTrip for a plugin that read two secrets: its Scrub hook scrubs the
+// request's URL, which holds neither.
+func BenchmarkRoundTripScrubbed(b *testing.B) {
+	var secrets redact.Redactor
+
+	secrets.Add("api_key", "tok-123456")
+	secrets.Add("db_password", "hunter2-hunter2")
+
+	benchRoundTrip(b, secrets.String)
+}
+
+func benchRoundTrip(b *testing.B, scrub func(string) string) {
+	b.Helper()
+
+	target := benchClient(b, scrub)
 
 	var dst []byte
 
@@ -560,7 +653,7 @@ func BenchmarkRoundTrip(b *testing.B) {
 }
 
 func BenchmarkRoundTripParallel(b *testing.B) {
-	target := benchClient(b)
+	target := benchClient(b, nil)
 
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
@@ -570,4 +663,43 @@ func BenchmarkRoundTripParallel(b *testing.B) {
 			dst = target.handler(b.Context(), dst[:0], target.req, 1)
 		}
 	})
+}
+
+// TestScrubHidesSecretsFromLogsAndReports: the Scrub hook rewrites the URL and the failure a request's log record
+// and report carry, keeping the failure's identity; the plugin's own answer is not scrubbed.
+func TestScrubHidesSecretsFromLogsAndReports(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(t, nil)
+	client, logs := newClient(t, httpcap.Policy{AllowedHosts: []string{srv.host(t)}})
+
+	var reports []httpcap.Report
+
+	handler := client.Handler("web/p", &httpcap.Hooks{
+		Panicked: unexpectedPanic(t),
+		Done:     func(_ context.Context, r httpcap.Report) { reports = append(reports, r) },
+		Scrub:    func(s string) string { return strings.ReplaceAll(s, "tok9", "[secret k]") },
+	})
+
+	out := handler(t.Context(), nil, request("GET", srv.URL+"/tok9", nil, ""), 1)
+	_, err := httpabi.DecodeResponse(out)
+	require.NoError(t, err)
+
+	out = handler(t.Context(), nil, request("GET", "http://tok9.example/", nil, ""), 2)
+	_, err = httpabi.DecodeResponse(out)
+
+	hostErr, ok := errors.AsType[*httpabi.HostError](err)
+	require.True(t, ok, "%v", err)
+	assert.Contains(t, hostErr.Message, "tok9", "the plugin is told what it sent")
+
+	require.Len(t, reports, 2)
+	assert.Equal(t, srv.URL+"/[secret k]", reports[0].URL)
+	assert.Equal(t, "http://[secret k].example/", reports[1].URL)
+	require.ErrorIs(t, reports[1].Err, httpcap.ErrHostNotAllowed, "the scrubbed error keeps its identity")
+	assert.Contains(t, reports[1].Err.Error(), "[secret k]")
+	assert.NotContains(t, reports[1].Err.Error(), "tok9")
+
+	assert.NotContains(t, logs.String(), "tok9")
+	assert.Contains(t, logs.String(), `"url":"`+srv.URL+`/[secret k]"`)
+	assert.Equal(t, int64(1), srv.hits.Load(), "the request carried the real value")
 }

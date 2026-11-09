@@ -19,6 +19,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg/internal/contractsrc"
+	"github.com/heynemann/go-plg/internal/directive"
 	"github.com/heynemann/go-plg/internal/gen"
 )
 
@@ -844,6 +845,13 @@ func TestGenerateErrors(t *testing.T) {
 			files: map[string]string{"c.go": fooer + "\ntype Barer interface{ ~int; Bar() }\n"},
 		},
 		{
+			name: "alias of an unnamed interface", ifaces: []string{"Barer"}, err: gen.ErrInterface,
+			msg: []string{"Barer is an alias of an unnamed interface"},
+			files: map[string]string{
+				"c.go": fooer + "\ntype Barer = interface{ Bar(ctx context.Context) error }\n",
+			},
+		},
+		{
 			name: "W field clashing with a method", ifaces: []string{"Barer"}, err: gen.ErrInterface,
 			msg:   []string{"Barer has methods Bar and WBar"},
 			files: map[string]string{"c.go": fooer + "\ntype Barer interface{ Bar(); WBar() }\n"},
@@ -976,4 +984,130 @@ func TestWrite(t *testing.T) {
 		require.ErrorIs(t, err, os.ErrNotExist)
 		require.ErrorContains(t, err, "writing")
 	})
+}
+
+// TestDirectivesAreReadFromTheInterfacesDocComment: a lone type declaration's directives are on the declaration,
+// a grouped type's on its own spec (the group's doc comment belongs to none of them).
+func TestDirectivesAreReadFromTheInterfacesDocComment(t *testing.T) {
+	t.Parallel()
+
+	dir := writeFiles(t, map[string]string{
+		"c.go": `package c
+
+import "context"
+
+// Rule applies a reward rule.
+//
+//plg:limits memory=16MiB timeout=300ms pool=1..2
+//plg:validation Input
+type Rule interface {
+	Apply(ctx context.Context, n int) (int, error)
+}
+
+//plg:limits memory=1GiB
+type (
+	// Parser parses documents.
+	//
+	//plg:guest-packages encoding/xml
+	Parser interface {
+		Root(ctx context.Context, doc string) (string, error)
+	}
+
+	Plain interface {
+		Root(ctx context.Context, doc string) (string, error)
+	}
+)
+
+// Input is the validation input.
+type Input struct{ Cohort string }
+`,
+		"other.go": "package c\n\n// Other has no directives.\ntype Other interface{}\n",
+	})
+
+	pkg, err := gen.Load(dir, "example.com/c", nil)
+	require.NoError(t, err)
+
+	tests := map[string]directive.Directives{
+		"Rule": {
+			Limits:     directive.Limits{Memory: 16 << 20, Timeout: 300 * time.Millisecond, PoolMin: 1, PoolMax: 2},
+			Validation: "Input",
+		},
+		"Parser":  {GuestPackages: []string{"encoding/xml"}},
+		"Plain":   {},
+		"Other":   {},
+		"Missing": {},
+	}
+
+	for name, want := range tests {
+		dirs, dirsErr := pkg.Directives(name)
+		require.NoError(t, dirsErr, name)
+		assert.Equal(t, want, dirs, name)
+	}
+
+	file, err := gen.Generate(dir, []string{"Rule", "Parser", "Plain"}, gen.Options{})
+	require.NoError(t, err)
+	require.NoError(t, gen.Write(dir, file))
+	requireAdapter(t, typeCheck(t, dir), "Rule", "plgRule")
+}
+
+// TestGenerateFailsOnMalformedDirectives: plg gen checks the directives of the interfaces it generates for,
+// naming where the declaration is; others' are not its business.
+func TestGenerateFailsOnMalformedDirectives(t *testing.T) {
+	t.Parallel()
+
+	const body = " interface{ Foo(ctx context.Context) error }\n"
+
+	tests := []struct {
+		name, src, msg string
+	}{
+		{
+			name: "unknown limit",
+			src:  "// Fooer foos.\n//\n//plg:limits cpu=2\ntype Fooer" + body,
+			msg:  `c.go:8:6: Fooer: //plg:limits cpu=2: invalid plg directive: unknown limit "cpu"`,
+		},
+		{
+			name: "malformed value",
+			src:  "//plg:limits memory=64MB\ntype Fooer" + body,
+			msg:  "c.go:6:6: Fooer: //plg:limits memory=64MB: invalid plg directive: memory=64MB: want",
+		},
+		{
+			name: "grouped spec",
+			src:  "type (\n\t//plg:limits pool=9..1\n\tFooer" + body + ")\n",
+			msg:  "c.go:7:2: Fooer: //plg:limits pool=9..1: invalid plg directive: pool=9..1: want",
+		},
+		{
+			name: "unknown directive",
+			src:  "//plg:limit memory=64MiB\ntype Fooer" + body,
+			msg:  "unknown directive //plg:limit",
+		},
+		{
+			name: "allowlisted guest package",
+			src:  "//plg:guest-packages strings\ntype Fooer" + body,
+			msg:  "strings is in the default allowlist already",
+		},
+		{
+			name: "validation type not declared",
+			src:  "//plg:validation Input\ntype Fooer" + body,
+			msg:  "c.go:6:6: Fooer: invalid plg directive: //plg:validation Input: package c declares no type Input",
+		},
+		{
+			name: "validation names a function",
+			src:  "//plg:validation Input\ntype Fooer" + body + "\nfunc Input() {}\n",
+			msg:  "package c declares no type Input",
+		},
+	}
+
+	for _, tc := range tests {
+		dir := writeFiles(t, map[string]string{"c.go": "package c\n\nimport \"context\"\n\n" + tc.src})
+
+		_, err := gen.Generate(dir, []string{"Fooer"}, gen.Options{})
+		require.ErrorIs(t, err, directive.ErrDirective, tc.name)
+		require.ErrorContains(t, err, tc.msg, tc.name)
+	}
+
+	dir := writeFiles(t, map[string]string{"c.go": "package c\n\nimport \"context\"\n\n" +
+		"//plg:limits cpu=2\ntype Other" + body + "\ntype Fooer" + body})
+
+	_, err := gen.Generate(dir, []string{"Fooer"}, gen.Options{})
+	require.NoError(t, err, "Other is not generated for")
 }

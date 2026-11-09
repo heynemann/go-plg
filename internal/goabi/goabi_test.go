@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -454,4 +455,73 @@ func TestRenderDispatcherWithValidation(t *testing.T) {
 	_, err = goabi.RenderDispatcher(reflect.TypeFor[testcontract.Fooer](), nil, reflect.TypeFor[generic[int]]())
 	require.ErrorIs(t, err, goabi.ErrRender)
 	require.ErrorContains(t, err, "validate: goabi: cannot render dispatcher: generic type")
+}
+
+// TestTypeStringWritesTypesAsReflection describes types of every kind from reflection and writes them back as
+// reflect.Type.String does.
+func TestTypeStringWritesTypesAsReflection(t *testing.T) {
+	t.Parallel()
+
+	for _, typ := range []reflect.Type{
+		reflect.TypeFor[int](),
+		reflect.TypeFor[time.Time](),
+		reflect.TypeFor[*Point](),
+		reflect.TypeFor[[]string](),
+		reflect.TypeFor[[3]int](),
+		reflect.TypeFor[map[string][]*Point](),
+		reflect.TypeFor[struct {
+			*Point
+
+			Name string `json:"name"`
+		}](),
+	} {
+		described, err := goabi.TypeOf(typ)
+		require.NoError(t, err, typ.String())
+		assert.Equal(t, typ.String(), described.String())
+	}
+
+	assert.Equal(t, "invalid type", (&goabi.Type{}).String())
+}
+
+// TestRenderComparesEmbeddedAliasesByType renders interfaces whose struct fields embed one alias name: the same
+// type under it twice is one alias, another type under it is refused, whatever the description's source.
+func TestRenderComparesEmbeddedAliasesByType(t *testing.T) {
+	t.Parallel()
+
+	pair := func(tag string) goabi.Field {
+		return goabi.Field{Name: "Pair", Embedded: true, Type: &goabi.Type{
+			Kind: goabi.KindStruct, Fields: []goabi.Field{{Name: "A", Tag: tag, Type: &goabi.Type{
+				Kind: goabi.KindNamed, Name: "int",
+			}}},
+		}}
+	}
+	ctx := &goabi.Type{Kind: goabi.KindNamed, Path: "context", Pkg: "context", Name: "Context"}
+	method := func(name string, field goabi.Field) goabi.Method {
+		return goabi.Method{Name: name, Func: goabi.Func{
+			Params:  []*goabi.Type{ctx, {Kind: goabi.KindStruct, Fields: []goabi.Field{field}}},
+			Results: []*goabi.Type{{Kind: goabi.KindNamed, Name: "error"}},
+		}}
+	}
+	iface := func(fields ...goabi.Field) *goabi.Interface {
+		described := &goabi.Interface{
+			Type: &goabi.Type{Kind: goabi.KindNamed, Path: "example.com/c", Pkg: "c", Name: "I"},
+		}
+		for i, field := range fields {
+			described.Methods = append(described.Methods, method("M"+strconv.Itoa(i), field))
+		}
+
+		return described
+	}
+
+	src, err := goabi.Render(iface(pair(`json:"a"`), pair(`json:"a"`)), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(src), "type Pair = struct{ A int \"json:\\\"a\\\"\" }\n"))
+
+	_, err = goabi.Render(iface(pair(`json:"a"`), pair(`json:"b"`)), nil, nil)
+	require.ErrorIs(t, err, goabi.ErrRender)
+	require.ErrorContains(t, err, "embedded fields named Pair have the types struct { A int \"json:\\\"a\\\"\" } and "+
+		"struct { A int \"json:\\\"b\\\"\" }")
+
+	_, err = goabi.Render(iface(goabi.Field{Name: "X", Type: &goabi.Type{}}), nil, nil)
+	require.ErrorIs(t, err, goabi.ErrRender, "a type of no kind")
 }

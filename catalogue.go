@@ -21,9 +21,12 @@ type plugin struct {
 	pool     *pool
 	reg      *registration // the Register (or reload) that loaded it
 	launch   *launcher     // starts its instances, and its on-demand validation instances
+	spans    *pluginSpans  // its calls' spans; nil traces nothing
 	report   *Report       // the load that produced it; set before it is published, read-only afterwards
-	idle     chan struct{} // closed once the generation is retired and no call is in flight
-	closed   chan struct{} // closed once a retired generation's instances are closed
+	// provenance is the provenance of the artifact it was loaded from; nil when it was not.
+	provenance *Provenance
+	idle       chan struct{} // closed once the generation is retired and no call is in flight
+	closed     chan struct{} // closed once a retired generation's instances are closed
 	// validated is the report of its latest on-demand validation ([Validate]); nil before the first.
 	validated atomic.Pointer[Report]
 	key       string       // "<name>/<descriptor key>"

@@ -103,12 +103,13 @@ func TestOnEventFollowsAPluginsLife(t *testing.T) {
 		assertEvent(t, &event, plg.EventRejected, "bad/p", "1", lang.lang, "bad-store", &life.owner)
 		require.NotNil(t, event.Report)
 		require.ErrorIs(t, event.Report.Err, plg.ErrBlockingIssue)
-		assert.Len(t, event.Report.Issues, 2, "the validation's error and warning")
+		assert.Len(t, event.Report.Issues, 3, "the contract's local checkout, the validation's error and warning")
 
 		store := plg.NewMemoryStorage("life-store")
 		putValidator(t, store, lang, "p", "1")
 		require.NoError(t, store.Put(&plg.Descriptor{
-			Key: "q", Language: other, Entrypoint: "main", Version: "9", Owner: &life.owner,
+			Key: "q", Implements: implementsOf[testcontract.Fooer](), Language: other, Entrypoint: "main", Version: "9",
+			Owner: &life.owner,
 		}, fstest.MapFS{"main": {Data: []byte("never read\n")}}))
 
 		skipped := func() {
@@ -116,7 +117,8 @@ func TestOnEventFollowsAPluginsLife(t *testing.T) {
 
 			got := nextEvent(t, events)
 			assertEvent(t, &got, plg.EventSkipped, "life/q", "9", other, "life-store", &life.owner)
-			assert.Nil(t, got.Report)
+			require.NotNil(t, got.Report)
+			require.ErrorIs(t, got.Report.Err, plg.ErrUnsupportedLanguage)
 		}
 
 		require.NoError(t, register("life", store))
@@ -143,7 +145,8 @@ func TestOnEventFollowsAPluginsLife(t *testing.T) {
 
 		panics := len(ctr.RecentPanics())
 		checked, err := plg.Check(t.Context(), ctr, "life", &plg.Descriptor{
-			Key: "p", Language: lang.lang, Entrypoint: lang.entry, Version: "4", Owner: &life.owner,
+			Implements: implementsOf[testcontract.Fooer](),
+			Key:        "p", Language: lang.lang, Entrypoint: lang.entry, Version: "4", Owner: &life.owner,
 		}, lang.files("validator"))
 		require.NoError(t, err)
 		require.ErrorIs(t, checked.Err, plg.ErrValidation)
@@ -190,8 +193,9 @@ func TestOnEventFollowsAPluginsLife(t *testing.T) {
 
 // TestSlowOnEventNeverDelaysThePlugins blocks the WithOnEvent function on the first event: meanwhile Register
 // loads a Lua plugin, the plugin serves a call and reloads run, each queueing its events without waiting; once
-// 1024 events wait, every further one is dropped, counted in plg.events.dropped by key and kind and logged. When
-// the function is released it gets every queued event in order, and Close delivers its own (the plugin retired).
+// 1024 events wait, every further one is dropped, counted in plg.events.dropped by key and kind and logged, and
+// still kept for Events. When the function is released it gets every queued event in order, and Close delivers
+// its own (the plugin retired).
 func TestSlowOnEventNeverDelaysThePlugins(t *testing.T) {
 	t.Parallel()
 
@@ -231,7 +235,8 @@ func TestSlowOnEventNeverDelaysThePlugins(t *testing.T) {
 
 	lua := plg.NewMemoryStorage("lua")
 	require.NoError(t, lua.Put(&plg.Descriptor{
-		Key: "p", Language: plg.LanguageLua, Entrypoint: "plugin.lua", Version: "1",
+		Key: "p", Implements: implementsOf[testcontract.Fooer](), Language: plg.LanguageLua, Entrypoint: "plugin.lua",
+		Version: "1",
 	}, luaLanguage().files("fooer")))
 	require.NoError(t, plg.Register[testcontract.Fooer](t.Context(), ctr, "lua", plg.WithStorage(lua),
 		plg.WithPool(1, 1), plg.WithMemoryLimit(hostileLimit)))
@@ -268,6 +273,10 @@ func TestSlowOnEventNeverDelaysThePlugins(t *testing.T) {
 		attribute.String("kind", "skipped")))
 	assert.Equal(t, int64(1), points.int64Value(t, "plg.events.dropped", attribute.String("key", "flood/s1022"),
 		attribute.String("kind", "skipped")))
+
+	kept := keptEvents(t, ctr, "flood/s1099")
+	require.Len(t, kept, 1, "an event the queue dropped is kept for Events all the same")
+	assert.Equal(t, plg.EventSkipped, kept[0].Kind)
 
 	releaseOnce()
 	awaitClosed(t, caughtUp)
