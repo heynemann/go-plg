@@ -537,12 +537,12 @@ resources  ok      tests/members.yaml: gold members are in the cohort: memory 9.
 resources  ok      tests/members.yaml: the directory's error is the call's: memory 9.4 MiB of 64.0 MiB (14%), time 1ms of 2s (0%)
 ```
 
-The steps run in order (plg.yaml, manifest, shared, contract, interface, limits, then the language checks: go.mod,
-sandbox, types and guest for Go plugins, typings and types for TypeScript, typings and syntax for Lua; then load,
-Validate's examples, the test cases and the resource report) and stop at the first that fails, except that once
-the plugin loads the examples, the test cases and the resource report all run. The command exits 1 when any step
-failed (2 for a usage error) and 0 when there are only warnings, with `plg validate: <dir> is not a valid plugin`
-on stderr, where plg's log (the plugin's own output, compiles, issues) also goes.
+The steps run in order (plg.yaml, manifest, shared, files, contract, interface, limits, then the language checks:
+go.mod, sandbox, types and guest for Go plugins, typings and types for TypeScript, typings and syntax for Lua; then
+load, Validate's examples, the test cases and the resource report) and stop at the first that fails, except that
+once the plugin loads the examples, the test cases and the resource report all run. The command exits 1 when any
+step failed (2 for a usage error) and 0 when there are only warnings, with `plg validate: <dir> is not a valid
+plugin` on stderr, where plg's log (the plugin's own output, compiles, issues) also goes.
 
 - **manifest:** `plugin.yaml`, a regular file (not a symbolic link: the plugin's files leave links out) of at most
   `plg.MaxManifestSize` bytes, is read with `plg.ParseManifest`; the plugin's key is its directory's name. Its
