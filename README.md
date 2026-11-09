@@ -544,7 +544,8 @@ the plugin loads the examples, the test cases and the resource report all run. T
 failed (2 for a usage error) and 0 when there are only warnings, with `plg validate: <dir> is not a valid plugin`
 on stderr, where plg's log (the plugin's own output, compiles, issues) also goes.
 
-- **manifest:** `plugin.yaml` is read with `plg.ParseManifest`; the plugin's key is its directory's name. Its
+- **manifest:** `plugin.yaml`, a regular file (not a symbolic link: the plugin's files leave links out) of at most
+  `plg.MaxManifestSize` bytes, is read with `plg.ParseManifest`; the plugin's key is its directory's name. Its
   ownership is checked here: a missing owner is a warning issue, or fails the step when the author repository sets
   `requireOwnership`.
 - **files:** the plugin's files are copied once into memory, as a [storage](#storages) loads them (regular files,

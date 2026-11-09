@@ -139,12 +139,24 @@ func isRoot(dir string) bool {
 	return err == nil || filepath.Dir(dir) == dir
 }
 
-// readFile reads name, which must be a regular file of at most plg.MaxManifestSize bytes. It checks the type
-// before opening, since opening a FIFO can wait for a writer.
+// readFile reads name, which must be a regular file (a link to one is followed) of at most plg.MaxManifestSize
+// bytes.
 func readFile(name string) ([]byte, error) {
-	info, err := os.Stat(name)
+	return readRegular(name, os.Stat)
+}
+
+// ReadManifest reads the plugin.yaml name as plg validate does: a regular file, not a symbolic link (a plugin's
+// snapshot leaves its links out, as its storage does), of at most plg.MaxManifestSize bytes.
+func ReadManifest(name string) ([]byte, error) {
+	return readRegular(name, os.Lstat)
+}
+
+// readRegular reads name, which stat must find a regular file of at most plg.MaxManifestSize bytes. It checks the
+// type before opening, since opening a FIFO can wait for a writer, and reads at most one byte past the cap.
+func readRegular(name string, stat func(string) (os.FileInfo, error)) ([]byte, error) {
+	info, err := stat(name)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // the error names the file
+		return nil, err // the error names the file
 	}
 
 	if !info.Mode().IsRegular() {

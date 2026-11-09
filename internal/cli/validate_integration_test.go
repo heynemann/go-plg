@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -239,7 +240,7 @@ func TestValidateFailsEachBrokenPlugin(t *testing.T) {
 				"example.com/rewards@v1.2.0)\n",
 		}},
 		{"no plugin.yaml", []string{"nosuchdir"}, []string{
-			"manifest  FAIL    open " + filepath.Join(abs(t, "."), "nosuchdir", "plugin.yaml") +
+			"manifest  FAIL    lstat " + filepath.Join(abs(t, "."), "nosuchdir", "plugin.yaml") +
 				": no such file or directory\n",
 		}},
 		{"interface breaking the contract", []string{"brokencontract"}, []string{
@@ -448,6 +449,56 @@ func TestValidateFollowsALinkedWorkingDirectory(t *testing.T) {
 	})
 	require.Equal(t, 0, code, stdout.String()+stderr.String())
 	assert.Contains(t, stdout.String(), "manifest   ok      lua plugin linked implementing ")
+}
+
+// TestValidateReadsABoundedManifest validates copies of a plugin whose plugin.yaml is over plg.MaxManifestSize, a
+// FIFO (opening it would wait for a writer forever), a link to /dev/zero (an endless read) or a link to another of
+// its files (which its snapshot leaves out, so plg pack could only fail): each fails the manifest step at once,
+// before any later step, for plg validate and plg pack alike.
+func TestValidateReadsABoundedManifest(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		make func(t *testing.T, manifest string)
+		want string
+	}{
+		{"oversized", func(t *testing.T, manifest string) {
+			t.Helper()
+			require.NoError(t, os.WriteFile(manifest, []byte("language: lua\n#"+strings.Repeat("x",
+				plg.MaxManifestSize)), 0o600))
+		}, fmt.Sprintf("plugin.yaml is over %d bytes", plg.MaxManifestSize)},
+		{"a FIFO", func(t *testing.T, manifest string) {
+			t.Helper()
+			require.NoError(t, os.Remove(manifest))
+			require.NoError(t, syscall.Mkfifo(manifest, 0o600))
+		}, "plugin.yaml is not a regular file"},
+		{"a link to /dev/zero", func(t *testing.T, manifest string) {
+			t.Helper()
+			require.NoError(t, os.Remove(manifest))
+			require.NoError(t, os.Symlink("/dev/zero", manifest))
+		}, "plugin.yaml is not a regular file"},
+		{"a link inside the plugin", func(t *testing.T, manifest string) {
+			t.Helper()
+			require.NoError(t, os.Rename(manifest, filepath.Join(filepath.Dir(manifest), "manifest.yaml")))
+			require.NoError(t, os.Symlink("manifest.yaml", manifest))
+		}, "plugin.yaml is not a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := pluginCopy(t, "luagood")
+			tc.make(t, filepath.Join(dir, "plugin.yaml"))
+
+			for command, got := range map[string]validated{
+				"validate": validate(nil, dir), "pack": pack(nil, "-o", t.TempDir(), dir),
+			} {
+				assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+				assert.Contains(t, got.stdout, "manifest  FAIL    "+filepath.Join(dir, tc.want)+"\n", command)
+				assert.NotContains(t, got.stdout, "contract ", "%s: no later step runs", command)
+			}
+		})
+	}
 }
 
 // abs returns the absolute path of the testdata plugin dir.

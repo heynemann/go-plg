@@ -517,10 +517,11 @@ func (v *validation) failed(step string, err error) bool {
 	return false
 }
 
-// manifest reads and parses the plugin's plugin.yaml and, for validate, checks its owner as a load does: the
-// missing-ownership issue is a warning, an error (failing the step) when the author repository requires ownership.
+// manifest reads (as authorrepo.ReadManifest does: a regular file within plg.MaxManifestSize, never a link) and
+// parses the plugin's plugin.yaml and, for validate, checks its owner as a load does: the missing-ownership issue is
+// a warning, an error (failing the step) when the author repository requires ownership.
 func (v *validation) manifest() ([]byte, plg.Descriptor, bool) {
-	data, err := os.ReadFile(filepath.Join(v.dir, "plugin.yaml"))
+	data, err := authorrepo.ReadManifest(filepath.Join(v.dir, "plugin.yaml"))
 	if err != nil {
 		return nil, plg.Descriptor{}, v.failed("manifest", err)
 	}
