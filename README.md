@@ -1444,6 +1444,11 @@ const token = secrets.get("coupon_token");       // TypeScript: throws an Error 
 `plg validate` reads fail outside test cases; test cases fake them with `secrets:` (see
 [Test cases](#test-cases-testsyaml)).
 
+The [example service](examples/service) resolves each rule's secrets from its environment
+(`PRICING_SECRET_<RULE>_<NAME>`, so a rule reads only its own) and never logs a value; the `seasonal` rule of
+[`examples/rules`](examples/rules/seasonal) reads the address and bearer token of the coupon API it calls (see the
+[author guide](#author-guide-from-a-contract-to-a-served-plugin)'s step 8).
+
 ## Reloading and polling
 
 A registration follows its storages:
@@ -1536,7 +1541,10 @@ if errors.As(err, &pe) {
   ```
 
   With a no-op provider (or none installed) tracing costs a call nothing. Span names and attributes are listed
-  on `plg.WithTracerProvider`.
+  on `plg.WithTracerProvider`. The [example service](examples/service) starts a server span per quote request,
+  continuing its `traceparent`, so a quote whose `seasonal` rule calls the coupon API is one trace: the request,
+  `plg.call pricing/seasonal.Discount`, `plg.http GET`, and the API's side (see the
+  [author guide](#author-guide-from-a-contract-to-a-served-plugin)'s step 8).
 
 ### Lifecycle events: `WithOnEvent`
 
@@ -1875,7 +1883,7 @@ examples/v1.0.0`. Until they are, work from a clone of plg:
   against the checkout. A plugin outside an author repository has no `plg.yaml`, so step 1 as written needs the
   tag.
 - `plg pack`, and so `ci.sh`, refuses to pack while that `replace` is set: an artifact must be validated against
-  the module its `plugin.yaml` pins. Steps 5 to 7 therefore need the tag; until then
+  the module its `plugin.yaml` pins. Steps 5 to 8 therefore need the tag; until then
   `cd examples && go test -tags integration ./authorguide` runs the whole guide, pack included, with the
   contract served by a local GOPROXY.
 
@@ -1919,7 +1927,9 @@ The skeleton grants nothing until you write `Discount`; each save validates it a
 **3. Test.** Each `tests/*.yaml` file holds language-neutral cases: inputs, stubbed Host calls, HTTP requests and
 secrets, and the expected result, error or `Validate` issues (see [Test cases](#test-cases-testsyaml)).
 [`vip`'s](examples/rules/vip/tests/vip.yaml) stub the service's `Tier`; [`bundle`'s](examples/rules/bundle/tests/bundle.yaml)
-read an order from a fixture and check that `Validate` rejects the rule under a stricter service.
+read an order from a fixture and check that `Validate` rejects the rule under a stricter service;
+[`seasonal`'s](examples/rules/seasonal/tests/seasonal.yaml) fake its secrets and stub the coupon API it calls
+(step 8).
 
 **4. Typings.** Lua and TypeScript plugins commit the [typings](#typings-plg-types) `plg types` writes from the
 contract; validate fails, naming the command to run, when `implements` moves to a version they were not written
@@ -1987,11 +1997,43 @@ pricing/vip       serving  sha256:1d62…   lua         loyalty     0       -
 contract github.com/heynemann/go-plg/examples v1.0.0, packed by plg v…`), and `plg events` its loads, reloads,
 rejections and panics.
 
-**8. Secrets and traces.** A plugin calling a third-party API declares the secrets it reads in `plugin.yaml` and
-reads them at run time; the service resolves them (`plg.WithSecrets`), and test cases fake them (see
-[Secrets](#secrets)). Each call is a span `plg.call <key>.<method>` in the service's trace, with the plugin's Host
-calls and HTTP requests below it and its log lines carrying `trace_id` (see
-[Logs, metrics and traces](#logs-metrics-and-traces)).
+**8. Secrets, HTTP and traces.** [`seasonal`](examples/rules/seasonal/plugin.ts) asks the promotions team's coupon
+API what any coupon but `SUMMER` takes off: `GET <coupon_api_url>/coupons/<code>` with `Authorization: Bearer
+<coupon_api_token>`, answered with `{"percent": n}`. Both are [secrets](#secrets) its
+[`plugin.yaml`](examples/rules/seasonal/plugin.yaml) declares (`secrets: [coupon_api_url, coupon_api_token]`) and
+it reads with `secrets.get`, so the API's address and token change with the environment, never with the plugin;
+its test cases fake them and stub the API (step 5's `plg validate seasonal` ran them), including an API refusal
+echoing the token, which the rule's error shows as `[secret coupon_api_token]`. The service resolves the secret
+`<name>` of the rule `pricing/<rule>` from the environment variable `PRICING_SECRET_<RULE>_<NAME>` (upper-cased,
+every character but a letter or a digit becoming `_`; `plg.WithSecrets`), and lets the rules reach the one host
+`-coupon-api` names ([`plg.WithHTTP`](#http); `-coupon-api-private` when that host is on a private network, as an
+internal API is). Stop the service of step 6 and serve the artifacts again with your coupon API's address and
+token:
+
+<!-- authorguide:secrets -->
+```sh
+export PRICING_SECRET_SEASONAL_COUPON_API_URL=http://coupons.internal:8080
+export PRICING_SECRET_SEASONAL_COUPON_API_TOKEN=c0up0n-t0k3n
+go run ./service -artifacts rules/dist -coupon-api coupons.internal:8080 -coupon-api-private
+```
+
+Each quote request is a server span continuing the request's `traceparent`, each rule call a span
+`plg.call <key>.<method>` below it, and each request a rule makes a span `plg.http <method>` below that, whose
+`traceparent` the coupon API receives (see [Logs, metrics and traces](#logs-metrics-and-traces)): one trace from
+the client to the API. The service sends its spans to the global OpenTelemetry provider, so a deployment installs
+its SDK and exporter there; plg writes `[secret <name>]` for any secret value in the spans, logs and errors it
+reports of a rule. In the second terminal:
+
+<!-- authorguide:coupon -->
+```sh
+curl -s localhost:8080/quote -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+  -d '{"customer":"bob","coupon":"AUTUMN","items":[{"sku":"tea","quantity":10,"unitCents":450}]}'
+```
+
+With an API granting `AUTUMN` 5% off, the quote applies `pricing/seasonal`'s `"coupon AUTUMN: 5% off"`, and the API
+sees the token and a `traceparent` of the trace `4bf92f3577b34da6a3ce929d0e0e4736`. [The service's
+test](examples/service/observability_integration_test.go) checks the whole trace and that neither secret appears
+in its log, events, admin JSON or spans.
 
 ### Platform guidance
 
@@ -2144,11 +2186,14 @@ allocations (2.5 KB) per call, before any export.
 - [`examples/service`](examples/service): an HTTP pricing service serving those rules, with a host, a memory
   budget, every rule instance started before serving, per-call deadlines, validation and required ownership, a
   lifecycle event log, the admin handler and a `plg.Check` upload endpoint behind a token
-  ([walkthrough](#putting-it-together-fit-to-serve-and-who-to-talk-to)), optional polling of a plugin directory
-  or of a directory of packed artifacts (`-artifacts`), and a clean shutdown: `cd examples && go run ./service`.
+  ([walkthrough](#putting-it-together-fit-to-serve-and-who-to-talk-to)), secrets from the environment, an HTTP
+  policy allowing one coupon API (`-coupon-api`), a server span per quote request continuing its `traceparent`,
+  optional polling of a plugin directory or of a directory of packed artifacts (`-artifacts`), and a clean
+  shutdown: `cd examples && go run ./service`.
 - [`examples/rules`](examples/rules): an author repository of three more rules of the same contract (Go, Lua,
-  TypeScript) with its `plg.yaml`, test cases, committed typings and the CI script validating and packing them,
-  which the [author guide](#author-guide-from-a-contract-to-a-served-plugin) walks through.
+  TypeScript; the TypeScript one calls a coupon API with its secrets) with its `plg.yaml`, test cases, committed
+  typings and the CI script validating and packing them, which the
+  [author guide](#author-guide-from-a-contract-to-a-served-plugin) walks through.
 - [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, tested against MinIO.
 - [`examples/pgstorage`](examples/pgstorage): a `plg.Storage` over PostgreSQL listing only enabled plugins, with
   its migration, tested against PostgreSQL.

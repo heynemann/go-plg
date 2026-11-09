@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,9 +90,11 @@ func sh(t *testing.T, dir string, environ []string, script, stdin string) string
 // Discount with the guide's order.yaml; in a copy of the example author repository the typings are up to date, a
 // plugin validates and the CI script validates (JSON and JUnit
 // reports) and packs every plugin; the pricing service serves the artifacts; plg status and plg events, through
-// the profile the guide writes, show the plugins it serves. What needs the network differs: plg is built from this
-// checkout instead of installed, the contract module comes from a local GOPROXY, and the service listens on a
-// free port, which replaces localhost:8080 in the profile and the commands.
+// the profile the guide writes, show the plugins it serves; served again with the coupon API's address and token,
+// the seasonal rule prices a traced quote with the API's answer. What needs the network differs: plg is built from
+// this checkout instead of installed, the contract module comes from a local GOPROXY, the service is built once
+// instead of `go run` and listens on a free port, which replaces localhost:8080 in the profile and the commands,
+// and a local coupon API stands for the guide's.
 func TestReadmeAuthorGuide(t *testing.T) {
 	t.Parallel()
 
@@ -105,12 +109,11 @@ func TestReadmeAuthorGuide(t *testing.T) {
 	install := "go install github.com/heynemann/go-plg/cmd/plg@latest\n"
 	require.True(t, strings.HasPrefix(guide["start"], install), "the guide installs plg first")
 	require.Equal(t, "cd examples/rules\n", guide["repo"][:len("cd examples/rules\n")], "from plg's checkout")
-	require.Equal(t, "cd .. && PRICING_ADMIN_TOKEN=s3cret go run ./service -artifacts rules/dist\n",
-		guide["service"], "the command this test knows how to run")
 	require.Equal(t, "plg dev promo\n", guide["dev"], "the command this test feeds commands to")
 	require.Contains(t, guide, "order")
 	require.Contains(t, guide, "profiles")
 	require.Contains(t, guide, "serving")
+	require.Contains(t, guide, "coupon")
 
 	environ := authorrepo.Environ(t)
 	config := t.TempDir()
@@ -145,7 +148,8 @@ func TestReadmeAuthorGuide(t *testing.T) {
 		assert.FileExists(t, filepath.Join(checkout, "examples", "rules", "reports", report))
 	}
 
-	addr := startService(t, examples, dist)
+	bin := buildService(t, examples)
+	addr := startService(t, bin, filepath.Join(checkout, "examples", "rules"), environ, guide["service"])
 	local := func(s string) string { return strings.ReplaceAll(s, "localhost:8080", addr) }
 
 	profiles := filepath.Join(config, "plg", "profiles.yaml")
@@ -158,11 +162,63 @@ func TestReadmeAuthorGuide(t *testing.T) {
 	assert.Regexp(t, `\nprovenance +commit [0-9a-f]{12}`, out, "packed from the repository's commit")
 	assert.Contains(t, out, "contract github.com/heynemann/go-plg/examples v1.0.0", "plg status shows the provenance")
 	assert.Regexp(t, `\n\S+ +loaded +sha256:`, out, "plg events")
+
+	checkSecretsAndTraces(t, guide, bin, filepath.Join(checkout, "examples"), environ)
 }
 
-// startService builds the pricing service and serves the artifacts in dist with the guide's admin token until the
-// test ends; it returns the address the service listens on.
-func startService(t *testing.T, examples, dist string) string {
+// The coupon API of the guide's step 8: its address and the token the guide gives it.
+const (
+	guideCouponURL   = "http://coupons.internal:8080"
+	guideCouponHost  = "coupons.internal:8080"
+	guideCouponToken = "c0up0n-t0k3n"
+)
+
+// checkSecretsAndTraces runs the guide's step 8 in dir (the checkout's examples directory): the service serves the
+// artifacts again with the coupon API's address and token, here a local API's, which grants AUTUMN 5% off with the
+// guide's token, and the guide's traced quote gets the API's answer, the API the token and the quote's trace.
+func checkSecretsAndTraces(t *testing.T, guide map[string]string, bin, dir string, environ []string) {
+	t.Helper()
+
+	require.Contains(t, guide["secrets"], guideCouponURL)
+	require.Contains(t, guide["secrets"], "-coupon-api "+guideCouponHost+" ")
+	require.Contains(t, guide["secrets"], guideCouponToken)
+
+	type request struct{ authorization, traceparent string }
+
+	requests := make(chan request, 1)
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		requests <- request{req.Header.Get("Authorization"), req.Header.Get("Traceparent")}
+
+		if req.URL.Path != "/coupons/AUTUMN" || req.Header.Get("Authorization") != "Bearer "+guideCouponToken {
+			http.NotFound(writer, req)
+
+			return
+		}
+
+		_, err := writer.Write([]byte(`{"percent":5}`))
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(api.Close)
+
+	script := strings.NewReplacer(guideCouponURL, api.URL, guideCouponHost, strings.TrimPrefix(api.URL, "http://")).
+		Replace(guide["secrets"])
+	addr := startService(t, bin, dir, environ, script)
+
+	out := sh(t, t.TempDir(), environ, strings.ReplaceAll(guide["coupon"], "localhost:8080", addr), "")
+	assert.Contains(t, out, `{"rule":"pricing/seasonal","reason":"coupon AUTUMN: 5% off","cents":225}`,
+		"the coupon API's 5%")
+
+	select {
+	case got := <-requests: // sent before the API answered, so before the quote was
+		assert.Equal(t, "Bearer "+guideCouponToken, got.authorization)
+		assert.Regexp(t, `^00-4bf92f3577b34da6a3ce929d0e0e4736-[0-9a-f]{16}-01$`, got.traceparent, "the quote's trace")
+	default:
+		require.FailNow(t, "the coupon API received no request")
+	}
+}
+
+// buildService builds the pricing service of the examples module and returns the program.
+func buildService(t *testing.T, examples string) string {
 	t.Helper()
 
 	bin := filepath.Join(t.TempDir(), "service")
@@ -173,10 +229,24 @@ func startService(t *testing.T, examples, dist string) string {
 	out, err := build.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	//nolint:gosec // G204: the program just built
-	cmd := exec.CommandContext(context.WithoutCancel(t.Context()), bin, "-addr", "127.0.0.1:0", "-artifacts", dist)
+	return bin
+}
 
-	cmd.Env = append(os.Environ(), "PRICING_ADMIN_TOKEN=s3cret")
+// startService runs the guide's script in dir with sh, its `go run ./service` the program bin listening on a free
+// port, until the test ends; it returns the address the service listens on.
+func startService(t *testing.T, bin, dir string, environ []string, script string) string {
+	t.Helper()
+
+	const goRun = "go run ./service "
+
+	require.Equal(t, 1, strings.Count(script, goRun), "the script runs the service once: %s", script)
+
+	script = strings.Replace(script, goRun, "exec "+bin+" -addr 127.0.0.1:0 ", 1)
+
+	//nolint:gosec // G204: the README's commands, running the program just built
+	cmd := exec.CommandContext(context.WithoutCancel(t.Context()), "sh", "-euc", script)
+	cmd.Dir = dir
+	cmd.Env = environ
 
 	stderr, err := cmd.StderrPipe()
 	require.NoError(t, err)
