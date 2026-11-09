@@ -1,0 +1,7 @@
+# The CRM team's author repository: a cohort provider asking the CRM vendor's API and an eligibility condition of
+# the rewards platform, both in Lua, validated and packed by ci.sh. The platform requires every plugin to name its
+# owner.
+plugins:
+  - churn-risk
+  - country
+requireOwnership: true

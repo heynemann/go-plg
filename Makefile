@@ -114,8 +114,8 @@ TS_BUNDLER_RAW := $(BIN)/bundler.wasm
 TS_CHECKER := internal/tscheck/tsgo.wasm.gz
 TS_CHECKER_RAW := $(BIN)/tsgo.wasm
 
-.PHONY: check fmt-check lint warm test coverage gate-test allocs budgets repeat examples bench symbols guests go-guest \
-	lua-guest ts-guest ts-bundler ts-checker verify-guests clean
+.PHONY: check fmt-check lint warm test coverage gate-test allocs budgets repeat examples complex-e2e bench symbols \
+	guests go-guest lua-guest ts-guest ts-bundler ts-checker verify-guests clean
 
 check: fmt-check lint test coverage gate-test allocs budgets repeat examples
 
@@ -202,6 +202,26 @@ examples: $(GOLANGCI_LINT) warm
 		-coverpkg=./... -coverprofile=$(COVERAGE) ./...
 	cd examples && ../scripts/coverage-gate.sh $(COVERAGE) $(COVERAGE_MIN)
 	cd examples && go test -race -shuffle=on -count=10 -timeout $(SHORT_TEST_TIMEOUT) ./...
+
+# The rewards platform end to end (e2e/, a module of its own, with its contracts module e2e/contracts; not part of
+# `make check`): formatting, lint and tidy go.mod/go.sum of both, then the scenarios with the race detector
+# (`-tags e2e`: the teams' CI scripts run the plg command built from this checkout, the artifacts go through MinIO,
+# so Docker, git and sh are required), then the load tests without it (`-tags e2e,e2e_load`, the tests named
+# TestLoad…), whose throughput and latency thresholds are measured without the race detector. A load test is a
+# file of its own behind e2e_load, so the scenarios' run never builds it and the load run, which matches nothing
+# while there is none, passes. E2E_TIMEOUT is a hang detector per test binary, as TEST_TIMEOUT is.
+E2E_TIMEOUT := 30m
+
+complex-e2e: $(GOLANGCI_LINT) warm
+	cd e2e && $(GOLANGCI_LINT) fmt ./...
+	cd e2e/contracts && $(GOLANGCI_LINT) fmt ./...
+	git diff --exit-code -- 'e2e/*.go'
+	cd e2e && $(GOLANGCI_LINT) run --build-tags e2e,e2e_load ./...
+	cd e2e/contracts && $(GOLANGCI_LINT) run ./...
+	cd e2e && go mod tidy -diff
+	cd e2e/contracts && go mod tidy -diff
+	cd e2e && go test -race -shuffle=on -tags e2e -timeout $(E2E_TIMEOUT) ./...
+	cd e2e && go test -shuffle=on -tags e2e,e2e_load -run '^TestLoad' -timeout $(E2E_TIMEOUT) ./...
 
 bench:
 	go test -run='^$$' -bench=. -benchmem -count=6 -tags integration ./... | tee $(BENCH_OUT)

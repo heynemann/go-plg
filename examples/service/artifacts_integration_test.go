@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg"
-	"github.com/heynemann/go-plg/examples/internal/authorrepo"
+	"github.com/heynemann/go-plg/examples/authorrepo"
 	"github.com/heynemann/go-plg/examples/pricing"
 )
 

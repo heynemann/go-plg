@@ -1,0 +1,31 @@
+cases:
+  - name: a user in Brazil qualifies
+    call: Eligible
+    input:
+      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 0, orders: 0}}
+    expect:
+      result: {eligible: true, reason: lives in BR}
+  - name: a user in Portugal qualifies
+    call: Eligible
+    input:
+      subject: {campaign: spring, user: {id: u000002, country: PT, tier: silver, spendCents: 0, orders: 0}}
+    expect:
+      result: {eligible: true, reason: lives in PT}
+  - name: a user elsewhere does not
+    call: Eligible
+    input:
+      subject: {campaign: spring, user: {id: u000003, country: US, tier: gold, spendCents: 0, orders: 0}}
+    expect:
+      result: {eligible: false, reason: "lives in US, not in BR or PT"}
+  - name: a platform serving both countries accepts the condition
+    call: Validate
+    input:
+      in: {countries: [US, PT, BR], maxSpendCents: 0, maxOrders: 0}
+    expect:
+      issues: []
+  - name: a platform not serving Portugal rejects it
+    call: Validate
+    input:
+      in: {countries: [BR, US], maxSpendCents: 0, maxOrders: 0}
+    expect:
+      issues: [{severity: error, code: country.unserved, message: "targets PT, which the platform does not serve"}]

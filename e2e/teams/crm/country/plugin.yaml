@@ -1,0 +1,11 @@
+implements: example.com/rewards/eligibility.Condition@v1.0.0
+language: lua
+entrypoint: plugin.lua
+owner:
+  maintainers:
+    - {name: Rui Tavares, email: rui@example.com, handle: "@rui"}
+  team: {name: crm, department: marketing}
+  org: rewards
+  company: Example Shop
+  contact: {oncall: crm-oncall, channel: "#crm", email: crm@example.com}
+  links: {repository: https://git.example.com/rewards/crm, runbook: https://git.example.com/rewards/crm/country.md}

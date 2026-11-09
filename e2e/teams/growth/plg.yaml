@@ -1,0 +1,6 @@
+# The growth team's author repository: a cohort provider and an eligibility condition of the rewards platform,
+# both in Go, validated and packed by ci.sh. The platform requires every plugin to name its owner.
+plugins:
+  - gold
+  - min-spend
+requireOwnership: true

@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/examples/containertest"
 	"github.com/heynemann/go-plg/examples/s3storage"
 	"github.com/heynemann/go-plg/internal/adminjson"
 	"github.com/heynemann/go-plg/internal/artifact"
@@ -68,8 +69,8 @@ func luaRule(main string) map[string]string {
 func TestArtifactStorageListsArtifacts(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 
 	vip := packArtifact(t, map[string]string{
 		"plugin.yaml": luaManifest, "main.lua": "return 1", "lib/tiers.lua": "return {}",
@@ -118,8 +119,8 @@ func TestArtifactStorageListsArtifacts(t *testing.T) {
 func TestArtifactStorageDownloadsAnArtifactOnlyWhenItChanges(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	first := packArtifact(t, luaRule("return 1"))
 	second := packArtifact(t, luaRule("return 2"))
 	put(t, client, bucket, "p.plg", first.data)
@@ -168,7 +169,7 @@ func TestArtifactStorageDownloadsAnArtifactOnlyWhenItChanges(t *testing.T) {
 func TestArtifactStorageRefusesArtifactsItCannotOpen(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
+	client := containertest.StartMinIO(t)
 	valid := packArtifact(t, luaRule("")).data
 	tooMany := luaRule("")
 	tooMany["big.bin"] = strings.Repeat("\x00", plg.MaxPluginFileSize+1)
@@ -190,7 +191,7 @@ func TestArtifactStorageRefusesArtifactsItCannotOpen(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			bucket := newBucket(t, client)
+			bucket := containertest.NewBucket(t, client)
 			put(t, client, bucket, "a.plg", valid)
 			put(t, client, bucket, "p.plg", tc.data)
 
@@ -219,8 +220,8 @@ func TestArtifactStorageRefusesArtifactsItCannotOpen(t *testing.T) {
 func TestArtifactStorageSizeLimit(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	data := packArtifact(t, luaRule("return 1")).data
 	size := int64(len(data))
 	put(t, client, bucket, "p.plg", data)
@@ -258,8 +259,8 @@ func TestArtifactStorageSizeLimit(t *testing.T) {
 func TestArtifactStorageKeepsDescribingARepublishedArtifact(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 
 	good := packArtifact(t, map[string]string{
 		"plugin.yaml": luaManifest + "owner:\n  team: {name: loyalty}\n  contact: {oncall: loyalty-oncall}\n",
@@ -340,8 +341,8 @@ func TestArtifactStorageKeepsDescribingARepublishedArtifact(t *testing.T) {
 func TestArtifactStorageDownloadFailures(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	first := packArtifact(t, luaRule("return 1"))
 	second := packArtifact(t, luaRule("return 2"))
 	put(t, client, bucket, "p.plg", first.data)

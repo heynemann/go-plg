@@ -5,7 +5,6 @@ package s3storage_test
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -17,62 +16,22 @@ import (
 	"testing/fstest"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/minio"
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/examples/containertest"
 	"github.com/heynemann/go-plg/examples/internal/pricingtest"
 	"github.com/heynemann/go-plg/examples/plugins"
 	"github.com/heynemann/go-plg/examples/pricing"
 	"github.com/heynemann/go-plg/examples/s3storage"
 )
 
-// minioImage is MinIO built from its release sources (the project no longer publishes images of its own).
-const minioImage = "alpine/minio:RELEASE.2025-10-15T17-29-55Z"
-
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
-}
-
-// startMinIO starts a MinIO server for tb and its subtests and returns a client reaching it; tb's cleanup
-// terminates it, whether the test passes, fails or the server never became ready (RULES.md §7).
-func startMinIO(tb testing.TB) *s3.Client {
-	tb.Helper()
-
-	publish := pricingtest.PublishOnFreePort(tb, "9000/tcp")
-
-	// The image runs MinIO as an unprivileged user that cannot write its /data volume.
-	ctr, err := minio.Run(tb.Context(), minioImage, testcontainers.WithCmd("server", "/tmp/data"), publish)
-	testcontainers.CleanupContainer(tb, ctr)
-	require.NoError(tb, err)
-
-	endpoint, err := ctr.ConnectionString(tb.Context())
-	require.NoError(tb, err)
-
-	return s3.New(s3.Options{
-		Region:       "us-east-1",
-		BaseEndpoint: aws.String("http://" + endpoint),
-		UsePathStyle: true,
-		Credentials:  credentials.NewStaticCredentialsProvider(ctr.Username, ctr.Password, ""),
-	})
-}
-
-// newBucket creates an empty bucket for one test.
-func newBucket(t *testing.T, client *s3.Client) string {
-	t.Helper()
-
-	bucket := "plg-" + strings.ToLower(rand.Text())
-
-	_, err := client.CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-	require.NoError(t, err)
-
-	return bucket
 }
 
 func put(t *testing.T, client *s3.Client, bucket, key, data string) {
@@ -136,8 +95,8 @@ const luaManifest = "implements: " + ruleImplements + "\nlanguage: lua\nentrypoi
 func TestStorageListsPluginDirectories(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	upload(t, client, bucket, "plugins/", plugins.FS)
 	put(t, client, bucket, "plugins/README.md", "objects directly under the prefix are not plugins")
 	put(t, client, bucket, "plugins/.git/config", "neither are dot directories")
@@ -194,8 +153,8 @@ func TestStorageListsPluginDirectories(t *testing.T) {
 func TestStorageAtTheBucketRoot(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	put(t, client, bucket, "p/plugin.yaml", luaManifest+"version: \"7\"\n")
 	put(t, client, bucket, "p/main.lua", "")
 
@@ -217,8 +176,8 @@ func TestStorageAtTheBucketRoot(t *testing.T) {
 func TestStorageVersionsFollowTheObjects(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 	put(t, client, bucket, "p/main.lua", "return 1")
 	put(t, client, bucket, "q/plugin.yaml", luaManifest)
@@ -336,8 +295,8 @@ func (b *countingBody) Read(p []byte) (int, error) {
 func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 	put(t, client, bucket, "p/main.lua", "")
 	put(t, client, bucket, "q/plugin.yaml", luaManifest)
@@ -377,7 +336,7 @@ func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {
 func TestStorageRejectsBadManifests(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
+	client := containertest.StartMinIO(t)
 
 	tests := map[string]map[string]string{
 		"no manifest":   {"p/main.lua": ""},
@@ -394,7 +353,7 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			bucket := newBucket(t, client)
+			bucket := containertest.NewBucket(t, client)
 			for key, data := range objects {
 				put(t, client, bucket, key, data)
 			}
@@ -409,8 +368,8 @@ func TestStorageRejectsBadManifests(t *testing.T) {
 func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	manifest := luaManifest
 	put(t, client, bucket, "p/plugin.yaml", manifest+strings.Repeat(" ", 64<<10-len(manifest)))
 
@@ -422,8 +381,8 @@ func TestStorageManifestAtTheSizeLimit(t *testing.T) {
 func TestStorageOpenFailures(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 
 	const limit = 200
 
@@ -493,8 +452,8 @@ func (c *oddKeysClient) ListObjectsV2(
 func TestStorageReadsEveryPageOfAListing(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	upload(t, client, bucket, "", plugins.FS) // 9 objects
 
 	store := s3storage.New(client, bucket)
@@ -568,8 +527,8 @@ func (c *generatingClient) ListObjectsV2(
 func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	put(t, client, bucket, "many/plugin.yaml", luaManifest)
 
 	const (
@@ -630,8 +589,8 @@ func TestStorageListingsStopAtThePluginLimits(t *testing.T) {
 func TestStorageDownloadFailures(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	put(t, client, bucket, "p/plugin.yaml", luaManifest)
 
 	failing := &failingClient{Client: client}
@@ -663,8 +622,8 @@ func (*failingClient) GetObject(
 func TestStorageServesThePricingRules(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 	upload(t, client, bucket, "rules/", plugins.FS)
 
 	container := pricingtest.Register(t, s3storage.New(client, bucket, s3storage.WithPrefix("rules/")))

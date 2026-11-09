@@ -26,6 +26,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/heynemann/go-plg"
+	"github.com/heynemann/go-plg/examples/containertest"
 	"github.com/heynemann/go-plg/examples/internal/pricingtest"
 	"github.com/heynemann/go-plg/examples/pgstorage"
 	"github.com/heynemann/go-plg/examples/plugins"
@@ -51,7 +52,7 @@ type postgresServer struct {
 func startPostgres(tb testing.TB) *postgresServer {
 	tb.Helper()
 
-	publish := pricingtest.PublishOnFreePort(tb, "5432/tcp")
+	publish := containertest.PublishOnFreePort(tb, "5432/tcp")
 
 	ctr, err := postgres.Run(tb.Context(), postgresImage, postgres.BasicWaitStrategies(), publish)
 	testcontainers.CleanupContainer(tb, ctr)

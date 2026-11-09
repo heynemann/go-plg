@@ -1,0 +1,69 @@
+# The vendor's API is stubbed at the address its faked vendor_api_url secret gives.
+httpPolicy:
+  allowedHosts: [crm.example.com]
+cases:
+  - name: the first page is the vendor's, with its next cursor
+    call: List
+    input:
+      cursor: ""
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - url: "https://crm.example.com/segments/churn-risk/members?cursor="
+        body: '{"users":["u000004","u000009"],"next":"u000009"}'
+        times: 1
+    expect:
+      result: {users: [u000004, u000009], next: u000009}
+  - name: the last page ends the listing
+    call: List
+    input:
+      cursor: u000009
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - {url: "https://crm.example.com/segments/churn-risk/members?cursor=u000009", body: '{"users":[],"next":""}'}
+    expect:
+      result: {users: [], next: ""}
+  - name: the vendor's refusal is the listing's error, the token it echoes scrubbed
+    call: List
+    input:
+      cursor: ""
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - url: "https://crm.example.com/segments/churn-risk/members?cursor="
+        status: 401
+        body: "token v3nd0r is not valid\n"
+    expect:
+      error: "the vendor API answered 401 for the page at '': token [secret vendor_api_token] is not valid"
+  - name: a member of the segment
+    call: IsMember
+    input:
+      user: u000004
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - {url: "https://crm.example.com/segments/churn-risk/members/u000004", body: '{"member":true}', times: 1}
+    expect:
+      result: true
+  - name: a user the vendor does not know is not a member
+    call: IsMember
+    input:
+      user: u000005
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - {url: "https://crm.example.com/segments/churn-risk/members/u000005", status: 404}
+    expect:
+      result: false
+  - name: the vendor's failure is the call's
+    call: IsMember
+    input:
+      user: u000004
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: v3nd0r}
+    http:
+      - {url: "https://crm.example.com/segments/churn-risk/members/u000004", status: 503, body: busy}
+    expect:
+      error: "the vendor API answered 503 for u000004: busy"
+  - name: without its token the provider fails
+    call: IsMember
+    input:
+      user: u000004
+    secrets: {vendor_api_url: "https://crm.example.com", vendor_api_token: null}
+    expect:
+      error: secret "vendor_api_token" could not be resolved
