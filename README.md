@@ -1008,8 +1008,9 @@ Your own: implement the three methods. `plg.ParseManifest` parses a `plugin.yaml
 storages that keep the same layout elsewhere; read at most `plg.MaxManifestSize`+1 bytes of it, as it rejects more. A `Version` that changes exactly when the plugin changes lets
 reloads skip unchanged plugins (an empty one makes plg hash the files on every reload). Two complete storages,
 kept out of plg's own dependencies, live in [`examples/`](#examples): **S3** (aws-sdk-go-v2, the plugin.yaml
-layout under a key prefix, versions from object ETags) and **PostgreSQL** (pgx, the plugin.yaml stored as one of
-the plugin's file rows, only enabled plugins listed, versions maintained by triggers, migrations included).
+layout under a key prefix, versions from object ETags, or with `s3storage.WithArtifacts()` one `.plg` artifact per
+plugin, see below) and **PostgreSQL** (pgx, the plugin.yaml stored as one of the plugin's file rows, only enabled
+plugins listed, versions maintained by triggers, migrations included).
 
 A storage may also keep one blob per plugin: the `.plg` artifact `plg pack` writes (see
 [Packing a plugin](#packing-a-plugin-plg-pack)). `plg.OpenArtifact(r io.ReaderAt, size int64)` reads one into
@@ -2042,11 +2043,20 @@ in its log, events, admin JSON or spans.
 A `.plg` artifact is one immutable blob named by its key, which is how object stores and databases like to keep
 things. Publish from the CI job that packed it (after `plg pack` succeeded, so only validated plugins reach the
 storage), under a path the platform owns (`plugins/<key>.plg`), and let the service's storage list those blobs
-and return `plg.OpenArtifact` of each from `Open` (see [Storages](#storages)); the [S3](examples/s3storage) and
-[PostgreSQL](examples/pgstorage) examples show listing and versioning, and `examples/service/artifacts.go` a
-directory of artifacts. With [polling](#reloading-and-polling) a published artifact goes live without a restart,
-and a bad one keeps the last good version serving. Decide from the provenance what to accept (a `dirty` artifact,
-an old contract, a commit not on the main branch): plg loads whatever it is given.
+and return `plg.OpenArtifact` of each from `Open` (see [Storages](#storages)). With
+[polling](#reloading-and-polling) a published artifact goes live without a restart, and a bad one keeps the last
+good version serving. The [S3](examples/s3storage) example does exactly that with
+`s3storage.New(client, bucket, s3storage.WithPrefix("plugins"), s3storage.WithArtifacts())`: it downloads an
+artifact only when its ETag changes, versions it by its digest, refuses one over its size limit before reading
+it, and lists a republished artifact that cannot be opened under its last good `plugin.yaml`, so plg rejects that
+one plugin and reports it to its owner while the others reload.
+Its `TestPublishedArtifactsGoLiveFromS3` runs the whole path against MinIO: the author repository's CI script packs
+the rules, they are uploaded, a registration with the service's validation and ownership rules polls the bucket,
+a newer commit of one rule goes live on the next poll, and a version failing validation and a corrupt blob are
+each rejected (event and admin JSON) while the last good version serves on. The
+[PostgreSQL](examples/pgstorage) example shows listing and versioning in a database, and
+`examples/service/artifacts.go` a directory of artifacts. Decide from the provenance what to accept (a `dirty`
+artifact, an old contract, a commit not on the main branch): plg loads whatever it is given.
 
 #### Designing contracts for large data: bounded predicates and pages
 
@@ -2194,7 +2204,9 @@ allocations (2.5 KB) per call, before any export.
   TypeScript; the TypeScript one calls a coupon API with its secrets) with its `plg.yaml`, test cases, committed
   typings and the CI script validating and packing them, which the
   [author guide](#author-guide-from-a-contract-to-a-served-plugin) walks through.
-- [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, tested against MinIO.
+- [`examples/s3storage`](examples/s3storage): a `plg.Storage` over S3, serving plugin directories or, with
+  `WithArtifacts()`, the `.plg` artifacts `plg pack` writes, tested against MinIO (including the author
+  repository's artifacts published, polled and replaced).
 - [`examples/pgstorage`](examples/pgstorage): a `plg.Storage` over PostgreSQL listing only enabled plugins, with
   its migration, tested against PostgreSQL.
 - [`examples/quickstart`](examples/quickstart): runs this README's quick start, and

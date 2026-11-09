@@ -77,10 +77,17 @@ func Discounts() map[string]pricing.Discount {
 func Quote(t *testing.T, container *plg.Container) map[string]pricing.Discount {
 	t.Helper()
 
+	return QuoteOrder(t, container, Order())
+}
+
+// QuoteOrder calls every rule registered in container with order and returns their discounts by plugin key.
+func QuoteOrder(t *testing.T, container *plg.Container, order pricing.Order) map[string]pricing.Discount {
+	t.Helper()
+
 	got := make(map[string]pricing.Discount)
 
 	for key, rule := range plg.All[pricing.Rule](t.Context(), container) {
-		discount, err := rule.Discount(t.Context(), Order())
+		discount, err := rule.Discount(t.Context(), order)
 		require.NoError(t, err, key)
 
 		got[key] = discount
