@@ -3,6 +3,7 @@
 package cli_test
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/internal/testproxy"
 )
 
@@ -197,6 +199,33 @@ func TestValidateRepoTypeChecksOnlyWhatThePluginImports(t *testing.T) {
 	got := validate(environ, repo)
 	require.Equal(t, 0, got.code, "%s%s", got.stdout, got.stderr)
 	assert.Contains(t, section(t, got.stdout, "coupon"), "types      ok      ")
+}
+
+// TestValidateRepoNamesThePluginOverTheLimits validates and packs a plugin of a repository with shared directories
+// holding more than plg.MaxPluginEntries entries: its files (pack's) step fails with plg.ErrPluginTooLarge naming the
+// plugin, whose composed copy is a directory of its name, not the temporary directory holding it.
+func TestValidateRepoNamesThePluginOverTheLimits(t *testing.T) {
+	t.Parallel()
+
+	repo := copyRepo(t, "plugins: [rules/silver]\nshared: [lib]\n", map[string]string{})
+	plugin := filepath.Join(repo, "rules", "silver")
+	many := filepath.Join(plugin, "many")
+	require.NoError(t, os.Mkdir(many, 0o750))
+
+	for i := range plg.MaxPluginEntries {
+		require.NoError(t, os.WriteFile(filepath.Join(many, fmt.Sprintf("f%05d", i)), nil, 0o600))
+	}
+
+	tooLarge := fmt.Sprintf("FAIL    plg: plugin directory silver: copying the plugin's files: %v: many/f",
+		plg.ErrPluginTooLarge)
+
+	got := validate(nil, plugin)
+	assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+	assert.Contains(t, got.stdout, "shared    ok      copied lib at lib\nfiles     "+tooLarge)
+
+	got = pack(nil, "-o", t.TempDir(), plugin)
+	assert.Equal(t, 1, got.code, got.stdout+got.stderr)
+	assert.Contains(t, got.stdout, "shared    ok      copied lib at lib\npack      "+tooLarge)
 }
 
 // TestValidateRepoReplacesTheContractByALocalCheckout validates plugins of a repository whose plg.yaml replaces

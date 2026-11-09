@@ -182,7 +182,8 @@ func settings(repo *authorrepo.Repo, file string) string {
 }
 
 // shared sets the plugin's files to a snapshot (see snapshot) of its directory, or, when its author repository has
-// shared directories, of a temporary copy of it with them copied in, which cleanup removes.
+// shared directories, of a temporary copy of it with them copied in, which cleanup removes. The copy is a directory
+// named after the plugin's key, so that the snapshot's errors name the plugin.
 func (v *validation) shared(ctx context.Context, desc *plg.Descriptor) (func(), bool) {
 	v.filesDir = v.dir
 
@@ -197,12 +198,13 @@ func (v *validation) shared(ctx context.Context, desc *plg.Descriptor) (func(), 
 		goPackage = goPackageDir(desc.Entrypoint)
 	}
 
-	dir, err := os.MkdirTemp("", "plg-validate-*")
+	temp, err := os.MkdirTemp("", "plg-validate-*")
 	if err != nil {
 		return nil, v.failed("shared", err)
 	}
 
-	cleanup := func() { os.RemoveAll(dir) } //nolint:errcheck,gosec // a temporary copy
+	cleanup := func() { os.RemoveAll(temp) } //nolint:errcheck,gosec // a temporary copy
+	dir := filepath.Join(temp, v.key())
 
 	placements, err := v.repo.Compose(dir, plugin, goPackage)
 	if err != nil {
