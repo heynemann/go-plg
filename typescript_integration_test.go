@@ -910,7 +910,7 @@ func TestTypeScriptCloseRunsThePluginsClose(t *testing.T) {
 
 	var logs bytes.Buffer
 
-	ctr := plg.New(plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+	ctr := newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
 	tsFooer(t, ctr, `async Close() { await null; console.log("closing", typeof this.Spin); }`, plg.WithPool(1, 1))
 
 	store := tsSource(t, tsPlugin(fooerMembers(`Close() { throw new Error("cannot close"); }`)))
@@ -1001,7 +1001,7 @@ func BenchmarkHTTPRoundTripTypeScriptParallel(b *testing.B) {
 func TestABrokenMultiplexedInstanceSkipsItsHangingClose(t *testing.T) {
 	t.Parallel()
 
-	ctr := plg.New()
+	ctr := newContainer(t)
 	plg.SetCloseTimeout(ctr, 100*time.Millisecond)
 
 	plug := tsFooer(t, ctr, `Close() { for (;;) {} },

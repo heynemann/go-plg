@@ -34,7 +34,8 @@ type lookalike interface {
 // newContainer returns a container on the default on-disk compilation cache, so only the first test run on a
 // machine compiles the Go guest cold. Its bundlings get an hour, not the 10 s default: a small plugin bundles in
 // about 40 ms, but took over 10 s in a `make check` on a machine short of memory, failing a test about something
-// else. The tests of the bundling's time limit set theirs (bundle_integration_test.go).
+// else. So every container of these tests that may bundle TypeScript comes from it. The tests of the bundling's
+// time limit set theirs (bundle_integration_test.go).
 func newContainer(tb testing.TB, opts ...plg.Option) *plg.Container {
 	tb.Helper()
 
@@ -705,7 +706,7 @@ func TestClosedContainersKeepNoGuestMemory(t *testing.T) {
 
 				for range n {
 					synctest.Test(t, func(t *testing.T) {
-						ctr := plg.New()
+						ctr := newContainer(t)
 						registerFooersIn(t, lang, ctr, "fooer", map[string]string{"ref": "fooer"}, plg.WithPool(1, 1))
 
 						ref := getFooer(t, ctr, "fooer/ref")

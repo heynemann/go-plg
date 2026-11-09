@@ -5,7 +5,6 @@ package plg_test
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,15 +18,11 @@ import (
 	"github.com/heynemann/go-plg/internal/testcontract"
 )
 
-// loggedContainer returns a container on the default compilation cache whose logs go to logs, as JSON lines.
+// loggedContainer returns newContainer's container, whose logs go to logs as JSON lines.
 func loggedContainer(t *testing.T, logs *bytes.Buffer) *plg.Container {
 	t.Helper()
 
-	ctr := plg.New(plg.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
-
-	t.Cleanup(func() { assert.NoError(t, ctr.Close(context.Background())) })
-
-	return ctr
+	return newContainer(t, plg.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
 }
 
 func TestFSStoragesLoadThroughRegister(t *testing.T) {

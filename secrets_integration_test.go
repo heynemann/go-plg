@@ -167,7 +167,7 @@ func TestSecretsRotateOnceTheirCacheExpires(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				var rotations atomic.Int64
 
-				ctr := plg.New()
+				ctr := newContainer(t)
 				plug := secretsPlugin(t, lang, ctr, "rotating", plg.WithSecrets(
 					func(_ context.Context, _ plg.PluginInfo, name string) (string, error) {
 						return fmt.Sprintf("%s-%d", name, rotations.Add(1)), nil
