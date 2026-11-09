@@ -25,10 +25,12 @@ const (
 // CheckTypeScript type-checks a TypeScript plugin, the directory plugin whose entrypoint is the file entrypoint,
 // against the typings, with the compiler options of their tsconfig.json: the plugin's own files (each against
 // the declarations), and that what its Create returns implements the interface. The plugin's typings must be
-// these (see [Typings.Stale]). The compiler reads a copy of the plugin's regular files: symbolic links are not
-// followed, so a file they lead to, in or out of the plugin, is not read. Diagnostics name the plugin's files
-// relative to its directory, in the compiler's order; those about what Create returns come last, placed at the
-// plugin's export of Create (else at the entrypoint's start), their message starting with "Create: ".
+// these (see [Typings.Stale]). The compiler reads a copy of the plugin's regular TypeScript, JavaScript and JSON
+// files: symbolic links are not followed, so a file they lead to, in or out of the plugin, is not read, and a
+// plugin over plg's limits (plg.MaxPluginSize and the others) fails with plg.ErrPluginTooLarge before any
+// file is read, as its load would. Diagnostics name the plugin's files relative to its directory, in the
+// compiler's order; those about what Create returns come last, placed at the plugin's export of Create (else at
+// the entrypoint's start), their message starting with "Create: ".
 func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker, plugin fs.FS,
 	entrypoint string,
 ) ([]tscheck.Diagnostic, error) {
@@ -41,7 +43,7 @@ func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker,
 		return nil, err
 	}
 
-	files, err := regularFiles(plugin)
+	files, err := regularFiles(ctx, plugin)
 	if err != nil {
 		return nil, err
 	}
@@ -77,28 +79,6 @@ func (t *Typings) CheckTypeScript(ctx context.Context, checker *tscheck.Checker,
 	}
 
 	return append(own, create...), nil
-}
-
-// regularFiles returns the plugin's regular files: plugin itself when it is an in-memory tree, which holds no
-// links, else a copy of its regular files.
-func regularFiles(plugin fs.FS) (*memfs.FS, error) {
-	if files, ok := plugin.(*memfs.FS); ok {
-		return files, nil
-	}
-
-	var tree memfs.Builder
-
-	err := tree.AddTree(".", plugin, ".")
-	if err != nil {
-		return nil, fmt.Errorf("typings: %w", err)
-	}
-
-	files, err := tree.Build()
-	if err != nil {
-		return nil, fmt.Errorf("typings: %w", err)
-	}
-
-	return files, nil
 }
 
 // checkProject returns the type-check's own project: a tsconfig.json extending the plugin's, over the plugin's

@@ -585,7 +585,9 @@ on stderr, where plg's log (the plugin's own output, compiles, issues) also goes
   against the interface even when nothing in the plugin says so: a method returning a string where the contract
   wants a bool fails with `plugin.ts:13:17: Create: Argument of type '() => Tiers' is not assignable to …` at the
   export of `Create` (annotating `Create(): cohort.Provider`, or a class with `implements cohort.Provider`, puts
-  the error on the method itself).
+  the error on the method itself). The compiler reads a copy of the plugin's TypeScript, JavaScript and JSON files
+  (symbolic links not followed); a plugin over plg's [limits](#storages) (`plg.MaxPluginFileSize` and the others)
+  fails the step with `plg.ErrPluginTooLarge` before any file is read, as its load would.
 - **guest** (Go plugins of a contract with `//plg:guest-packages`): the custom Go guest with those packages, built
   as `plg build-guest` builds one, from the plugin's module (its `go.mod` and `go.sum`, local `replace`s made
   absolute; the module must provide the non-standard packages). The guest's plg is the version the `plg` command was
