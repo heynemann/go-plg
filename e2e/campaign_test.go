@@ -83,10 +83,10 @@ func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign,
 		assert.Len(t, children[lists[i].SpanContext.SpanID()], 1, "%s reads one page of its source", cohortCall)
 	}
 
-	delivered := 0
+	delivered, asked := 0, harness.ExpectAsked(t, rig.Users, campaign)
 
 	for i := range users {
-		if assertMember(t, rig, campaign, &users[i], children) {
+		if assertMember(t, rig, campaign, &users[i], children, asked) {
 			delivered++
 		}
 	}
@@ -94,21 +94,20 @@ func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign,
 	assert.Equal(t, result.Delivered, delivered, "every delivery is in the campaign's trace")
 }
 
-// assertMember checks the spans of one member and reports whether it was delivered: its condition calls are
-// campaign.user's children, its Deliver call too when it is eligible, with the POST to the wallet below it.
+// assertMember checks the spans of one member and reports whether it was delivered: its condition calls, as many
+// as the oracle's asked says, are campaign.user's children, its Deliver call too when it is eligible, with the POST to the wallet below it.
 func assertMember(
 	t *testing.T, rig *harness.Rig, campaign *platform.Campaign, user *tracetest.SpanStub,
-	children map[trace.SpanID]tracetest.SpanStubs,
+	children map[trace.SpanID]tracetest.SpanStubs, asked map[string]int,
 ) bool {
 	t.Helper()
 
 	id := attr(user.Attributes, "user.id")
 	below := children[user.SpanContext.SpanID()]
 	deliveries := named(below, "plg.call "+platform.Deliveries+"/"+campaign.Deliverer+".Deliver")
-	conditions := len(below) - len(deliveries)
-
-	assert.Positive(t, conditions, "%s: a condition was asked", id)
-	assert.LessOrEqual(t, conditions, len(campaign.Conditions), "%s: each condition asked once at most", id)
+	want, member := asked[id]
+	require.True(t, member, "%s is a member of the cohort", id)
+	assert.Equal(t, want, len(below)-len(deliveries), "%s: the conditions asked until one said no", id)
 
 	if attr(user.Attributes, "campaign.eligible") != "true" {
 		assert.Empty(t, deliveries, "%s: not eligible, not delivered", id)

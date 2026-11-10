@@ -225,6 +225,23 @@ func ExpectCalls(tb testing.TB, dir *Directory, campaign *platform.Campaign) map
 	return calls
 }
 
+// ExpectAsked computes, from dir's users and the rules above, how many of campaign's conditions each member of its
+// cohort is asked, by user ID: those in order until one says no or fails, every one when all accept.
+func ExpectAsked(tb testing.TB, dir *Directory, campaign *platform.Campaign) map[string]int {
+	tb.Helper()
+
+	inCohort, conditions := rules(tb, campaign)
+	asked := map[string]int{}
+
+	for _, user := range dir.Users() {
+		if inCohort(user) {
+			asked[user.ID] = decide(conditions, user).asked
+		}
+	}
+
+	return asked
+}
+
 // ExpectPages computes how many pages campaign's cohort lists over dir's users, as each provider's source pages
 // them: gold the directory 100 users at a time, churn-risk the vendor's segment vendorPageSize members at a time,
 // everyone the directory cohort.MaxPageSize users at a time, pilot one page; an empty listing is one empty page.
