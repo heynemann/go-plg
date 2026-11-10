@@ -54,7 +54,7 @@ func TestRewardsAreCreditedExactlyOnceDespiteTimeoutsAnd503s(t *testing.T) {
 	t.Parallel()
 
 	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{
-		Concurrency: 1, CallTimeout: hangTimeout, DeliveryAttempts: 5,
+		Concurrency: 1, CallTimeout: hangTimeout, Attempts: 5,
 	}})
 	campaign := springGold("exactly-once")
 	expected := harness.Expect(t, rig.Users, &campaign)
@@ -158,7 +158,7 @@ func runSpan(t *testing.T, telemetry *harness.Telemetry, campaign *platform.Camp
 func TestACohortsFailedPageIsAskedAgain(t *testing.T) {
 	t.Parallel()
 
-	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{CallTimeout: hangTimeout, DeliveryAttempts: 3}})
+	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{CallTimeout: hangTimeout, Attempts: 3}})
 	campaign := winBack("page-again")
 	expected := harness.Expect(t, rig.Users, &campaign)
 	pages := harness.ExpectPages(t, rig.Users, &campaign)

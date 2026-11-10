@@ -48,11 +48,11 @@ const WalletURLSecret = "wallet_api_url" //nolint:gosec // G101: a secret's name
 
 // Defaults of [Limits].
 const (
-	defaultConcurrency      = 16
-	defaultCallTimeout      = 5 * time.Second
-	defaultDeliveryAttempts = 3
-	defaultRetryBackoff     = 10 * time.Millisecond
-	defaultPool             = 4
+	defaultConcurrency  = 16
+	defaultCallTimeout  = 5 * time.Second
+	defaultAttempts     = 3
+	defaultRetryBackoff = 10 * time.Millisecond
+	defaultPool         = 4
 )
 
 // Storages are where each registration's plugins are published: the platform registers each contract with its
@@ -71,9 +71,10 @@ type Limits struct {
 	Concurrency int
 	// CallTimeout bounds each plugin call (default 5s).
 	CallTimeout time.Duration
-	// DeliveryAttempts is how many times a reward is tried before its member counts as failed (default 3). A
-	// cohort's page is tried as many times.
-	DeliveryAttempts int
+	// Attempts is how many times the platform tries a call it retries before giving up (default 3): a reward's
+	// delivery, after which its member counts as failed, and a page of the cohort, after which the campaign
+	// fails. Attempts: 1 turns off both retries.
+	Attempts int
 	// RetryBackoff is the wait before the second attempt, doubled before each later one (default 10ms).
 	RetryBackoff time.Duration
 	// PoolMin and PoolMax bound each plugin's instances (plg.WithPool; default 4 and 4: every instance started
@@ -280,7 +281,7 @@ func (l *Limits) withDefaults() Limits {
 	limits := *l
 	limits.Concurrency = positiveOr(limits.Concurrency, defaultConcurrency)
 	limits.CallTimeout = time.Duration(positiveOr(int(limits.CallTimeout), int(defaultCallTimeout)))
-	limits.DeliveryAttempts = positiveOr(limits.DeliveryAttempts, defaultDeliveryAttempts)
+	limits.Attempts = positiveOr(limits.Attempts, defaultAttempts)
 	limits.RetryBackoff = time.Duration(positiveOr(int(limits.RetryBackoff), int(defaultRetryBackoff)))
 	limits.PoolMin = positiveOr(limits.PoolMin, defaultPool)
 	limits.PoolMax = positiveOr(limits.PoolMax, max(limits.PoolMin, defaultPool))

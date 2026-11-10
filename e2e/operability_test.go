@@ -36,7 +36,7 @@ func TestEachCampaignIsOneTraceDownToTheWallet(t *testing.T) {
 	t.Parallel()
 
 	failed := 3
-	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{DeliveryAttempts: failed + 1}})
+	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{Attempts: failed + 1}})
 	campaigns := []platform.Campaign{springGold("traced-spring-gold"), winBack("traced-win-back")}
 	results := make([]platform.Result, len(campaigns))
 
@@ -294,7 +294,7 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 	assert.Equal(t, expectedPanicking.Credits, rig.Wallet.CreditsOf(broken[0].ID))
 
 	pilots := len(harness.PilotMembers())
-	attempts := pilots * 3 // platform.Limits' default DeliveryAttempts
+	attempts := pilots * 3 // platform.Limits' default Attempts
 	assert.Equal(t, platform.Result{
 		Failures: map[string]int{voucher: pilots}, Members: pilots, Eligible: pilots, Retries: attempts - pilots,
 	}, results[1], "every attempt of every pilot stopped at the timeout, counted against voucher")

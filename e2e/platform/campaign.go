@@ -96,7 +96,7 @@ type condition struct {
 
 // Run runs campaign: it pages through the cohort (List), asks the conditions about each member, as many members
 // at once as Limits.Concurrency, and delivers the reward to every member they all accept, with the idempotency key
-// "<campaign ID>/<member ID>" and retries (Limits.DeliveryAttempts, backing off from Limits.RetryBackoff): a
+// "<campaign ID>/<member ID>" and retries (Limits.Attempts, backing off from Limits.RetryBackoff): a
 // delivery cut short may have reached its destination, so delivery is at least once and the key makes repeating
 // it harmless.
 //
@@ -369,14 +369,14 @@ func (r *campaignRun) deliver(ctx context.Context, id string) error {
 }
 
 // retry calls attempt, each time under Limits.CallTimeout, until it succeeds, fails for good, or has been tried
-// Limits.DeliveryAttempts times, waiting Limits.RetryBackoff before the second attempt and twice as long before
+// Limits.Attempts times, waiting Limits.RetryBackoff before the second attempt and twice as long before
 // each later one. It returns the attempts made and the last one's error.
 func (r *campaignRun) retry(ctx context.Context, attempt func(context.Context) error) (int, error) {
 	backoff := r.platform.limits.RetryBackoff
 
 	for n := 1; ; n++ {
 		err := r.attempt(ctx, attempt)
-		if err == nil || n == r.platform.limits.DeliveryAttempts || !retryable(ctx, err) {
+		if err == nil || n == r.platform.limits.Attempts || !retryable(ctx, err) {
 			return n, err
 		}
 

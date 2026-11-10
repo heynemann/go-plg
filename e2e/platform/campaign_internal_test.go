@@ -106,7 +106,7 @@ func TestRunCountsACohortsFailureOnce(t *testing.T) {
 		{
 			name:  "a listing failing every attempt",
 			pages: map[string]cohort.Page{"": {Users: []string{"u1"}, Next: "u1"}}, // none at u1
-			lists: 1 + defaultDeliveryAttempts,
+			lists: 1 + defaultAttempts,
 			want:  Result{Failures: map[string]int{"cohorts/c": 1}, Members: 1, Eligible: 1, Delivered: 1},
 		},
 	} {
@@ -155,7 +155,7 @@ func TestRunCountsAMembersFailureAgainstWhatFailedIt(t *testing.T) {
 			name: "the deliverer fails every attempt", member: "u1", condition: accepting, deliverer: undelivered,
 			want: Result{
 				Failures: map[string]int{"deliveries/d": 1}, Members: 1, Eligible: 1,
-				Retries: defaultDeliveryAttempts - 1,
+				Retries: defaultAttempts - 1,
 			},
 		},
 	} {
