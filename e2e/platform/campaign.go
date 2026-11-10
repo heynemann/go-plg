@@ -307,8 +307,14 @@ func (r *campaignRun) decideAndDeliver(ctx context.Context, span trace.Span, id 
 	}}
 
 	for _, cond := range r.conditions {
-		decision, err := r.call(ctx, func(ctx context.Context) (eligibility.Decision, error) {
-			return cond.plugin.Eligible(ctx, subject)
+		var decision eligibility.Decision
+
+		err := r.attempt(ctx, func(ctx context.Context) error {
+			var err error
+
+			decision, err = cond.plugin.Eligible(ctx, subject)
+
+			return err //nolint:wrapcheck // plg's error
 		})
 		if err != nil {
 			return cond.key, err
@@ -360,16 +366,6 @@ func (r *campaignRun) deliver(ctx context.Context, id string) error {
 	}
 
 	return nil
-}
-
-// call calls a plugin method under Limits.CallTimeout.
-func (r *campaignRun) call(ctx context.Context, method func(context.Context) (eligibility.Decision, error)) (
-	eligibility.Decision, error,
-) {
-	ctx, cancel := context.WithTimeout(ctx, r.platform.limits.CallTimeout)
-	defer cancel()
-
-	return method(ctx)
 }
 
 // retry calls attempt, each time under Limits.CallTimeout, until it succeeds, fails for good, or has been tried
