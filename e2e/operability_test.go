@@ -84,7 +84,7 @@ func TestEachCampaignIsOneTraceDownToTheWallet(t *testing.T) {
 
 		for _, list := range lists {
 			below := children[list.SpanContext.SpanID()]
-			require.NotEmpty(t, below, "%s: List reads its source", campaign.ID)
+			require.Len(t, below, 1, "%s: List reads one page of its source", campaign.ID)
 			assert.True(t, strings.HasPrefix(below[0].Name, cohortCalls[campaign.Cohort]), below[0].Name)
 		}
 
