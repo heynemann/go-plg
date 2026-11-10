@@ -167,6 +167,10 @@ func TestRunCountsAMembersFailureAgainstWhatFailedIt(t *testing.T) {
 			want: Result{Failures: map[string]int{Directory: 1}, Members: 1},
 		},
 		{
+			name: "the cohort lists an empty user ID", member: "", condition: accepting, deliverer: delivered,
+			want: Result{Failures: map[string]int{Directory: 1}, Members: 1},
+		},
+		{
 			name: "a condition fails", member: "u1", condition: failing, deliverer: delivered,
 			want: Result{Failures: map[string]int{"conditions/0": 1}, Members: 1},
 		},

@@ -303,7 +303,7 @@ func (r *campaignRun) member(ctx context.Context, id string) {
 // failure it returns the key of what failed.
 func (r *campaignRun) decideAndDeliver(ctx context.Context, span trace.Span, id string) (string, error) {
 	user, err := r.platform.users.Lookup(ctx, id)
-	if err == nil && user.ID != id {
+	if err == nil && (user.ID == "" || user.ID != id) {
 		err = fmt.Errorf("%w: the directory has no such user", ErrCampaign)
 	}
 
