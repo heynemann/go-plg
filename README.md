@@ -49,6 +49,7 @@ HTTP allowlist).
 - [Performance](#performance)
 - [Limitations and residual risks](#limitations-and-residual-risks)
 - [Examples](#examples)
+- [End-to-end: a rewards platform](#end-to-end-a-rewards-platform)
 - [Development](#development)
 
 ## Concepts
