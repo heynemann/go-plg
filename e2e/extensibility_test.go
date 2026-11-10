@@ -297,10 +297,14 @@ func TestAHotSwapFailsNoCallInFlight(t *testing.T) {
 
 	var paused *harness.Paused
 
-	rig := harness.NewRig(t, &harness.Options{Configure: func(cfg *platform.Config) {
-		paused = harness.PausePage(cfg.Users, cursor)
-		cfg.Users = paused
-	}})
+	rig := harness.NewRig(t, &harness.Options{
+		// The held List call spans a publish and a Reload: a minute, not the default 5 s, under the race detector.
+		Limits: platform.Limits{CallTimeout: time.Minute},
+		Configure: func(cfg *platform.Config) {
+			paused = harness.PausePage(cfg.Users, cursor)
+			cfg.Users = paused
+		},
+	})
 	campaign := springGold("swap-in-flight")
 	expected := harness.Expect(t, rig.Users, &campaign)
 	key := platform.Cohorts + "/gold"
