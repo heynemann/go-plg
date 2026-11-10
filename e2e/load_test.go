@@ -80,22 +80,24 @@ const (
 	mib = 1 << 20
 )
 
-// The load's thresholds, from the median of three runs on a workstation with GOMAXPROCS 4 (PLAN.md, "E2E: a
-// rewards platform under make complex-e2e", has each run's numbers): 7,837 members/s, a p99 of 29.4 ms, no member
-// failed, the host's heap 7.5% over its baseline. Each leaves the headroom a 4-CPU CI runner needs: a third of
-// the throughput, three times the latency and the heap's growth.
+// The load's thresholds, from the median of three runs of the test binary pinned to 4 CPUs (taskset -c 0-3) on a
+// workstation, GOMAXPROCS 4 (PLAN.md, "E2E: a rewards platform under make complex-e2e", has each run's numbers, and
+// those of the earlier unpinned runs, a 7,837 members/s median and a p99 of 29.4 ms): 4,789 members/s, a p99 of
+// 67.5 ms, no member failed, the host's heap 1.5% over its baseline. Each leaves the headroom a 4-CPU CI runner
+// needs: a third of the throughput, about three times the latency; the heap's ceiling stays at three times the
+// unpinned runs' growth, 7.5%.
 const (
-	// minUsersPerSecond is the throughput floor: members processed per second of the load (median 7,837).
-	minUsersPerSecond = 2600
+	// minUsersPerSecond is the throughput floor: members processed per second of the load (median 4,789).
+	minUsersPerSecond = 1600
 	// maxP99 is the ceiling of the members' 99th percentile processing time, their campaign.user spans (median
-	// 29.4 ms).
-	maxP99 = 90 * time.Millisecond
+	// 67.5 ms).
+	maxP99 = 200 * time.Millisecond
 	// maxFailedUsers is the error budget: the share of the members a failure kept from a decision or a delivery,
 	// 0.1%. None failed in the runs measured: retries absorbed every fault injected, 575 of the deliveries'
 	// attempts.
 	maxFailedUsers = 0.001
 	// maxHeapGrowth is how much the host's own heap after a collection (heap.host) may grow over the load, from
-	// its baseline after the warm-up (median 7.5%).
+	// its baseline after the warm-up (median 1.5% pinned, 7.5% unpinned).
 	maxHeapGrowth = 0.25
 )
 
