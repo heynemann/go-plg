@@ -77,12 +77,13 @@ func EligibilityLimits() eligibility.Limits {
 	}
 }
 
-// Options shape a rig; the zero value is the foundation's: 1,000 users, every team, the default limits, no
-// polling.
+// Options shape a rig; the zero value is the foundation's: 1,000 users, its three teams (Teams()), the default
+// limits, no polling.
 type Options struct {
 	// Configure, when set, has the last word on the platform's config before it starts.
 	Configure func(cfg *platform.Config)
-	// Teams are the teams whose CI runs and whose artifacts are published (default: every team).
+	// Teams are the teams whose CI runs and whose artifacts are published (default: Teams(), the foundation's
+	// three; the others are published only when named).
 	Teams []string
 	// Limits are the platform's (Eligibility defaults to EligibilityLimits()).
 	Limits platform.Limits
