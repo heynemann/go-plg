@@ -135,12 +135,19 @@ func campaignUser(t *testing.T, rig *harness.Rig, campaign *platform.Campaign, u
 func campaignRun(t *testing.T, telemetry *harness.Telemetry, campaign *platform.Campaign) trace.SpanContext {
 	t.Helper()
 
+	return runSpan(t, telemetry, campaign).SpanContext
+}
+
+// runSpan returns campaign's one campaign.run span.
+func runSpan(t *testing.T, telemetry *harness.Telemetry, campaign *platform.Campaign) tracetest.SpanStub {
+	t.Helper()
+
 	runs := slices.DeleteFunc(telemetry.SpansNamed("campaign.run"), func(run tracetest.SpanStub) bool {
 		return attr(run.Attributes, "campaign.id") != campaign.ID
 	})
 	require.Len(t, runs, 1, "one campaign.run span of %s", campaign.ID)
 
-	return runs[0].SpanContext
+	return runs[0]
 }
 
 // A cohort is listed whole, each member once, whatever its size against the page size: the everyone cohort

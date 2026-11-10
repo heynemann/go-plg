@@ -163,14 +163,7 @@ func tableRow(t *testing.T, rows [][]string, key string) []string {
 func TestAHotSwapMidCampaignChangesLaterUsersOnly(t *testing.T) {
 	t.Parallel()
 
-	var gold []harness.User
-
-	for _, user := range harness.NewDirectory(harness.DefaultUsers).Users() {
-		if user.Tier == harness.Gold {
-			gold = append(gold, user)
-		}
-	}
-
+	gold := goldUsers()
 	stop := len(gold) / 2
 
 	var paused *harness.Paused
@@ -295,4 +288,17 @@ func edit(t *testing.T, team *harness.Team, path, old, replacement string) {
 	require.Equal(t, 1, strings.Count(string(content), old), "%s holds %s once", path, old)
 
 	team.Write(t, path, strings.Replace(string(content), old, replacement, 1))
+}
+
+// goldUsers returns the gold users of a rig's default directory, in the order the gold cohort lists them.
+func goldUsers() []harness.User {
+	var gold []harness.User
+
+	for _, user := range harness.NewDirectory(harness.DefaultUsers).Users() {
+		if user.Tier == harness.Gold {
+			gold = append(gold, user)
+		}
+	}
+
+	return gold
 }

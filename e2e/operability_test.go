@@ -211,18 +211,29 @@ func TestMetricsAttributeEveryOutcomeToItsOwner(t *testing.T) {
 // oracle's result, and each shows its owning team what happened, through plg status and plg events (the CLI built
 // from this checkout, reading the platform's admin handler through a profile): the fraud team's velocity panics
 // for every member without orders, the partners team's voucher never returns from a large reward and is stopped
-// at the call timeout, attempt after attempt. Their campaigns count each failure against them; the healthy
-// campaign, run while both fail, is exactly the oracle's; status lists each with its team and its panics (and
-// every other plugin with none), a team's view only its plugins, each plugin's last panic and on-call; events
-// list each panic after the load.
+// at the call timeout, attempt after attempt. Their campaigns count each failure against them. Both are held
+// mid-run once their plugin has failed, each stopped at a member's directory lookup (velocity's campaign at gold's
+// last member, voucher's at its last pilot outside gold), and the healthy campaign runs then, inside both of their
+// campaign.run spans, to exactly the oracle's result; then both go on. Status lists each with its team and its
+// panics (and every other plugin with none), a team's view only its plugins, each plugin's last panic and
+// on-call; events list each panic after the load. Every campaign processes one member at a time: voucher spins in
+// its guest until the call timeout, holding a CPU, so that one spins at most while other tests run beside it.
 func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 	t.Parallel()
 
 	events := harness.NewEvents()
+	gold, pilot := goldUsers(), lastPilotOutsideGold(t)
+
+	var goldStop, pilotStop *harness.Paused
+
 	rig := harness.NewRig(t, &harness.Options{
-		Teams:     append(harness.Teams(), harness.Fraud, harness.Partners),
-		Limits:    platform.Limits{CallTimeout: hangTimeout},
-		Configure: func(cfg *platform.Config) { cfg.OnEvent = events.OnEvent },
+		Teams:  append(harness.Teams(), harness.Fraud, harness.Partners),
+		Limits: platform.Limits{CallTimeout: hangTimeout, Concurrency: 1},
+		Configure: func(cfg *platform.Config) {
+			goldStop = harness.Pause(cfg.Users, gold[len(gold)-1].ID)
+			pilotStop = harness.Pause(goldStop, pilot)
+			cfg.Users, cfg.OnEvent = pilotStop, events.OnEvent
+		},
 	})
 	velocity, voucher := platform.Conditions+"/velocity", platform.Deliveries+"/voucher"
 	broken := []platform.Campaign{{
@@ -236,6 +247,9 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 
 	var running sync.WaitGroup
 
+	// A failure before the release ends the test's context, which ends the stopped lookups and the campaigns.
+	t.Cleanup(running.Wait)
+
 	for i := range broken {
 		running.Go(func() {
 			var err error
@@ -245,25 +259,29 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 		})
 	}
 
-	failing := map[string]bool{velocity: false, voucher: false}
-	for !failing[velocity] || !failing[voucher] {
-		events.Wait(t, func(event plg.Event) bool {
-			_, ours := failing[event.Key]
-			failing[event.Key] = failing[event.Key] || (ours && event.Kind == plg.EventPanicked)
+	goldStop.Await(t)
+	pilotStop.Await(t)
 
-			return ours && event.Kind == plg.EventPanicked
-		})
-	}
+	awaitPanics(t, events, velocity, voucher)
 
 	healthy := springGold("isolated-spring-gold")
 	expectedHealthy := harness.Expect(t, rig.Users, &healthy)
 
 	result, err := rig.Platform.Run(t.Context(), &healthy)
 	require.NoError(t, err)
-	assert.Equal(t, expectedHealthy.Result, result, "the healthy campaign ran while both failed")
+	assert.Equal(t, expectedHealthy.Result, result, "the healthy campaign ran while both broken ones were held")
 	assert.Equal(t, expectedHealthy.Credits, rig.Wallet.CreditsOf(healthy.ID))
 
+	goldStop.Release()
+	pilotStop.Release()
 	running.Wait()
+
+	healthyRun := runSpan(t, rig.Telemetry, &healthy)
+	for i := range broken {
+		run := runSpan(t, rig.Telemetry, &broken[i])
+		assert.True(t, run.StartTime.Before(healthyRun.StartTime) && healthyRun.EndTime.Before(run.EndTime),
+			"%s ran within %s", healthy.ID, broken[i].ID)
+	}
 
 	expectedPanicking := harness.Expect(t, rig.Users, &broken[0])
 	panics := expectedPanicking.Result.Failures[velocity]
@@ -307,6 +325,45 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 	table := admin.Table(t, "events", voucher)
 	require.Len(t, table, 1+1+attempts, "plg events %s: the header, the load, each stop", voucher)
 	assert.Equal(t, "panicked", table[len(table)-1][1])
+}
+
+// awaitPanics waits for a panicked event of each plugin of keys.
+func awaitPanics(t *testing.T, events *harness.Events, keys ...string) {
+	t.Helper()
+
+	pending := map[string]bool{}
+	for _, key := range keys {
+		pending[key] = true
+	}
+
+	for len(pending) > 0 {
+		panicked := events.Wait(t, func(event plg.Event) bool {
+			return event.Kind == plg.EventPanicked && pending[event.Key]
+		})
+		delete(pending, panicked.Key)
+	}
+}
+
+// lastPilotOutsideGold returns the last pilot the pilot cohort lists who is not a gold user, after at least one
+// other: a campaign of the pilots processing one at a time reaches it after another one's delivery, and no gold
+// campaign looks it up.
+func lastPilotOutsideGold(t *testing.T) string {
+	t.Helper()
+
+	pilots, gold := harness.PilotMembers(), map[string]bool{}
+	for _, user := range goldUsers() {
+		gold[user.ID] = true
+	}
+
+	for i := len(pilots) - 1; i > 0; i-- {
+		if !gold[pilots[i]] {
+			return pilots[i]
+		}
+	}
+
+	require.FailNow(t, "every pilot but the first is gold")
+
+	return ""
 }
 
 // shown is what plg status and plg events must show of a plugin that panicked.
