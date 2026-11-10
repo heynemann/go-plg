@@ -5,6 +5,8 @@ module github.com/heynemann/go-plg/e2e
 
 go 1.27
 
+toolchain go1.27.3
+
 require (
 	example.com/rewards v1.0.0
 	github.com/aws/aws-sdk-go-v2 v1.47.5

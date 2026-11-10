@@ -5,6 +5,8 @@ module example.com/rewards
 
 go 1.27
 
+toolchain go1.27.3
+
 // Only because the contracts live in plg's own repository: a contract module requires a released plg.
 replace github.com/heynemann/go-plg => ../..
 
