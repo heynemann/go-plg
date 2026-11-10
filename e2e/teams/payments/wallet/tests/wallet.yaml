@@ -1,56 +1,119 @@
 # The wallet API is stubbed at the address its faked wallet_api_url secret gives.
 httpPolicy:
-  allowedHosts: [wallet.example.com]
+  allowedHosts:
+    - wallet.example.com
 cases:
   - name: a new reward is credited
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000001, campaign: spring, user: u000001, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: w4ll3t}
+      reward:
+        idempotencyKey: spring/u000001
+        campaign: spring
+        user: u000001
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token: w4ll3t
     http:
-      - {method: POST, url: "https://wallet.example.com/credits", status: 201, body: '{"id":"c-1"}', times: 1}
+      - method: POST
+        url: "https://wallet.example.com/credits"
+        status: 201
+        body: '{"id":"c-1"}'
+        times: 1
     expect:
-      result: {id: c-1, duplicate: false}
+      result:
+        id: c-1
+        duplicate: false
   - name: a reward the wallet had already credited is delivered, as a duplicate
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000001, campaign: spring, user: u000001, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: w4ll3t}
+      reward:
+        idempotencyKey: spring/u000001
+        campaign: spring
+        user: u000001
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token: w4ll3t
     http:
-      - {method: POST, url: "https://wallet.example.com/credits", status: 200, body: '{"id":"c-1"}'}
+      - method: POST
+        url: "https://wallet.example.com/credits"
+        status: 200
+        body: '{"id":"c-1"}'
     expect:
-      result: {id: c-1, duplicate: true}
+      result:
+        id: c-1
+        duplicate: true
   - name: the wallet's failure is the delivery's, for the platform to retry
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000002, campaign: spring, user: u000002, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: w4ll3t}
+      reward:
+        idempotencyKey: spring/u000002
+        campaign: spring
+        user: u000002
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token: w4ll3t
     http:
-      - {method: POST, url: "https://wallet.example.com/credits", status: 503, body: "wallet unavailable\n"}
+      - method: POST
+        url: "https://wallet.example.com/credits"
+        status: 503
+        body: "wallet unavailable\n"
     expect:
       error: "the wallet answered 503 for spring/u000002: wallet unavailable"
   - name: the wallet's refusal echoing the token is scrubbed
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000002, campaign: spring, user: u000002, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: w4ll3t}
+      reward:
+        idempotencyKey: spring/u000002
+        campaign: spring
+        user: u000002
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token: w4ll3t
     http:
-      - {method: POST, url: "https://wallet.example.com/credits", status: 401, body: token w4ll3t is not valid}
+      - method: POST
+        url: "https://wallet.example.com/credits"
+        status: 401
+        body: token w4ll3t is not valid
     expect:
       error: "the wallet answered 401 for spring/u000002: token [secret wallet_api_token] is not valid"
   - name: an answer without a credit id fails
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000003, campaign: spring, user: u000003, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: w4ll3t}
+      reward:
+        idempotencyKey: spring/u000003
+        campaign: spring
+        user: u000003
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token: w4ll3t
     http:
-      - {method: POST, url: "https://wallet.example.com/credits", status: 201, body: "{}"}
+      - method: POST
+        url: "https://wallet.example.com/credits"
+        status: 201
+        body: "{}"
     expect:
       error: the wallet answered 201 for spring/u000003 without a credit id
   - name: without its token the deliverer fails
     call: Deliver
     input:
-      reward: {idempotencyKey: spring/u000001, campaign: spring, user: u000001, points: 500, memo: Spring bonus}
-    secrets: {wallet_api_url: "https://wallet.example.com", wallet_api_token: null}
+      reward:
+        idempotencyKey: spring/u000001
+        campaign: spring
+        user: u000001
+        points: 500
+        memo: Spring bonus
+    secrets:
+      wallet_api_url: "https://wallet.example.com"
+      wallet_api_token:
     expect:
       error: secret "wallet_api_token" could not be resolved

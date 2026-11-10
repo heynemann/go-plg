@@ -2,30 +2,68 @@ cases:
   - name: a user with orders is screened and qualifies
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 500, orders: 3}}
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 500
+          orders: 3
     expect:
-      result: {eligible: true, reason: screened 3 orders}
+      result:
+        eligible: true
+        reason: screened 3 orders
   - name: a user without orders does not
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000002, country: US, tier: gold, spendCents: 500, orders: 0}}
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: US
+          tier: gold
+          spendCents: 500
+          orders: 0
     expect:
-      result: {eligible: false, reason: no orders to screen}
+      result:
+        eligible: false
+        reason: no orders to screen
   - name: a user in Mexico cannot be screened
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000003, country: MX, tier: gold, spendCents: 500, orders: 3}}
+      subject:
+        campaign: spring
+        user:
+          id: u000003
+          country: MX
+          tier: gold
+          spendCents: 500
+          orders: 3
     expect:
       error: no screening data for MX
   - name: a platform serving Mexico is warned
     call: Validate
     input:
-      in: {countries: [BR, MX], maxSpendCents: 0, maxOrders: 0}
+      in:
+        countries:
+          - BR
+          - MX
+        maxSpendCents: 0
+        maxOrders: 0
     expect:
-      issues: [{severity: warning, code: screening.coverage, message: "no screening data for MX: its users fail"}]
+      issues:
+        - severity: warning
+          code: screening.coverage
+          message: "no screening data for MX: its users fail"
   - name: one that does not is not
     call: Validate
     input:
-      in: {countries: [BR, US], maxSpendCents: 0, maxOrders: 0}
+      in:
+        countries:
+          - BR
+          - US
+        maxSpendCents: 0
+        maxOrders: 0
     expect:
       issues: []

@@ -2,28 +2,61 @@ cases:
   - name: a user off the watchlist qualifies
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 500, orders: 3}}
-    secrets: {watchlist_token: w4tch}
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 500
+          orders: 3
+    secrets:
+      watchlist_token: w4tch
     expect:
-      result: {eligible: true, reason: not on the watchlist}
+      result:
+        eligible: true
+        reason: not on the watchlist
   - name: a user in Mexico cannot be checked, and the token in the error is scrubbed
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000002, country: MX, tier: gold, spendCents: 500, orders: 3}}
-    secrets: {watchlist_token: w4tch}
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: MX
+          tier: gold
+          spendCents: 500
+          orders: 3
+    secrets:
+      watchlist_token: w4tch
     expect:
       error: the watchlist does not cover MX (token [secret watchlist_token])
   - name: without its token the condition fails
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 500, orders: 3}}
-    secrets: {watchlist_token: null}
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 500
+          orders: 3
+    secrets:
+      watchlist_token:
     expect:
       error: secret "watchlist_token" could not be resolved
   - name: Validate warns of the token, scrubbed
     call: Validate
     input:
-      in: {countries: [], maxSpendCents: 0, maxOrders: 0}
-    secrets: {watchlist_token: w4tch}
+      in:
+        countries: []
+        maxSpendCents: 0
+        maxOrders: 0
+    secrets:
+      watchlist_token: w4tch
     expect:
-      issues: [{severity: warning, code: watchlist.token, message: "configured with token [secret watchlist_token]"}]
+      issues:
+        - severity: warning
+          code: watchlist.token
+          message: "configured with token [secret watchlist_token]"

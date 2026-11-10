@@ -3,42 +3,98 @@ cases:
   - name: a gold member with two orders qualifies
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 0, orders: 2}}
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 0
+          orders: 2
     expect:
-      result: {eligible: true, reason: gold member with 2 orders}
+      result:
+        eligible: true
+        reason: gold member with 2 orders
   - name: one with a single order does not
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000002, country: BR, tier: gold, spendCents: 99999, orders: 1}}
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: BR
+          tier: gold
+          spendCents: 99999
+          orders: 1
     expect:
-      result: {eligible: false, reason: "gold member with 1 orders, under 2"}
+      result:
+        eligible: false
+        reason: "gold member with 1 orders, under 2"
   - name: a silver member who spent exactly 150.00 qualifies
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000003, country: PT, tier: silver, spendCents: 15000, orders: 0}}
+      subject:
+        campaign: spring
+        user:
+          id: u000003
+          country: PT
+          tier: silver
+          spendCents: 15000
+          orders: 0
     expect:
-      result: {eligible: true, reason: silver member who spent 150.00}
+      result:
+        eligible: true
+        reason: silver member who spent 150.00
   - name: a cent less does not, and the amounts keep their cents
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000004, country: PT, tier: silver, spendCents: 14905, orders: 7}}
+      subject:
+        campaign: spring
+        user:
+          id: u000004
+          country: PT
+          tier: silver
+          spendCents: 14905
+          orders: 7
     expect:
-      result: {eligible: false, reason: "silver member who spent 149.05, under 150.00"}
+      result:
+        eligible: false
+        reason: "silver member who spent 149.05, under 150.00"
   - name: bronze members are not in the programme
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000005, country: US, tier: bronze, spendCents: 29999, orders: 7}}
+      subject:
+        campaign: spring
+        user:
+          id: u000005
+          country: US
+          tier: bronze
+          spendCents: 29999
+          orders: 7
     expect:
-      result: {eligible: false, reason: bronze members are not in the loyalty programme}
+      result:
+        eligible: false
+        reason: bronze members are not in the loyalty programme
   - name: a platform allowing 150.00 of spend accepts the condition
     call: Validate
     input:
-      in: {countries: [BR], maxSpendCents: 15000, maxOrders: 0}
+      in:
+        countries:
+          - BR
+        maxSpendCents: 15000
+        maxOrders: 0
     expect:
       issues: []
   - name: a platform allowing less rejects it
     call: Validate
     input:
-      in: {countries: [BR], maxSpendCents: 9950, maxOrders: 0}
+      in:
+        countries:
+          - BR
+        maxSpendCents: 9950
+        maxOrders: 0
     expect:
-      issues: [{severity: error, code: loyal.spend, message: "requires 150.00 of spend, over the limit of 99.50"}]
+      issues:
+        - severity: error
+          code: loyal.spend
+          message: "requires 150.00 of spend, over the limit of 99.50"

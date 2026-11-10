@@ -3,9 +3,18 @@ language: typescript
 entrypoint: plugin.ts
 owner:
   maintainers:
-    - {name: Sofia Reyes, email: sofia@example.com, handle: "@sofia"}
-  team: {name: marketplace, department: commerce}
+    - name: Sofia Reyes
+      email: sofia@example.com
+      handle: "@sofia"
+  team:
+    name: marketplace
+    department: commerce
   org: rewards
   company: Example Shop
-  contact: {oncall: marketplace-oncall, channel: "#marketplace", email: marketplace@example.com}
-  links: {repository: https://git.example.com/rewards/marketplace, runbook: https://git.example.com/rewards/marketplace/north-america.md}
+  contact:
+    oncall: marketplace-oncall
+    channel: "#marketplace"
+    email: marketplace@example.com
+  links:
+    repository: https://git.example.com/rewards/marketplace
+    runbook: https://git.example.com/rewards/marketplace/north-america.md

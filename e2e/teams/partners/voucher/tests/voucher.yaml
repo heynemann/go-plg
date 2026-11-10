@@ -2,6 +2,13 @@ cases:
   - name: a reward becomes the voucher of its key
     call: Deliver
     input:
-      reward: {idempotencyKey: pilot/u000003, campaign: pilot, user: u000003, points: 999, memo: Partner trial}
+      reward:
+        idempotencyKey: pilot/u000003
+        campaign: pilot
+        user: u000003
+        points: 999
+        memo: Partner trial
     expect:
-      result: {id: voucher-pilot/u000003, duplicate: false}
+      result:
+        id: voucher-pilot/u000003
+        duplicate: false

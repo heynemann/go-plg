@@ -1,12 +1,23 @@
 implements: example.com/rewards/delivery.Deliverer@v1.0.0
 language: typescript
 entrypoint: plugin.ts
-secrets: [wallet_api_url, wallet_api_token] # the wallet API's address and bearer token, which the platform resolves
+secrets:                                    # the wallet API's address and bearer token, which the platform resolves
+  - wallet_api_url
+  - wallet_api_token
 owner:
   maintainers:
-    - {name: Ines Duarte, email: ines@example.com, handle: "@ines"}
-  team: {name: payments, department: finance}
+    - name: Ines Duarte
+      email: ines@example.com
+      handle: "@ines"
+  team:
+    name: payments
+    department: finance
   org: rewards
   company: Example Shop
-  contact: {oncall: payments-oncall, channel: "#payments", email: payments@example.com}
-  links: {repository: https://git.example.com/rewards/payments, runbook: https://git.example.com/rewards/payments/wallet.md}
+  contact:
+    oncall: payments-oncall
+    channel: "#payments"
+    email: payments@example.com
+  links:
+    repository: https://git.example.com/rewards/payments
+    runbook: https://git.example.com/rewards/payments/wallet.md

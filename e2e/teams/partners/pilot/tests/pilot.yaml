@@ -4,7 +4,12 @@ cases:
     input:
       cursor: ""
     expect:
-      result: {users: [u000003, u000012, u000016], next: ""}
+      result:
+        users:
+          - u000003
+          - u000012
+          - u000016
+        next: ""
   - name: there is no second page
     call: List
     input:
