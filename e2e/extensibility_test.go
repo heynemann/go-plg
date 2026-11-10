@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/e2e/harness"
@@ -276,6 +277,90 @@ func TestAHotSwapMidCampaignChangesLaterUsersOnly(t *testing.T) {
 			"%s: decided by its place's version",
 			user,
 		)
+	}
+}
+
+// The growth team hot-swaps its gold cohort while one of its calls is in flight, and that call, and every other,
+// succeeds: the team releases gold 1.0.1 (plugin.yaml's version, its CI run again); a campaign over the gold
+// cohort, its members 16 at a time, stops in the List call reading the page at the directory's middle (its Host
+// read waits, well within the call timeout); the release is published and the platform reloads; the call goes on.
+// plg drains the replaced version: the stopped call, which started before the swap and ends after it, runs to its
+// end on it, as do the List calls before it, and the later ones run on 1.0.1; the campaign's result and credits
+// are the oracle's, and every call's outcome is ok.
+func TestAHotSwapFailsNoCallInFlight(t *testing.T) {
+	t.Parallel()
+
+	users := harness.NewDirectory(harness.DefaultUsers).Users()
+	cursor := users[len(users)/2-1].ID // the directory's middle, where one of gold's pages starts
+
+	var paused *harness.Paused
+
+	rig := harness.NewRig(t, &harness.Options{Configure: func(cfg *platform.Config) {
+		paused = harness.PausePage(cfg.Users, cursor)
+		cfg.Users = paused
+	}})
+	campaign := springGold("swap-in-flight")
+	expected := harness.Expect(t, rig.Users, &campaign)
+	key := platform.Cohorts + "/gold"
+
+	before, err := plg.Info(rig.Platform.Container(), key)
+	require.NoError(t, err)
+
+	team := rig.Teams[harness.Growth]
+	manifest, err := os.ReadFile(filepath.Join(team.Dir, "gold", "plugin.yaml"))
+	require.NoError(t, err)
+	team.Write(t, "gold/plugin.yaml", string(manifest)+"version: 1.0.1\n")
+	team.Commit(t, "Release gold 1.0.1")
+
+	release := filepath.Join(team.CI(t, rig.Environ), "gold.plg")
+
+	type ran struct {
+		err    error
+		result platform.Result
+	}
+
+	done := make(chan ran, 1)
+
+	go func() {
+		result, failed := rig.Platform.Run(t.Context(), &campaign)
+		done <- ran{result: result, err: failed}
+	}()
+
+	paused.Await(t)
+
+	swapping := time.Now()
+
+	harness.PublishArtifact(t, rig.S3, rig.Bucket, release)
+	require.NoError(t, rig.Platform.Reload(t.Context()))
+
+	swapped := time.Now()
+	after, err := plg.Info(rig.Platform.Container(), key)
+	require.NoError(t, err)
+	require.Equal(t, "1.0.1", after.Version, "the reload swapped gold")
+
+	paused.Release()
+
+	ended := <-done
+	require.NoError(t, ended.err)
+	assert.Equal(t, expected.Result, ended.result)
+	assert.Equal(t, expected.Credits, rig.Wallet.CreditsOf(campaign.ID))
+
+	for calls := range rig.Telemetry.Calls(t) {
+		assert.Equal(t, "ok", calls.Outcome, "no call failed: %+v", calls)
+	}
+
+	run := campaignRun(t, rig.Telemetry, &campaign)
+	lists := named(byParent(rig.Telemetry.Trace(run.TraceID()))[run.SpanID()], "plg.call "+key+".List")
+	slices.SortFunc(lists, func(a, b tracetest.SpanStub) int { return a.StartTime.Compare(b.StartTime) })
+	require.Len(t, lists, harness.ExpectPages(t, rig.Users, &campaign), "a List call per page")
+
+	stopped := len(users) / 2 / harness.GoldPageSize // the List call reading the page at cursor
+	assert.True(t, lists[stopped].StartTime.Before(swapping) && lists[stopped].EndTime.After(swapped),
+		"the stopped List call was in flight across the swap")
+
+	for i := range lists {
+		want := map[bool]string{true: before.Version, false: after.Version}[i <= stopped]
+		assert.Equal(t, want, attr(lists[i].Attributes, "version"), "List call %d", i)
 	}
 }
 

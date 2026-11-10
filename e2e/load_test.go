@@ -390,7 +390,8 @@ type totals struct {
 }
 
 // verifyPhase checks each campaign of the phase against the oracle (verifyCampaign), then has the wallet forget
-// its credits, and returns their totals.
+// its credits, and returns their totals; a member failed by anything but the deliverer, whose requests the wallet
+// fails or holds (a condition's call failing across a swap), fails the test, whatever the error budget allows.
 func verifyPhase(t *testing.T, rig *harness.Rig, watch *probe, shapes []shape, done *phase) totals {
 	t.Helper()
 
@@ -412,6 +413,11 @@ func verifyPhase(t *testing.T, rig *harness.Rig, watch *probe, shapes []shape, d
 			sum.failures[key] += n
 			sum.failed += n
 		}
+	}
+
+	for key := range sum.failures {
+		assert.Equal(t, discardedKey, key, "only the deliverer, whose requests the wallet fails or holds, failed "+
+			"members: no cohort or condition call failed, the swaps' included")
 	}
 
 	return sum

@@ -2245,9 +2245,10 @@ serves them in every guest.
   at page boundaries, conditions combining with AND, one rule's Go, Lua and TypeScript ports agreeing, a failing
   plugin's errors counted against it), extensibility (a new team's condition live on the next poll, a platform
   built with the contracts' v1.1.0 release serving v1.0.0 pins, a v2 plugin skipped visibly, a hot swap during a
-  campaign changing later members only) and operability (one trace per campaign down to the wallet, metrics by
-  owner, panics and hangs isolated and shown to their teams by `plg status` and `plg events`, a version failing
-  validation keeping the last good one serving, no secret in logs, spans, events or admin answers).
+  campaign changing later members only, and one failing no call in flight) and operability (one trace per campaign
+  down to the wallet, metrics by owner, panics and hangs isolated and shown to their teams by `plg status` and
+  `plg events`, a version failing validation keeping the last good one serving, no secret in logs, spans, events or
+  admin answers).
 
 `make complex-e2e` lints the module and runs its scenarios with `-race`, then its load test without it (Docker,
 `git` and `sh` required); it is not part of `make check`. The load test (`e2e/load_test.go`) runs a fixed amount of

@@ -240,7 +240,7 @@ func ExpectPages(tb testing.TB, dir *Directory, campaign *platform.Campaign) int
 
 	switch campaign.Cohort {
 	case "gold":
-		return pages(len(dir.Users()), goldPageSize)
+		return pages(len(dir.Users()), GoldPageSize)
 	case "churn-risk":
 		return pages(members, vendorPageSize)
 	case "everyone":
@@ -254,8 +254,8 @@ func ExpectPages(tb testing.TB, dir *Directory, campaign *platform.Campaign) int
 	}
 }
 
-// goldPageSize is how many directory users each of gold's List calls reads.
-const goldPageSize = 100
+// GoldPageSize is how many directory users each of gold's List calls reads.
+const GoldPageSize = 100
 
 // pages is how many pages of size hold n items, one empty page when there is none.
 func pages(n, size int) int {
