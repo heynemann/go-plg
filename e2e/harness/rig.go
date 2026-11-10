@@ -34,7 +34,7 @@ const DefaultUsers = 1000
 const CloseTimeout = time.Minute
 
 // maxRigs is how many rigs a test binary runs at once. Each holds MinIO, its teams' CI and a platform whose pools
-// of guest instances take hundreds of MB under the race detector: the 15 scenarios at once, as go test runs
+// of guest instances take hundreds of MB under the race detector: the scenarios at once (15 when measured), as go test runs
 // parallel tests on a 28-CPU machine, peaked at 14.9 GB. Parallel tests beyond it wait in NewRig for a slot.
 const maxRigs = 4
 
