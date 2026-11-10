@@ -119,24 +119,7 @@ func (p *Platform) Run(ctx context.Context, campaign *Campaign) (Result, error) 
 		return Result{}, err
 	}
 
-	members := make(chan string)
-
-	var workers sync.WaitGroup
-
-	for range p.limits.Concurrency {
-		workers.Go(func() {
-			for member := range members {
-				run.member(ctx, member)
-			}
-		})
-	}
-
-	err = run.list(ctx, members)
-
-	close(members)
-	workers.Wait()
-
-	result := run.result()
+	result, err := run.run(ctx)
 	span.SetAttributes(attribute.Int("campaign.members", result.Members),
 		attribute.Int("campaign.eligible", result.Eligible), attribute.Int("campaign.delivered", result.Delivered))
 
@@ -153,28 +136,17 @@ func (p *Platform) newRun(ctx context.Context, campaign *Campaign) (*campaignRun
 		return nil, fmt.Errorf("%w: no ID", ErrCampaign)
 	}
 
-	run := &campaignRun{
-		platform:   p,
-		campaign:   *campaign,
-		cohortKey:  Cohorts + "/" + campaign.Cohort,
-		deliverKey: Deliveries + "/" + campaign.Deliverer,
-		failures:   map[string]*atomic.Int64{Directory: {}},
-	}
-
-	var err error
-
-	run.cohort, err = plg.Get[cohort.Provider](ctx, p.container, run.cohortKey)
+	provider, err := plg.Get[cohort.Provider](ctx, p.container, Cohorts+"/"+campaign.Cohort)
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrCampaign, campaign.ID, err)
 	}
 
-	run.deliverer, err = plg.Get[delivery.Deliverer](ctx, p.container, run.deliverKey)
+	deliverer, err := plg.Get[delivery.Deliverer](ctx, p.container, Deliveries+"/"+campaign.Deliverer)
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrCampaign, campaign.ID, err)
 	}
 
-	run.failures[run.cohortKey] = &atomic.Int64{}
-	run.failures[run.deliverKey] = &atomic.Int64{}
+	conditions := make([]condition, 0, len(campaign.Conditions))
 
 	for _, name := range campaign.Conditions {
 		key := Conditions + "/" + name
@@ -184,11 +156,56 @@ func (p *Platform) newRun(ctx context.Context, campaign *Campaign) (*campaignRun
 			return nil, fmt.Errorf("%w %s: %w", ErrCampaign, campaign.ID, err)
 		}
 
-		run.conditions = append(run.conditions, condition{plugin: plugin, key: key})
-		run.failures[key] = &atomic.Int64{}
+		conditions = append(conditions, condition{plugin: plugin, key: key})
 	}
 
-	return run, nil
+	return p.runOf(campaign, provider, deliverer, conditions), nil
+}
+
+// runOf returns a run of campaign with its plugins: provider, its cohort, deliverer, its deliverer, and
+// conditions, its conditions in order, each with its key.
+func (p *Platform) runOf(
+	campaign *Campaign, provider cohort.Provider, deliverer delivery.Deliverer, conditions []condition,
+) *campaignRun {
+	run := &campaignRun{
+		platform:   p,
+		campaign:   *campaign,
+		cohort:     provider,
+		deliverer:  deliverer,
+		conditions: conditions,
+		cohortKey:  Cohorts + "/" + campaign.Cohort,
+		deliverKey: Deliveries + "/" + campaign.Deliverer,
+	}
+	run.failures = map[string]*atomic.Int64{Directory: {}, run.cohortKey: {}, run.deliverKey: {}}
+
+	for _, cond := range conditions {
+		run.failures[cond.key] = &atomic.Int64{}
+	}
+
+	return run
+}
+
+// run lists the cohort's members and processes them, as many at once as Limits.Concurrency, and returns what it
+// did, with the error that ended the listing early.
+func (r *campaignRun) run(ctx context.Context) (Result, error) {
+	members := make(chan string)
+
+	var workers sync.WaitGroup
+
+	for range r.platform.limits.Concurrency {
+		workers.Go(func() {
+			for member := range members {
+				r.member(ctx, member)
+			}
+		})
+	}
+
+	err := r.list(ctx, members)
+
+	close(members)
+	workers.Wait()
+
+	return r.result(), err
 }
 
 // list sends the cohort's members to members, a page at a time, until the last page, a page it cannot get, or

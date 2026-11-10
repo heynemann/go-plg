@@ -3,6 +3,7 @@
 package e2e_test
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -153,7 +154,8 @@ func runSpan(t *testing.T, telemetry *harness.Telemetry, campaign *platform.Camp
 // A cohort is listed whole, each member once, whatever its size against the page size: the everyone cohort
 // returns the directory a page of cohort.MaxPageSize users at a time, and platforms serving directories of every
 // size around one and two pages (an empty one too) credit every user once, after as many List calls as the
-// directory has pages.
+// directory has pages. A page over cohort.MaxPageSize (a directory, everyone's Host, answering one user more than
+// asked for) the platform refuses: its campaign fails, counting the cohort's failure once, after one List call.
 func TestCohortsAreListedWholeAtPageBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -189,6 +191,51 @@ func TestCohortsAreListedWholeAtPageBoundaries(t *testing.T) {
 				"one List call per page of the directory, %d", harness.ExpectPages(t, dir, &campaign))
 		})
 	}
+
+	t.Run("a page over the maximum", func(t *testing.T) {
+		t.Parallel()
+
+		dir := harness.NewDirectory(page)
+		telemetry := harness.NewTelemetry(t)
+		served := rig.NewPlatform(t, &harness.Options{
+			Limits: platform.Limits{PoolMin: 1, PoolMax: 1, ConcurrentCalls: platformConcurrency},
+			Configure: func(cfg *platform.Config) {
+				cfg.Users, cfg.TracerProvider, cfg.MeterProvider = overfilled{dir}, telemetry.TracerProvider,
+					telemetry.MeterProvider
+			},
+		})
+		campaign := platform.Campaign{
+			ID: "pages-over", Cohort: "everyone", Deliverer: "wallet",
+			Reward: platform.Reward{Points: 1, Memo: "Thanks for being here"},
+		}
+
+		result, err := served.Run(t.Context(), &campaign)
+		require.ErrorIs(t, err, platform.ErrCampaign)
+		require.ErrorContains(t, err, fmt.Sprintf("invalid page: %d users, over %d", page+1, page))
+
+		assert.Equal(t, platform.Result{Failures: map[string]int{platform.Cohorts + "/everyone": 1}}, result,
+			"the cohort's failure counted once, no member processed")
+		assert.Empty(t, rig.Wallet.CreditsOf(campaign.ID))
+		assert.Equal(t, map[harness.Calls]int64{{
+			Key: platform.Cohorts + "/everyone", Method: "List", Outcome: "ok", Team: harness.Insights,
+			Org: harness.Org, Company: harness.Company,
+		}: 1}, telemetry.Calls(t), "one List call: the refused page is not asked for again")
+	})
+}
+
+// overfilled is a directory whose every page holds one user more than asked for: its first user again.
+type overfilled struct {
+	*harness.Directory
+}
+
+// Page returns the directory's page at cursor, its first user again at its end.
+func (o overfilled) Page(ctx context.Context, cursor string, limit int) (cohort.UserPage, error) {
+	page, err := o.Directory.Page(ctx, cursor, limit)
+	if err == nil && len(page.Users) > 0 {
+		page.Users = append(page.Users, page.Users[0])
+	}
+
+	return page, err //nolint:wrapcheck // the directory's own
 }
 
 // platformConcurrency is the default Limits.Concurrency: how many members a campaign processes at once, and so
