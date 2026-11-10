@@ -214,10 +214,18 @@ func TestAHotSwapMidCampaignChangesLaterUsersOnly(t *testing.T) {
 		`"lives in US, not in BR or PT"`,
 		`"lives in US, not in BR or PT or MX"`,
 	)
-	edit(t, team, "country/tests/country.yaml", `message: "targets PT, which the platform does not serve"}]`,
-		`message: "targets PT, which the platform does not serve"},`+
-			` {severity: error, code: country.unserved, message: "targets MX, which the platform does not serve"}]`)
-	edit(t, team, "country/tests/country.yaml", "countries: [US, PT, BR]", "countries: [US, PT, BR, MX]")
+	edit(t, team, "country/tests/country.yaml", "message: \"targets PT, which the platform does not serve\"\n",
+		"message: \"targets PT, which the platform does not serve\"\n"+
+			"        - severity: error\n"+
+			"          code: country.unserved\n"+
+			"          message: \"targets MX, which the platform does not serve\"\n")
+	edit(
+		t,
+		team,
+		"country/tests/country.yaml",
+		"          - BR\n        maxSpendCents: 0\n        maxOrders: 0\n    expect:\n      issues: []",
+		"          - BR\n          - MX\n        maxSpendCents: 0\n        maxOrders: 0\n    expect:\n      issues: []",
+	)
 	team.Commit(t, "Run campaigns in Mexico too")
 	harness.PublishArtifact(t, rig.S3, rig.Bucket, filepath.Join(team.CI(t, rig.Environ), "country.plg"))
 	require.NoError(t, rig.Platform.Reload(t.Context()))

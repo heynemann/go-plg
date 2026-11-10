@@ -427,13 +427,26 @@ func TestAValidationFailingVersionKeepsTheLastGoodServing(t *testing.T) {
   - name: a user who spent exactly the minimum qualifies
     call: Eligible
     input:
-      subject: {campaign: spring, user: {id: u000001, country: BR, tier: gold, spendCents: 25000, orders: 2}}
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 25000
+          orders: 2
     expect:
-      result: {eligible: true, reason: spent 25000 cents}
+      result:
+        eligible: true
+        reason: spent 25000 cents
   - name: a platform allowing the minimum accepts the condition
     call: Validate
     input:
-      in: {countries: [BR], maxSpendCents: 25000, maxOrders: 10}
+      in:
+        countries:
+          - BR
+        maxSpendCents: 25000
+        maxOrders: 10
     expect:
       issues: []
 `)

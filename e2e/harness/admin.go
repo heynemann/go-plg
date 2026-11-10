@@ -55,7 +55,7 @@ func (r *Rig) NewAdmin(tb testing.TB) *Admin {
 	config := tb.TempDir()
 	require.NoError(tb, os.MkdirAll(filepath.Join(config, "plg"), dirMode))
 	require.NoError(tb, os.WriteFile(filepath.Join(config, "plg", "profiles.yaml"), fmt.Appendf(nil,
-		"profiles:\n  - {name: rewards, url: %q, token: {env: %s}}\n", server.URL, adminTokenEnv), fileMode))
+		"profiles:\n  - name: rewards\n    url: %q\n    token:\n      env: %s\n", server.URL, adminTokenEnv), fileMode))
 
 	return &Admin{
 		URL:     server.URL,
