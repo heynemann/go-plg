@@ -1,7 +1,7 @@
-// An eligibility condition written in TypeScript: the insights team's loyalty rule. Gold members qualify with at least two orders in the last year,
-// silver members with at least 150.00 of spend, and no one else; the reason says which, with the amounts. The
-// team keeps the rule in Go, Lua and TypeScript (loyal-go, loyal-lua, loyal-ts), every port held to the same test
-// cases, and the platform's tests to the same decisions over every user.
+// An eligibility condition written in TypeScript: the insights team's loyalty rule. Gold members qualify with at
+// least two orders in the last year, silver members with at least 150.00 of spend, and no one else; the reason says
+// which, with the amounts. The team keeps the rule in Go, Lua and TypeScript (loyal-go, loyal-lua, loyal-ts), every
+// port held to the same test cases, and the platform's tests to the same decisions over every user.
 // Its types are plg.d.ts's (plg types writes them).
 
 // The yearly orders a gold member needs, and the yearly spend a silver member needs.
