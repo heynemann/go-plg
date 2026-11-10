@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -533,6 +534,59 @@ func TestSecretsNeverLeak(t *testing.T) {
 		}
 
 		assert.Contains(t, text, "[secret watchlist_token]", "%s hold what watchlist leaked, scrubbed", surface)
+	}
+}
+
+// A plugin reads only the secrets the vault holds for its platform key, whatever owner and secrets its
+// plugin.yaml declares: the fraud team's watchlist, rewritten to claim the payments team as its owner and to read
+// the wallet's token (its plugin.yaml, code and tests), passes its own CI and is published, but its Validate
+// cannot resolve the token, so the platform rejects it, and the token is nowhere in its events or the admin
+// answers.
+func TestAPluginClaimingAnotherTeamCannotReadItsSecret(t *testing.T) {
+	t.Parallel()
+
+	events, log := harness.NewEvents(), harness.NewLog()
+	rig := harness.NewRig(t, &harness.Options{
+		Configure: func(cfg *platform.Config) {
+			cfg.OnEvent = events.OnEvent
+			cfg.Logger = slog.New(slog.NewJSONHandler(log, nil))
+		},
+	})
+	key := platform.Conditions + "/watchlist"
+
+	team := harness.CopyTeam(t, harness.Fraud)
+	edit(t, team, "watchlist/plugin.yaml", "name: fraud", "name: "+harness.Payments)
+
+	for _, path := range []string{"watchlist/plugin.yaml", "watchlist/plugin.go", "watchlist/tests/watchlist.yaml"} {
+		content, err := os.ReadFile(filepath.Join(team.Dir, filepath.FromSlash(path)))
+		require.NoError(t, err)
+		require.Contains(t, string(content), "watchlist_token", path)
+		team.Write(t, path, strings.ReplaceAll(string(content), "watchlist_token", "wallet_api_token"))
+	}
+
+	team.Commit(t, "Read the wallet's token as the payments team")
+	harness.PublishArtifact(t, rig.S3, rig.Bucket, filepath.Join(team.CI(t, rig.Environ), "watchlist.plg"))
+
+	err := rig.Platform.Reload(t.Context())
+	require.ErrorIs(t, err, plg.ErrLoad)
+	require.ErrorContains(t, err, `Validate returned an error: plg: secret "wallet_api_token" could not be resolved`)
+
+	rejected := events.Wait(
+		t,
+		func(event plg.Event) bool { return event.Key == key && event.Kind == plg.EventRejected },
+	)
+	assert.Equal(t, harness.Payments, rejected.Owner.Team.Name, "the plugin claimed the payments team")
+
+	state, err := plg.Info(rig.Platform.Container(), key)
+	require.NoError(t, err)
+	assert.Equal(t, plg.StatusRejected, state.Status, "the impostor never serves")
+	assert.Contains(t, log.String(), "the vault holds no such secret: wallet_api_token of conditions/watchlist",
+		"the vault refused it by its platform key")
+
+	for surface, text := range map[string]string{
+		"logs": log.String(), "events": eventsText(t, rig.Platform.Container()), "admin": adminText(t, rig.Platform),
+	} {
+		assert.NotContains(t, text, harness.WalletToken, "%s hold no wallet token", surface)
 	}
 }
 

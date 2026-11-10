@@ -41,9 +41,10 @@ const maxRigs = 4
 // rigSlots holds a token per running rig, which its test's cleanup takes back last.
 var rigSlots = make(chan struct{}, maxRigs) //nolint:gochecknoglobals // the test binary's, shared by its tests' rigs
 
-// Vault resolves the plugins' secrets by their owning team: the value of "<team>/<secret name>", so a team reads
-// only its own secrets whatever names another team's plugin.yaml declares. It is immutable, hence safe for
-// concurrent use.
+// Vault resolves the plugins' secrets by the platform's key of the plugin asking: the value of "<plugin
+// key>/<secret name>" ("deliveries/wallet/wallet_api_token"). The key is where the platform found the plugin, not
+// what its plugin.yaml declares, so a plugin naming another team as its owner and another plugin's secret reads
+// nothing. It is immutable, hence safe for concurrent use.
 type Vault map[string]string
 
 // errNoSecret is a secret the vault does not hold.
@@ -52,9 +53,9 @@ var errNoSecret = errors.New("the vault holds no such secret")
 // Resolver returns the platform's secret resolver (Config.Secrets) reading v.
 func (v Vault) Resolver() func(ctx context.Context, info plg.PluginInfo, name string) (string, error) {
 	return func(_ context.Context, info plg.PluginInfo, name string) (string, error) {
-		value, ok := v[info.Owner.Team.Name+"/"+name]
+		value, ok := v[info.Key+"/"+name]
 		if !ok {
-			return "", fmt.Errorf("%w: %s of team %q", errNoSecret, name, info.Owner.Team.Name)
+			return "", fmt.Errorf("%w: %s of %s", errNoSecret, name, info.Key)
 		}
 
 		return value, nil
@@ -132,8 +133,10 @@ func NewRig(tb testing.TB, opts *Options) *Rig {
 	rig.Wallet = NewWallet(tb, WalletToken)
 	rig.Vendor = NewVendor(tb, VendorToken, rig.Users)
 	rig.Vault = Vault{
-		CRM + "/vendor_api_url": rig.Vendor.URL(), CRM + "/vendor_api_token": VendorToken,
-		Payments + "/wallet_api_token": WalletToken, Fraud + "/watchlist_token": WatchlistToken,
+		platform.Cohorts + "/churn-risk/vendor_api_url":    rig.Vendor.URL(),
+		platform.Cohorts + "/churn-risk/vendor_api_token":  VendorToken,
+		platform.Deliveries + "/wallet/wallet_api_token":   WalletToken,
+		platform.Conditions + "/watchlist/watchlist_token": WatchlistToken,
 	}
 	rig.S3 = containertest.StartMinIO(tb)
 	rig.Bucket = containertest.NewBucket(tb, rig.S3)
