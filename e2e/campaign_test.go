@@ -4,7 +4,6 @@ package e2e_test
 
 import (
 	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,16 +15,6 @@ import (
 	"github.com/heynemann/go-plg/e2e/harness"
 	"github.com/heynemann/go-plg/e2e/platform"
 )
-
-// owner returns the team owning the plugin key, as its plugin.yaml says; every plugin is of the org rewards, of
-// the company Example Shop.
-func owner(key string) string {
-	return map[string]string{
-		"cohorts/gold": harness.Growth, "conditions/min-spend": harness.Growth,
-		"cohorts/churn-risk": harness.CRM, "conditions/country": harness.CRM,
-		"deliveries/wallet": harness.Payments, "conditions/active-buyer": harness.Payments,
-	}[key]
-}
 
 // The smoke test of the whole path: the three teams' CIs (plg validate and plg pack, built from this checkout)
 // pack their plugins in Go, Lua and TypeScript, the artifacts are published to MinIO, the platform serves them
@@ -65,8 +54,9 @@ func TestRewardsPlatformRunsACampaign(t *testing.T) {
 		assert.Equal(t, expected.Result, result, "%s did what the oracle says", campaign.ID)
 		assert.Equal(t, expected.Credits, rig.Wallet.CreditsOf(campaign.ID), "%s credited the oracle's", campaign.ID)
 
-		pages := assertOneTrace(t, rig, campaign, result)
-		for key, n := range expectedCalls(rig, campaign, pages) {
+		assertOneTrace(t, rig, campaign, result)
+
+		for key, n := range harness.ExpectCalls(t, rig.Users, campaign) {
 			calls[key] += n
 		}
 	}
@@ -77,66 +67,21 @@ func TestRewardsPlatformRunsACampaign(t *testing.T) {
 	assert.Zero(t, rig.Vendor.Refused(), "the cohort always sent the vendor's token")
 }
 
-// expectedCalls returns the calls campaign made when every plugin answered at its first attempt, as plg counts
-// them: the cohort's List once per page, each condition asked about the members every condition before it
-// accepted, and Deliver once per eligible member.
-func expectedCalls(rig *harness.Rig, campaign *platform.Campaign, pages int) map[harness.Calls]int64 {
-	calls := map[harness.Calls]int64{}
-	call := func(key, method string) harness.Calls {
-		return harness.Calls{
-			Key: key, Method: method, Outcome: "ok", Team: owner(key), Org: "rewards", Company: "Example Shop",
-		}
-	}
-	inCohort, conditions := harness.CohortRules()[campaign.Cohort], harness.ConditionRules()
-
-	calls[call(platform.Cohorts+"/"+campaign.Cohort, "List")] = int64(pages)
-
-	for _, user := range rig.Users.Users() {
-		if !inCohort(user) {
-			continue
-		}
-
-		eligible := true
-
-		for _, key := range campaign.Conditions {
-			calls[call(platform.Conditions+"/"+key, "Eligible")]++
-
-			if !conditions[key](user) {
-				eligible = false
-
-				break
-			}
-		}
-
-		if eligible {
-			calls[call(platform.Deliveries+"/"+campaign.Deliverer, "Deliver")]++
-		}
-	}
-
-	return calls
-}
-
-// assertOneTrace checks that campaign was one trace: one campaign.run span, the cohort's List calls its children
-// (each making the Host or HTTP calls its cohort makes), a campaign.user child per member, the members' condition
-// calls and the eligible ones' Deliver calls below theirs, and each Deliver's POST to the wallet below it, whose
-// traceparent the wallet received. It returns how many pages the cohort listed.
-func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign, result platform.Result) int {
+// assertOneTrace checks that campaign was one trace: one campaign.run span, the cohort's List calls its children,
+// one per page the oracle expects (each making the Host or HTTP calls its cohort makes), a campaign.user child per
+// member, the members' condition calls and the eligible ones' Deliver calls below theirs, and each Deliver's POST
+// to the wallet below it, whose traceparent the wallet received.
+func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign, result platform.Result) {
 	t.Helper()
 
-	runs := slices.DeleteFunc(rig.Telemetry.SpansNamed("campaign.run"), func(run tracetest.SpanStub) bool {
-		return attr(run.Attributes, "campaign.id") != campaign.ID
-	})
-
-	require.Len(t, runs, 1, "one campaign.run span")
-
-	run := runs[0].SpanContext
+	run := campaignRun(t, rig.Telemetry, campaign)
 	children := byParent(rig.Telemetry.Trace(run.TraceID()))
 
 	cohortCall := "plg.call " + platform.Cohorts + "/" + campaign.Cohort + ".List"
 	lists := named(children[run.SpanID()], cohortCall)
 	users := named(children[run.SpanID()], "campaign.user")
 
-	require.NotEmpty(t, lists, "the cohort's pages are the run's children")
+	assert.Len(t, lists, harness.ExpectPages(t, rig.Users, campaign), "the cohort's pages are the run's children")
 	assert.Len(t, users, result.Members, "a campaign.user span per member, the run's child")
 	assert.Len(t, children[run.SpanID()], len(lists)+len(users), "the run has no other child")
 
@@ -153,8 +98,6 @@ func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign,
 	}
 
 	assert.Equal(t, result.Delivered, delivered, "every delivery is in the campaign's trace")
-
-	return len(lists)
 }
 
 // assertMember checks the spans of one member and reports whether it was delivered: its condition calls are

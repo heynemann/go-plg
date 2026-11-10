@@ -296,7 +296,7 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 		Failures: map[string]int{voucher: pilots}, Members: pilots, Eligible: pilots, Retries: attempts - pilots,
 	}, results[1], "every attempt of every pilot stopped at the timeout, counted against voucher")
 
-	admin := harness.NewAdmin(t, rig.Platform.AdminHandler())
+	admin := rig.NewAdmin(t)
 	status := admin.Table(t, "status")
 	require.Equal(t, []string{"KEY", "STATUS", "VERSION", "LANGUAGE", "TEAM", "PANICS", "PROBLEM"}, status[0])
 
@@ -463,7 +463,7 @@ func TestAValidationFailingVersionKeepsTheLastGoodServing(t *testing.T) {
 	assert.Equal(t, good.Version, state.Version, "the first version serves on")
 	assert.Equal(t, rejected.Version, state.RejectedVersion)
 
-	admin := harness.NewAdmin(t, rig.Platform.AdminHandler())
+	admin := rig.NewAdmin(t)
 	status := admin.Table(t, "status", "-team", harness.Growth)
 	require.Len(t, status, 3, "plg status -team growth: the header, gold and min-spend")
 

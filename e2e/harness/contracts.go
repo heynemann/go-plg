@@ -50,13 +50,13 @@ func Root(tb testing.TB) string {
 	return filepath.Join(filepath.Dir(file), "..")
 }
 
-// Environ builds the plg command from this checkout and returns the environment the teams' commands run in: plg
-// first on the PATH, and the go command resolving the contract module at every version [Modules] holds through an
-// offline GOPROXY, into a module cache of tb.
-func Environ(tb testing.TB) []string {
+// Environ returns the environment the teams' commands run in: bin (holding the plg command built from this
+// checkout, authorrepo.Command's) first on the PATH, and the go command resolving the contract module at every
+// version [Modules] holds through an offline GOPROXY, into a module cache of tb.
+func Environ(tb testing.TB, bin string) []string {
 	tb.Helper()
 
-	return authorrepo.ProxyEnviron(tb, authorrepo.Command(tb), Modules(tb))
+	return authorrepo.ProxyEnviron(tb, bin, Modules(tb))
 }
 
 // Modules lays out, in a directory of tb, the contract module's versions as a module proxy serves them, each a

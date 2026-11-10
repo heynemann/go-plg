@@ -14,6 +14,7 @@ import (
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/e2e/platform"
+	"github.com/heynemann/go-plg/examples/authorrepo"
 	"github.com/heynemann/go-plg/examples/containertest"
 )
 
@@ -105,6 +106,8 @@ type Rig struct {
 	Vault Vault
 	// Bucket is where the artifacts are published.
 	Bucket string
+	// bin holds the plg command built from this checkout, which the teams' CI and NewAdmin run.
+	bin string
 	// Environ is the environment of the teams' commands (Environ's), to run their CI again after a change.
 	Environ []string
 	// Published are the platform keys of the plugins published.
@@ -134,7 +137,8 @@ func NewRig(tb testing.TB, opts *Options) *Rig {
 	}
 	rig.S3 = containertest.StartMinIO(tb)
 	rig.Bucket = containertest.NewBucket(tb, rig.S3)
-	rig.Environ = Environ(tb)
+	rig.bin = authorrepo.Command(tb)
+	rig.Environ = Environ(tb, rig.bin)
 
 	for _, name := range options.Teams {
 		team := CopyTeam(tb, name)

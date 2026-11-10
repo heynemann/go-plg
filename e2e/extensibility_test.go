@@ -112,7 +112,7 @@ func TestAPluginOfTheNextMajorIsSkippedVisibly(t *testing.T) {
 	require.NotNil(t, state.Rejection)
 	require.ErrorIs(t, state.Rejection.Err, plg.ErrOtherInterface)
 
-	admin := harness.NewAdmin(t, rig.Platform.AdminHandler())
+	admin := rig.NewAdmin(t)
 	row := tableRow(t, admin.Table(t, "status"), key)
 	assert.Equal(t, []string{"skipped", "lua", harness.NextGen, "0"}, []string{row[1], row[3], row[4], row[5]},
 		"plg status: skipped, its language, its team, no panic")

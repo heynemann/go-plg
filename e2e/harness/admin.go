@@ -15,7 +15,6 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/require"
 
-	"github.com/heynemann/go-plg/examples/authorrepo"
 	"github.com/heynemann/go-plg/internal/adminjson"
 )
 
@@ -36,10 +35,12 @@ type Admin struct {
 	environ []string
 }
 
-// NewAdmin serves handler behind AdminToken until tb ends, builds plg and writes the profile naming the endpoint.
-func NewAdmin(tb testing.TB, handler http.Handler) *Admin {
+// NewAdmin serves the rig's platform's admin handler (platform.AdminHandler) behind AdminToken until tb ends, and
+// writes the profile naming the endpoint for the rig's plg command.
+func (r *Rig) NewAdmin(tb testing.TB) *Admin {
 	tb.Helper()
 
+	handler := r.Platform.AdminHandler()
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer "+AdminToken {
 			http.Error(response, "a valid bearer token is required", http.StatusUnauthorized)
@@ -58,7 +59,7 @@ func NewAdmin(tb testing.TB, handler http.Handler) *Admin {
 
 	return &Admin{
 		URL:     server.URL,
-		bin:     filepath.Join(authorrepo.Command(tb), "plg"),
+		bin:     filepath.Join(r.bin, "plg"),
 		environ: append(os.Environ(), "XDG_CONFIG_HOME="+config, adminTokenEnv+"="+AdminToken),
 	}
 }
