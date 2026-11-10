@@ -29,14 +29,15 @@ import (
 // List calls are the run's children, each reading the directory through the Host (gold) or the vendor's API
 // (churn-risk) below it; every credit the wallet applied carries the traceparent of a plg.http POST of that
 // campaign's trace, below the Deliver call of the credited member's campaign.user, below the run. The 503s are
-// failed Deliver calls of their member, followed by the one that delivered.
+// failed Deliver calls of their member, followed by the one that delivered: every reward gets one attempt more than
+// the 503s, so that whichever members they fall on, even all on one, every reward is delivered.
 func TestEachCampaignIsOneTraceDownToTheWallet(t *testing.T) {
 	t.Parallel()
 
-	rig := harness.NewRig(t, nil)
+	failed := 3
+	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{DeliveryAttempts: failed + 1}})
 	campaigns := []platform.Campaign{springGold("traced-spring-gold"), winBack("traced-win-back")}
 	results := make([]platform.Result, len(campaigns))
-	failed := 3
 
 	rig.Wallet.FailNext(failed)
 
