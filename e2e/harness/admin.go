@@ -86,7 +86,7 @@ func (a *Admin) Plg(tb testing.TB, args ...string) string {
 var cellGap = regexp.MustCompile(" {2,}")
 
 // Table runs plg with args (status or events, printing a table) and returns its rows, the header first, each cut
-// into the header's cells: the last cell keeps whatever it holds.
+// into the header's cells, every row required to be as wide as the header: the last cell keeps whatever it holds.
 func (a *Admin) Table(tb testing.TB, args ...string) [][]string {
 	tb.Helper()
 
@@ -95,7 +95,10 @@ func (a *Admin) Table(tb testing.TB, args ...string) [][]string {
 	rows := make([][]string, 0, len(lines))
 
 	for _, line := range lines {
-		rows = append(rows, cellGap.Split(strings.TrimRight(line, " "), columns))
+		row := cellGap.Split(strings.TrimRight(line, " "), columns)
+		require.Len(tb, row, columns, "plg %s: a row as wide as the header: %q", strings.Join(args, " "), line)
+
+		rows = append(rows, row)
 	}
 
 	return rows
