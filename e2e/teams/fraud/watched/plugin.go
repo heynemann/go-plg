@@ -2,8 +2,9 @@
 // watchlist API's bearer token, the secret watchlist_token.
 //
 // It handles that secret carelessly on purpose, the platform's end-to-end tests' fixture for a secret in a
-// successful result, which plg does not scrub: it puts the token in its pages' next cursor, and its cursors
-// loop, so that the platform refuses its second page.
+// successful result, which plg does not scrub: it puts the token in its pages' one member ID, a user the
+// platform's directory does not know, and in their next cursor, and its cursors loop, so that the platform
+// refuses its second page.
 package watched
 
 import (
@@ -29,12 +30,12 @@ func (provider) IsMember(context.Context, string) (bool, error) {
 	return false, nil
 }
 
-// List returns no users and a next cursor holding the token, the same at every page.
+// List returns one member and a next cursor, both holding the token, the same at every page.
 func (provider) List(ctx context.Context, _ string) (cohort.Page, error) {
 	token, err := plugin.Secret(ctx, tokenSecret)
 	if err != nil {
 		return cohort.Page{}, err
 	}
 
-	return cohort.Page{Users: []string{}, Next: "watched with token " + token}, nil
+	return cohort.Page{Users: []string{"watched-" + token}, Next: "watched with token " + token}, nil
 }

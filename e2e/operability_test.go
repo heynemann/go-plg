@@ -504,10 +504,11 @@ func TestAValidationFailingVersionKeepsTheLastGoodServing(t *testing.T) {
 // the vault holds and two print and report their own: campaigns use the CRM vendor's token (churn-risk), the
 // wallet's (wallet, answered 503 a few times) and the fraud team's watchlist token, which watchlist prints on
 // every call, warns of from Validate, and puts in its errors, its panics and the reason it refuses a member for,
-// and which watched puts in its cursors, which loop, so the platform refuses its second page. Logged at Debug,
+// and which watched puts in its one member's ID, a user the directory does not know, and in its cursors, which
+// loop, so the platform refuses its second page. Logged at Debug,
 // traced, kept as events and served by the admin handler, none of it holds a token; what watchlist leaked is
-// there, as plg's "[secret watchlist_token]", in each. A reason and a cursor are successful results, which plg
-// does not scrub: the platform keeps them out of spans and errors.
+// there, as plg's "[secret watchlist_token]", in each. A reason, a member ID and a cursor are successful results,
+// which plg does not scrub: the platform keeps them out of spans and errors.
 func TestSecretsNeverLeak(t *testing.T) {
 	t.Parallel()
 
@@ -541,7 +542,9 @@ func TestSecretsNeverLeak(t *testing.T) {
 	}
 	result, err := rig.Platform.Run(t.Context(), &watched)
 	require.ErrorIs(t, err, platform.ErrCampaign, "watched's looping cursor is refused")
-	assert.Equal(t, platform.Result{Failures: map[string]int{platform.Cohorts + "/watched": 1}}, result)
+	assert.Equal(t, platform.Result{
+		Failures: map[string]int{platform.Cohorts + "/watched": 1, platform.Directory: 1}, Members: 1,
+	}, result, "its one member is unknown to the directory")
 	assert.NotContains(t, err.Error(), harness.WatchlistToken, "the listing's error holds no cursor")
 
 	require.Positive(t, rig.Vendor.Requests(), "the vendor's token was used")

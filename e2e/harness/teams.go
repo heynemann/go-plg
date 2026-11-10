@@ -38,7 +38,7 @@ const (
 	Insights = "insights"
 	// Fraud owns conditions screening members: screening (Lua, failing for users in Mexico), velocity (Go,
 	// panicking for users without orders) and watchlist (Go, carelessly printing and reporting its secret), and
-	// the watched cohort (Go, putting its secret in cursors that loop).
+	// the watched cohort (Go, putting its secret in a member ID and in cursors that loop).
 	Fraud = "fraud"
 	// Partners owns the pilot cohort (Lua, a fixed list) and the voucher deliverer (TypeScript, which never
 	// returns from a reward of 1000 points or more).

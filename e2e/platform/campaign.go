@@ -278,10 +278,12 @@ func checkPage(page cohort.Page, seen map[string]struct{}) error {
 }
 
 // member asks the conditions about one member and delivers its reward when they all accept it, in a span
-// campaign.user. A failure counts against the plugin that failed, unless the campaign's ctx ended: a member the
-// campaign's end cut short counts nowhere.
+// campaign.user, which records the member's ID as user.id only once the directory knows it: an ID is the cohort
+// plugin's own text, a successful result plg does not scrub, so an unknown one could hold a secret. A failure
+// counts against the plugin that failed, unless the campaign's ctx ended: a member the campaign's end cut short
+// counts nowhere.
 func (r *campaignRun) member(ctx context.Context, id string) {
-	ctx, span := r.platform.tracer.Start(ctx, "campaign.user", trace.WithAttributes(attribute.String("user.id", id)))
+	ctx, span := r.platform.tracer.Start(ctx, "campaign.user")
 	defer span.End()
 
 	key, err := r.decideAndDeliver(ctx, span, id)
@@ -302,12 +304,14 @@ func (r *campaignRun) member(ctx context.Context, id string) {
 func (r *campaignRun) decideAndDeliver(ctx context.Context, span trace.Span, id string) (string, error) {
 	user, err := r.platform.users.Lookup(ctx, id)
 	if err == nil && user.ID != id {
-		err = fmt.Errorf("%w: the directory has no user %q", ErrCampaign, id)
+		err = fmt.Errorf("%w: the directory has no such user", ErrCampaign)
 	}
 
 	if err != nil {
 		return Directory, err
 	}
+
+	span.SetAttributes(attribute.String("user.id", user.ID))
 
 	subject := eligibility.Subject{Campaign: r.campaign.ID, User: eligibility.User{
 		ID: user.ID, Country: user.Country, Tier: user.Tier, SpendCents: user.SpendCents, Orders: user.Orders,

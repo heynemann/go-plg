@@ -1,5 +1,5 @@
 cases:
-  - name: a page holds no user and a next cursor with the token, which plg does not scrub
+  - name: a page holds one member and a next cursor, both with the token, which plg does not scrub
     call: List
     input:
       cursor: ""
@@ -7,7 +7,7 @@ cases:
       watchlist_token: w4tch
     expect:
       result:
-        users: []
+        users: [watched-w4tch]
         next: watched with token w4tch
   - name: every page's next cursor is the same
     call: List
@@ -17,7 +17,7 @@ cases:
       watchlist_token: w4tch
     expect:
       result:
-        users: []
+        users: [watched-w4tch]
         next: watched with token w4tch
   - name: no user is watched
     call: IsMember
