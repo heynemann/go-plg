@@ -7,7 +7,6 @@
 package harness
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -94,28 +93,7 @@ func Modules(tb testing.TB) string {
 func copySource(tb testing.TB, src, dst string) {
 	tb.Helper()
 
-	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
-			return err
-		}
-
-		data, err := os.ReadFile(path) //nolint:gosec // G304: the contract's own files
-		require.NoError(tb, err)
-
-		if !contractsrc.Include(entry.Name(), data) {
-			return nil
-		}
-
-		rel, err := filepath.Rel(src, path)
-		require.NoError(tb, err)
-
-		target := filepath.Join(dst, rel)
-		require.NoError(tb, os.MkdirAll(filepath.Dir(target), dirMode))
-
-		//nolint:gosec // G703: a path of tb's temporary directory
-		require.NoError(tb, os.WriteFile(target, data, fileMode))
-
-		return nil
+	copyTree(tb, src, dst, func(name string, data []byte) bool {
+		return filepath.Ext(name) == ".go" && contractsrc.Include(name, data)
 	})
-	require.NoError(tb, err)
 }

@@ -101,8 +101,8 @@ func BuildCampaigns(tb testing.TB, version string) string {
 	release := filepath.Join(modules, filepath.FromSlash(ContractModule)+"@"+version)
 	repository := filepath.Join(Root(tb), "..")
 
-	copyTree(tb, filepath.Join(Root(tb), "contracts"), release)
-	copyTree(tb, filepath.Join(Root(tb), "harness", "testdata", "contracts", version), release)
+	copyTree(tb, filepath.Join(Root(tb), "contracts"), release, nil)
+	copyTree(tb, filepath.Join(Root(tb), "harness", "testdata", "contracts", version), release, nil)
 
 	// The release requires a released plg; its authors generate with this checkout's.
 	goCommand(tb, release, localEnviron(), "mod", "edit", "-replace=github.com/heynemann/go-plg="+repository)
@@ -174,8 +174,9 @@ func goCommand(tb testing.TB, dir string, environ []string, args ...string) stri
 	return stdout.String()
 }
 
-// copyTree copies the files under src into dst, replacing those there.
-func copyTree(tb testing.TB, src, dst string) {
+// copyTree copies the files under src that keep accepts (by name and content; nil keeps all) into dst,
+// replacing those there.
+func copyTree(tb testing.TB, src, dst string, keep func(name string, data []byte) bool) {
 	tb.Helper()
 
 	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
@@ -183,10 +184,14 @@ func copyTree(tb testing.TB, src, dst string) {
 			return err
 		}
 
-		rel, err := filepath.Rel(src, path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: the e2e module's own files
 		require.NoError(tb, err)
 
-		data, err := os.ReadFile(path) //nolint:gosec // G304: the e2e module's own files
+		if keep != nil && !keep(entry.Name(), data) {
+			return nil
+		}
+
+		rel, err := filepath.Rel(src, path)
 		require.NoError(tb, err)
 
 		target := filepath.Join(dst, rel)
