@@ -52,7 +52,7 @@ func run(in io.Reader, out io.Writer) error {
 		return err //nolint:wrapcheck // the command's own input
 	}
 
-	started, err := start(&spec)
+	started, err := start(ctx, &spec)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func run(in io.Reader, out io.Writer) error {
 }
 
 // start starts the platform spec describes.
-func start(spec *harness.Spec) (*platform.Platform, error) {
+func start(ctx context.Context, spec *harness.Spec) (*platform.Platform, error) {
 	client := s3.New(s3.Options{
 		Region:       spec.S3.Region,
 		BaseEndpoint: aws.String(spec.S3.Endpoint),
@@ -96,7 +96,7 @@ func start(spec *harness.Spec) (*platform.Platform, error) {
 	})
 
 	//nolint:wrapcheck // the platform's own
-	return platform.New(&platform.Config{
+	return platform.New(ctx, &platform.Config{
 		Storages:  harness.Storages(client, spec.Bucket),
 		Users:     harness.NewDirectory(spec.Users),
 		Secrets:   spec.Vault.Resolver(),

@@ -179,7 +179,7 @@ func (r *Rig) NewPlatform(tb testing.TB, opts *Options) *platform.Platform {
 		options.Configure(&cfg)
 	}
 
-	started, err := platform.New(&cfg)
+	started, err := platform.New(tb.Context(), &cfg)
 	require.NoError(tb, err)
 
 	tb.Cleanup(func() {

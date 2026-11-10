@@ -135,8 +135,9 @@ var errNoSecret = errors.New("no secret resolver")
 
 // New registers the platform's three contracts with their storages and returns the platform serving them. Every
 // plugin loads, validates and starts its instances before New returns; one that cannot fails New (plg.Register
-// is all or nothing), unlike on a later poll, which keeps the last good version serving.
-func New(cfg *Config) (*Platform, error) {
+// is all or nothing), unlike on a later poll, which keeps the last good version serving. ctx bounds the
+// registrations and, when one fails, closing what they started.
+func New(ctx context.Context, cfg *Config) (*Platform, error) {
 	if cfg.Users == nil {
 		return nil, fmt.Errorf("%w: no Users directory", ErrConfig)
 	}
@@ -163,11 +164,12 @@ func New(cfg *Config) (*Platform, error) {
 		return nil, err
 	}
 
+	//nolint:contextcheck // plg.New takes no context: it only builds the container (and its metric instruments)
 	container := plg.New(containerOptions...)
 
-	err = register(container, cfg, shared)
+	err = register(ctx, container, cfg, shared)
 	if err != nil {
-		return nil, errors.Join(err, container.Close(context.Background()))
+		return nil, errors.Join(err, container.Close(ctx))
 	}
 
 	provider := cfg.TracerProvider
@@ -184,9 +186,7 @@ func New(cfg *Config) (*Platform, error) {
 }
 
 // register registers the three contracts in container, each with its storages and the options every one shares.
-func register(container *plg.Container, cfg *Config, shared []plg.RegisterOption) error {
-	ctx := context.Background()
-
+func register(ctx context.Context, container *plg.Container, cfg *Config, shared []plg.RegisterOption) error {
 	err := plg.Register[cohort.Provider](ctx, container, Cohorts,
 		options(shared, cfg.Storages.Cohorts, plg.WithHost[cohort.Users](cfg.Users))...)
 	if err != nil {
