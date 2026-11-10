@@ -210,8 +210,9 @@ examples: $(GOLANGCI_LINT) warm
 # TestLoad…), whose throughput and latency thresholds are measured without the race detector. A load test is a
 # file of its own behind e2e_load, so the scenarios' run never builds it. The load run is verbose and never cached
 # (`-v -count=1`), so every run logs what it measured. E2E_TIMEOUT is a hang detector per test binary, as
-# TEST_TIMEOUT is.
-E2E_TIMEOUT := 30m
+# TEST_TIMEOUT is, at about twice the slowest binary: the scenarios took about 145 s here and the load test about
+# 54 s, so 5m.
+E2E_TIMEOUT := 5m
 
 complex-e2e: $(GOLANGCI_LINT) warm
 	cd e2e && $(GOLANGCI_LINT) fmt ./...
