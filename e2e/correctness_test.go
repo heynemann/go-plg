@@ -151,6 +151,46 @@ func runSpan(t *testing.T, telemetry *harness.Telemetry, campaign *platform.Camp
 	return runs[0]
 }
 
+// A cohort's page that its source fails to give is asked again: the vendor answers churn-risk's first List
+// 503, then holds its second past the call timeout, and the platform's third attempt gets the page. The campaign
+// lists the whole cohort, as the oracle does, and its trace holds the two failed List calls before the run's
+// pages.
+func TestACohortsFailedPageIsAskedAgain(t *testing.T) {
+	t.Parallel()
+
+	rig := harness.NewRig(t, &harness.Options{Limits: platform.Limits{CallTimeout: hangTimeout, DeliveryAttempts: 3}})
+	campaign := winBack("page-again")
+	expected := harness.Expect(t, rig.Users, &campaign)
+	pages := harness.ExpectPages(t, rig.Users, &campaign)
+
+	rig.Vendor.FailNext(1)
+	rig.Vendor.HangNext(1)
+
+	result, err := rig.Platform.Run(t.Context(), &campaign)
+	require.NoError(t, err)
+	t.Logf("%s: %+v", campaign.ID, result)
+
+	assert.Equal(t, expected.Result, result, "the cohort listed whole, after two failed attempts at its first page")
+	assert.Equal(t, expected.Credits, rig.Wallet.CreditsOf(campaign.ID))
+	assert.EqualValues(t, 1, rig.Vendor.Unavailable(), "the vendor failed one request")
+	assert.EqualValues(t, 1, rig.Vendor.Held(), "the vendor held one request past the call timeout")
+	assert.EqualValues(t, pages+2, rig.Vendor.Requests(), "a request per page, and two for the failed attempts")
+
+	run := campaignRun(t, rig.Telemetry, &campaign)
+	lists := named(byParent(rig.Telemetry.Trace(run.TraceID()))[run.SpanID()],
+		"plg.call "+platform.Cohorts+"/churn-risk.List")
+	require.Len(t, lists, pages+2, "a List call per attempt")
+
+	for i := range lists {
+		want := codes.Unset
+		if i < 2 {
+			want = codes.Error
+		}
+
+		assert.Equal(t, want, lists[i].Status.Code, "List attempt %d", i+1)
+	}
+}
+
 // A cohort is listed whole, each member once, whatever its size against the page size: the everyone cohort
 // returns the directory a page of cohort.MaxPageSize users at a time, and platforms serving directories of every
 // size around one and two pages (an empty one too) credit every user once, after as many List calls as the

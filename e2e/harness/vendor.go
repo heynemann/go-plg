@@ -20,14 +20,20 @@ const vendorPageSize = 100
 // Vendor is a fake of the CRM vendor's API the CRM team's churn-risk cohort provider calls, with the bearer token:
 // GET /segments/{segment}/members?cursor=<id> answers a page of the segment's members after cursor
 // ({"users": [...], "next": "<id>"}, next empty on the last page), and GET /segments/{segment}/members/{user}
-// 200 for a member and 404 for anyone else. Its churn-risk segment is a directory's users with ChurnRisk. Safe for
-// concurrent use.
+// 200 for a member and 404 for anyone else. Its churn-risk segment is a directory's users with ChurnRisk. Like the
+// wallet, it can be told to fail the next requests with 503 (FailNext) or to hold the next ones' answer until the
+// caller gives up (HangNext). Safe for concurrent use.
 type Vendor struct {
-	server   *httptest.Server
-	segments map[string][]string // by name: the members' IDs, sorted
-	token    string
-	requests atomic.Int64
-	refused  atomic.Int64
+	server      *httptest.Server
+	segments    map[string][]string // by name: the members' IDs, sorted
+	done        chan struct{}
+	token       string
+	requests    atomic.Int64
+	refused     atomic.Int64
+	failing     atomic.Int64
+	hanging     atomic.Int64
+	unavailable atomic.Int64
+	held        atomic.Int64
 }
 
 // NewVendor starts a vendor requiring token, whose churn-risk segment is dir's, closed when tb ends.
@@ -42,14 +48,18 @@ func NewVendor(tb testing.TB, token string, dir *Directory) *Vendor {
 		}
 	}
 
-	vendor := &Vendor{token: token, segments: map[string][]string{ChurnRisk: churn}}
+	vendor := &Vendor{token: token, segments: map[string][]string{ChurnRisk: churn}, done: make(chan struct{})}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /segments/{segment}/members", vendor.page)
 	mux.HandleFunc("GET /segments/{segment}/members/{user}", vendor.member)
 
 	vendor.server = httptest.NewServer(vendor.authorized(mux))
-	tb.Cleanup(vendor.server.Close)
+
+	tb.Cleanup(func() {
+		close(vendor.done) // releases the requests HangNext holds, so that Close does not wait for them
+		vendor.server.Close()
+	})
 
 	return vendor
 }
@@ -76,7 +86,29 @@ func (v *Vendor) Refused() int64 {
 	return v.refused.Load()
 }
 
-// authorized counts each request and refuses one without the bearer token.
+// FailNext makes the next n authorized requests fail with 503.
+func (v *Vendor) FailNext(n int) {
+	v.failing.Store(int64(n))
+}
+
+// HangNext makes the next n authorized requests (after those FailNext fails) hold their answer until the caller
+// gives up.
+func (v *Vendor) HangNext(n int) {
+	v.hanging.Store(int64(n))
+}
+
+// Unavailable is how many requests the vendor failed with 503 (FailNext).
+func (v *Vendor) Unavailable() int64 {
+	return v.unavailable.Load()
+}
+
+// Held is how many requests the vendor held until their caller gave up (HangNext).
+func (v *Vendor) Held() int64 {
+	return v.held.Load()
+}
+
+// authorized counts each request, refuses one without the bearer token, and fails or holds those FailNext and
+// HangNext ask for.
 func (v *Vendor) authorized(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		v.requests.Add(1)
@@ -88,7 +120,20 @@ func (v *Vendor) authorized(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(response, request)
+		switch {
+		case take(&v.failing):
+			v.unavailable.Add(1)
+			http.Error(response, "vendor unavailable", http.StatusServiceUnavailable)
+		case take(&v.hanging):
+			v.held.Add(1)
+
+			select {
+			case <-request.Context().Done():
+			case <-v.done:
+			}
+		default:
+			next.ServeHTTP(response, request)
+		}
 	})
 }
 
