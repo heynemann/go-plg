@@ -106,8 +106,8 @@ const (
 // members' p99 latency, the failed members within the error budget, no reward lost or duplicated) and the
 // invariants: the host's heap back near its baseline, every pool of the bounds and memory limit the platform was
 // given and within them, and the instances' memory limits together within the budget, whenever sampled, every
-// fault the wallet injected retried, every event a version loaded or retired or an instance a held request
-// discarded, and no goroutine left once the platform closes.
+// fault the wallet injected retried, every request it held ending its call at the deadline, every event a version
+// loaded or retired or an instance a deadline stop discarded, and no goroutine left once the platform closes.
 //
 //nolint:paralleltest // it measures throughput, latency, the heap and the goroutines: nothing may run beside it
 func TestLoadRewardsPlatformMeetsItsSLOs(t *testing.T) {
@@ -563,9 +563,10 @@ func measureLoad(
 	t.Logf("failed members: %d (%.3f%%), by plugin %v; lost rewards %d, unexpected credits %d", sum.failed,
 		measured.failedRatio*percent, sum.failures, len(sum.lost), len(sum.unexpected))
 	t.Logf("deliveries: %d credited, %d retries, %d duplicates suppressed; the wallet: %d requests, %d answered "+
-		"503, %d held past the call timeout, %d repeats, %d refused", sum.delivered, sum.retries, sum.duplicates,
-		rig.Wallet.Requests(), rig.Wallet.Unavailable(), rig.Wallet.Held(), rig.Wallet.Repeats(),
-		rig.Wallet.Refused())
+		"503, %d held past the call timeout (%d calls stopped at the deadline, %d failed by the deliverer first), "+
+		"%d repeats, %d refused", sum.delivered, sum.retries, sum.duplicates, rig.Wallet.Requests(),
+		rig.Wallet.Unavailable(), rig.Wallet.Held(), watch.stopped.Load(), watch.reported.Load(),
+		rig.Wallet.Repeats(), rig.Wallet.Refused())
 	t.Logf("swaps: %d, publication to loaded %v", len(load.swaps), load.swaps)
 	t.Logf("pools: %d samples, peak %d instances, %d calls waiting, %d MiB of guest memory (budget %d MiB), "+
 		"peaks by plugin %v; %s under its minimum while refilling in %d samples", watch.pools.samples.Load(),
@@ -649,17 +650,20 @@ func assertInvariants(
 	assert.Equal(t, held+unavailable, int64(sum.retries+sum.undelivered),
 		"every request the wallet failed or held was retried, but a failed member's last")
 
+	stopped := watch.stopped.Load()
+	assert.Equal(t, held, stopped+watch.reported.Load(), "every request the wallet held ended its Deliver call at "+
+		"the deadline: stopped there, or failed by the deliverer reporting the request it saw fail first")
 	assert.Equal(t, map[plg.EventKind]int{
-		plg.EventLoaded: loadPlugins + swaps, plg.EventRetired: swaps + loadPlugins, plg.EventPanicked: int(held),
+		plg.EventLoaded: loadPlugins + swaps, plg.EventRetired: swaps + loadPlugins, plg.EventPanicked: int(stopped),
 	}, watch.kinds, "every event a version loaded (6 by New, one per swap), retired (one per swap, 6 by Close), or "+
-		"the deliverer's instance a held request's call timeout discarded")
+		"the deliverer's instance a Deliver call stopped at its deadline discarded")
 	assert.Empty(t, watch.unexpected, "no event but loads, retirements and the deliverer's discarded instances")
 	assert.NoError(t, leaked, "no goroutine the platform started outlives its Close")
 }
 
-// probe watches the platform under load through the platform's own signals: its campaign.user spans (it is the
-// span processor of the platform's only tracer), plg's pools (plg.Plugins, sampled as members are processed) and
-// plg's events.
+// probe watches the platform under load through the platform's own signals: its campaign.user spans and the
+// deliverer's Deliver call spans (it is the span processor of the platform's only tracer), plg's pools
+// (plg.Plugins, sampled as members are processed) and plg's events.
 type probe struct {
 	runs   *xsync.Map[trace.SpanID, string] // the campaign.run spans started: their campaign's ID
 	failed *xsync.Map[string, string]       // "<campaign ID>/<member>" → the key of what failed the member
@@ -672,9 +676,12 @@ type probe struct {
 	unexpected []string
 	// latencies are the campaign.user spans' durations, in the order they ended since the last reset, ended of
 	// them.
-	latencies      []time.Duration
-	ended          atomic.Int64
-	goroutineCount int
+	latencies []time.Duration
+	ended     atomic.Int64
+	// stopped and reported count the deliverer's Deliver calls that ended at their deadline, by how (see
+	// deadline): stopped there, or failed by the deliverer itself.
+	stopped, reported atomic.Int64
+	goroutineCount    int
 }
 
 var _ sdktrace.SpanProcessor = (*probe)(nil)
@@ -695,13 +702,33 @@ func (p *probe) OnStart(_ context.Context, span sdktrace.ReadWriteSpan) {
 	}
 }
 
-// OnEnd records a member's processing time and failure from its campaign.user span, and samples the pools every
-// sampleEvery members.
+// OnEnd records a member's processing time and failure from its campaign.user span, sampling the pools every
+// sampleEvery members, and how the deadline ended each Deliver call of the deliverer it ended, from its plg.call
+// span.
 func (p *probe) OnEnd(span sdktrace.ReadOnlySpan) {
-	if span.Name() != "campaign.user" {
-		return
-	}
+	switch span.Name() {
+	case "campaign.user":
+		p.member(span)
+	case deliverCall:
+		p.deadline(span)
 
+	default: // the platform's other spans and plg's tell the probe nothing more
+	}
+}
+
+// Shutdown does nothing: the probe holds nothing to release.
+func (*probe) Shutdown(context.Context) error {
+	return nil
+}
+
+// ForceFlush does nothing: the probe exports nothing.
+func (*probe) ForceFlush(context.Context) error {
+	return nil
+}
+
+// member records a member's processing time and failure from its campaign.user span, and samples the pools every
+// sampleEvery members.
+func (p *probe) member(span sdktrace.ReadOnlySpan) {
 	n := p.ended.Add(1)
 	if n <= int64(len(p.latencies)) {
 		p.latencies[n-1] = span.EndTime().Sub(span.StartTime())
@@ -717,20 +744,32 @@ func (p *probe) OnEnd(span sdktrace.ReadOnlySpan) {
 	}
 }
 
-// Shutdown does nothing: the probe holds nothing to release.
-func (*probe) Shutdown(context.Context) error {
-	return nil
-}
+// deadline counts a Deliver call of the deliverer that its deadline ended, which is what a request the wallet holds
+// costs, by how it ended. The call's context ending both fails the request the guest waits on and arms wazero's
+// stop of the guest (close-on-context-done, on a goroutine of its own), and either may win, as plg's
+// TestPluginHTTPEndsWithTheCall allows: when the stop reaches the guest before it ends the call, the call fails
+// with a PanicError (outcome panic), its instance is discarded and plg emits a panicked event; when the guest,
+// handed the failed request, ends the call first, the call fails with the plugin's own error (outcome error), its
+// instance serves on and no event is emitted. Both name the deadline.
+func (p *probe) deadline(span sdktrace.ReadOnlySpan) {
+	if !strings.Contains(span.Status().Description, context.DeadlineExceeded.Error()) {
+		return
+	}
 
-// ForceFlush does nothing: the probe exports nothing.
-func (*probe) ForceFlush(context.Context) error {
-	return nil
+	switch attr(span.Attributes(), "outcome") {
+	case "panic":
+		p.stopped.Add(1)
+	case "error":
+		p.reported.Add(1)
+
+	default: // the call waited past its deadline for an instance (unavailable): no request was held
+	}
 }
 
 // configure returns the rig's Configure: the platform traces through the probe, passes it its events and logs
 // only errors, and the goroutines running before it starts are the baseline. plg logs every fault the load
-// injects, a warning for each request the wallet holds beside the error of the call it stops, which the test
-// counts from the wallet and plg's events instead.
+// injects, a warning for each request the wallet holds beside the error of a call stopped at its deadline, which
+// the test counts from the wallet, the deliverer's call spans and plg's events instead.
 func (p *probe) configure(t *testing.T) func(cfg *platform.Config) {
 	t.Helper()
 
@@ -788,7 +827,7 @@ func (p *probe) drainEvents() {
 }
 
 // record counts an event read, and describes it among the unexpected unless it is a version loaded or retired, or
-// a Deliver call of the deliverer stopped at its deadline (what a request the wallet held costs).
+// a Deliver call of the deliverer stopped at its deadline (what a request the wallet held may cost: see deadline).
 func (p *probe) record(event *plg.Event) {
 	p.kinds[event.Kind]++
 
@@ -821,11 +860,15 @@ type poolWatch struct {
 	waiting   atomic.Int64 // the peak calls waiting for an instance, every plugin's together
 }
 
-// discardedKey is the plugin whose instances the load discards: the deliverer, each time a request the wallet
-// holds stops its call at the deadline. The pool's refiller replaces each one, a moment after its place is given
-// back, so a sample in between finds the pool under its minimum: its bounds are counted with each count read on
-// its own (plg.PoolStats), and only the maximum is an invariant at every sample for it.
+// discardedKey is the plugin whose instances the load discards: the deliverer, each time a request the wallet holds
+// keeps its call to the deadline and the guest is stopped there (see probe.deadline). The pool's refiller replaces
+// each one, a moment after its place is given back, so a sample in between finds the pool under its minimum: its
+// bounds are counted with each count read on its own (plg.PoolStats), and only the maximum is an invariant at
+// every sample for it.
 const discardedKey = platform.Deliveries + "/wallet"
+
+// deliverCall names the spans of the deliverer's Deliver calls (plg.call <key>.<method>).
+const deliverCall = "plg.call " + discardedKey + ".Deliver"
 
 // sample samples every plugin's pool, counting each breach of an invariant: not the load's plugins, a plugin not
 // serving, a pool not of the bounds and memory limit the platform was given (poolMin, poolMax, instanceMemory),
