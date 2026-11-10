@@ -35,8 +35,8 @@ func main() {
 	}
 }
 
-// run runs the spec read from in and writes its report to out. The platform, started without a context as
-// platform.New is, runs until the program ends.
+// run runs the spec read from in and writes its report to out: it starts the platform, runs the spec's campaigns
+// and closes the platform, all under a background context, the program having no deadline of its own.
 func run(in io.Reader, out io.Writer) error {
 	ctx := context.Background()
 
