@@ -70,10 +70,6 @@ const (
 	loadPollInterval = 250 * time.Millisecond
 	// Every sampleEvery members processed, the pools are sampled.
 	sampleEvery = 256
-	// swapTimeout bounds the wait for a swap's version to load, and closeTimeout the platform's Close: hang
-	// detectors, not synchronisations.
-	swapTimeout  = time.Minute
-	closeTimeout = time.Minute
 	// releasedVersion is the version a swap releases a condition at (plugin.yaml's version).
 	releasedVersion = "1.0.1"
 	// percent turns a ratio into a percentage, for the log.
@@ -152,7 +148,7 @@ func TestLoadRewardsPlatformMeetsItsSLOs(t *testing.T) {
 	slos := measureLoad(t, rig, probe, &load, &totals, baseline, after)
 	assertSLOs(t, &slos, &totals)
 
-	closing, cancel := context.WithTimeout(t.Context(), closeTimeout)
+	closing, cancel := context.WithTimeout(t.Context(), harness.CloseTimeout)
 	defer cancel()
 
 	require.NoError(t, rig.Platform.Close(closing), "the platform closed, every instance given back")
@@ -658,7 +654,7 @@ func assertInvariants(
 type probe struct {
 	runs   *xsync.Map[trace.SpanID, string] // the campaign.run spans started: their campaign's ID
 	failed *xsync.Map[string, string]       // "<campaign ID>/<member>" → the key of what failed the member
-	events chan plg.Event                   // what WithOnEvent passes
+	events *harness.Events                  // what WithOnEvent passes
 	pools  *poolWatch
 	// kinds counts the events read from events, by kind, and unexpected describes those that are neither loads
 	// nor retirements; only the test's goroutine reads events.
@@ -674,16 +670,12 @@ type probe struct {
 
 var _ sdktrace.SpanProcessor = (*probe)(nil)
 
-// eventBuffer is how many events WithOnEvent's function queues for the test's goroutine: far more than the load
-// emits, so that it never blocks plg's delivery.
-const eventBuffer = 1024
-
 // newProbe returns a probe watching nothing yet.
 func newProbe() *probe {
 	return &probe{
 		runs: xsync.NewMap[trace.SpanID, string](), failed: xsync.NewMap[string, string](),
 		pools:  &poolWatch{byPlugin: xsync.NewMap[string, int]()},
-		events: make(chan plg.Event, eventBuffer), kinds: map[plg.EventKind]int{},
+		events: harness.NewEvents(), kinds: map[plg.EventKind]int{},
 	}
 }
 
@@ -739,7 +731,7 @@ func (p *probe) configure(t *testing.T) func(cfg *platform.Config) {
 		t.Cleanup(func() { assert.NoError(t, provider.Shutdown(context.WithoutCancel(t.Context()))) })
 
 		cfg.TracerProvider = provider
-		cfg.OnEvent = func(_ context.Context, event plg.Event) { p.events <- event }
+		cfg.OnEvent = p.events.OnEvent
 		cfg.Logger = slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelError}))
 		p.goroutineCount = runtime.NumGoroutine()
 		p.goroutines = goleak.IgnoreCurrent()
@@ -766,36 +758,23 @@ func (p *probe) failedOf(campaign string) map[string]string {
 	return failed
 }
 
-// awaitLoaded reads the events until plg's loaded event of the key's version, within swapTimeout.
+// awaitLoaded reads the events until plg's loaded event of the key's version; the test fails when it does not come
+// within a minute (harness.Events.Wait).
 func (p *probe) awaitLoaded(t *testing.T, key, version string) {
 	t.Helper()
 
-	timeout := time.NewTimer(swapTimeout)
-	defer timeout.Stop()
+	p.events.Wait(t, func(event plg.Event) bool {
+		p.record(&event)
 
-	for {
-		select {
-		case event := <-p.events:
-			p.record(&event)
-
-			if event.Kind == plg.EventLoaded && event.Key == key && event.Version == version {
-				return
-			}
-		case <-timeout.C:
-			require.FailNow(t, "the platform did not load "+key+" "+version+" in time")
-		}
-	}
+		return event.Kind == plg.EventLoaded && event.Key == key && event.Version == version
+	})
 }
 
 // drainEvents reads the events queued.
 func (p *probe) drainEvents() {
-	for {
-		select {
-		case event := <-p.events:
-			p.record(&event)
-		default:
-			return
-		}
+	drained := p.events.Drain()
+	for i := range drained {
+		p.record(&drained[i])
 	}
 }
 

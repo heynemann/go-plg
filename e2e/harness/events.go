@@ -11,8 +11,9 @@ import (
 )
 
 // eventBuffer is how many events Events holds before the test reads them: more than any scenario's platform
-// emits. A full buffer would hold plg's delivery goroutine until the test reads or the platform closes, never a
-// call: plg drops (and counts) the events that find its own queue full.
+// emits. A full buffer holds plg's delivery goroutine, never a call (plg drops, and counts, the events that find
+// its own queue full), until the test reads or the platform's Close gives up on the delivery: Close's context
+// ending (CloseTimeout for a rig's platform) ends OnEvent's, so that Close fails instead of hanging.
 const eventBuffer = 4096
 
 // eventTimeout bounds Wait: an event a scenario waits for comes within a poll or two, so a minute means it never
@@ -31,7 +32,7 @@ func NewEvents() *Events {
 	return &Events{events: make(chan plg.Event, eventBuffer)}
 }
 
-// OnEvent keeps event, until ctx (the platform's delivery's) ends.
+// OnEvent keeps event, until ctx (the platform's delivery's, which its Close ends) ends.
 //
 //nolint:gocritic // hugeParam: the signature of plg.WithOnEvent's function, which Config.OnEvent takes
 func (e *Events) OnEvent(ctx context.Context, event plg.Event) {
@@ -59,6 +60,20 @@ func (e *Events) Wait(tb testing.TB, match func(plg.Event) bool) plg.Event {
 			require.FailNow(tb, "no matching event within "+eventTimeout.String())
 		case <-tb.Context().Done():
 			require.FailNow(tb, "the test ended waiting for an event")
+		}
+	}
+}
+
+// Drain returns the events received and not yet passed by a Wait, oldest first, without waiting for more.
+func (e *Events) Drain() []plg.Event {
+	var drained []plg.Event
+
+	for {
+		select {
+		case event := <-e.events:
+			drained = append(drained, event)
+		default:
+			return drained
 		}
 	}
 }

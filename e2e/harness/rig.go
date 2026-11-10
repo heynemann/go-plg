@@ -28,6 +28,10 @@ const (
 // DefaultUsers is how many users a rig's directory holds unless Options say otherwise.
 const DefaultUsers = 1000
 
+// CloseTimeout bounds a platform's Close, the calls in flight finishing and plg delivering its queued events: a
+// hang detector, so that a test whose platform cannot close fails instead of waiting for the binary's timeout.
+const CloseTimeout = time.Minute
+
 // maxRigs is how many rigs a test binary runs at once. Each holds MinIO, its teams' CI and a platform whose pools
 // of guest instances take hundreds of MB under the race detector: the 15 scenarios at once, as go test runs
 // parallel tests on a 28-CPU machine, peaked at 14.9 GB. Parallel tests beyond it wait in NewRig for a slot.
@@ -170,7 +174,12 @@ func (r *Rig) NewPlatform(tb testing.TB, opts *Options) *platform.Platform {
 	started, err := platform.New(&cfg)
 	require.NoError(tb, err)
 
-	tb.Cleanup(func() { require.NoError(tb, started.Close(context.WithoutCancel(tb.Context()))) })
+	tb.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(tb.Context()), CloseTimeout)
+		defer cancel()
+
+		require.NoError(tb, started.Close(ctx), "the platform closed within %v", CloseTimeout)
+	})
 
 	return started
 }
