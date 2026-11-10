@@ -56,8 +56,10 @@ const (
 	hangOneIn = 1000
 	// loadCallTimeout bounds each plugin call: a held request costs its member that long before its retry.
 	loadCallTimeout = time.Second
-	// poolMin and poolMax bound each plugin version's instances, so the pools grow under the load.
-	poolMin, poolMax = 2, 4
+	// poolMin and poolMax bound each plugin version's instances, so the pools grow under the load. poolMax stays
+	// under the contracts' cap (//plg:limits pool=1..4), so that a platform passing plg more than it was given is
+	// served, and caught by the pools' invariants, instead of refused.
+	poolMin, poolMax = 2, 3
 	// instanceMemory is every instance's memory limit (the Go guest's default, for every language), and
 	// memoryBudget the platform's: every plugin's pool at its maximum, plus one for the version a swap loads beside
 	// the one it replaces.
@@ -102,9 +104,10 @@ const (
 // active-buyer and the wallet in TypeScript), a condition republished every 8 campaigns and picked up by a poll,
 // and the wallet failing or holding a fraction of its requests. It asserts the service levels (throughput, the
 // members' p99 latency, the failed members within the error budget, no reward lost or duplicated) and the
-// invariants: the host's heap back near its baseline, every pool within its bounds and the guests' memory within
-// the budget whenever sampled, every fault the wallet injected retried, every event a version loaded or retired or
-// an instance a held request discarded, and no goroutine left once the platform closes.
+// invariants: the host's heap back near its baseline, every pool of the bounds and memory limit the platform was
+// given and within them, and the instances' memory limits together within the budget, whenever sampled, every
+// fault the wallet injected retried, every event a version loaded or retired or an instance a held request
+// discarded, and no goroutine left once the platform closes.
 //
 //nolint:paralleltest // it measures throughput, latency, the heap and the goroutines: nothing may run beside it
 func TestLoadRewardsPlatformMeetsItsSLOs(t *testing.T) {
@@ -630,8 +633,8 @@ func assertInvariants(
 
 	assert.LessOrEqual(t, measured.heapGrowth, maxHeapGrowth, "the host's heap after the load, from its baseline")
 	assert.Positive(t, watch.pools.samples.Load(), "the pools were sampled")
-	assert.Zero(t, watch.pools.breaches.Load(), "every pool within its bounds, the guests within the memory "+
-		"budget; the first breach: %s", watch.pools.firstBreach())
+	assert.Zero(t, watch.pools.breaches.Load(), "every pool of the configured bounds and within them, the "+
+		"instances' memory limits within the budget; the first breach: %s", watch.pools.firstBreach())
 	assert.Len(t, load.swaps, swaps, "every swap went live")
 
 	held, unavailable := rig.Wallet.Held(), rig.Wallet.Unavailable()
@@ -818,22 +821,28 @@ type poolWatch struct {
 // its own (plg.PoolStats), and only the maximum is an invariant at every sample for it.
 const discardedKey = platform.Deliveries + "/wallet"
 
-// sample samples every plugin's pool, counting each breach of an invariant: a plugin not serving, instances out
-// of the pool's bounds, a plugin's guest memory over its pool's maximum, the guests' over the budget.
+// sample samples every plugin's pool, counting each breach of an invariant: not the load's plugins, a plugin not
+// serving, a pool not of the bounds and memory limit the platform was given (poolMin, poolMax, instanceMemory),
+// instances out of those bounds, a plugin's guest memory over its pool's maximum, the instances' memory limits
+// together over the budget (what plg reserves for them).
 func (w *poolWatch) sample() {
 	states := plg.Plugins(w.container.Load())
 	w.samples.Add(1)
 
-	var memory uint64
+	if len(states) != loadPlugins {
+		w.record(fmt.Sprintf("%d plugins, not the load's %d", len(states), loadPlugins))
+	}
+
+	var memory, reserved uint64
 
 	instances, waiting := 0, 0
 
 	for i := range states {
-		pool, floor := &states[i].Pool, states[i].Pool.Min
+		pool, floor := &states[i].Pool, poolMin
 		if states[i].Key == discardedKey {
 			floor = 0
 
-			if pool.Instances < pool.Min {
+			if pool.Instances < poolMin {
 				w.refilling.Add(1)
 			}
 		}
@@ -843,6 +852,7 @@ func (w *poolWatch) sample() {
 		}
 
 		memory += pool.Memory
+		reserved += uint64(pool.Instances) * pool.MemoryLimit //nolint:gosec // G115: a count of instances
 		instances += pool.Instances
 		waiting += pool.Waiting
 
@@ -851,8 +861,9 @@ func (w *poolWatch) sample() {
 		})
 	}
 
-	if memory > memoryBudget {
-		w.record(fmt.Sprintf("the guests' memory, %d bytes, is over the budget, %d", memory, memoryBudget))
+	if reserved > memoryBudget {
+		w.record(fmt.Sprintf("the instances' memory limits together, %d bytes, are over the budget, %d", reserved,
+			memoryBudget))
 	}
 
 	raise(&w.instances, int64(instances))
@@ -871,11 +882,14 @@ func breachOf(state *plg.PluginState, floor int) string {
 	switch {
 	case state.Status != plg.StatusServing:
 		return fmt.Sprintf("%s is %s", state.Key, state.Status)
-	case pool.Instances < floor || pool.Instances > pool.Max:
-		return fmt.Sprintf("%s has %d instances, out of [%d, %d]", state.Key, pool.Instances, floor, pool.Max)
-	case pool.Memory > uint64(pool.Max)*pool.MemoryLimit: //nolint:gosec // G115: a pool's maximum is positive
-		return fmt.Sprintf("%s's instances take %d bytes, over %d × %d", state.Key, pool.Memory, pool.Max,
-			pool.MemoryLimit)
+	case pool.Min != poolMin || pool.Max != poolMax || pool.MemoryLimit != instanceMemory:
+		return fmt.Sprintf("%s's pool is [%d, %d] of %d bytes each, not the [%d, %d] of %d the platform was given",
+			state.Key, pool.Min, pool.Max, pool.MemoryLimit, poolMin, poolMax, instanceMemory)
+	case pool.Instances < floor || pool.Instances > poolMax:
+		return fmt.Sprintf("%s has %d instances, out of [%d, %d]", state.Key, pool.Instances, floor, poolMax)
+	case pool.Memory > poolMax*instanceMemory:
+		return fmt.Sprintf("%s's instances take %d bytes, over %d × %d", state.Key, pool.Memory, poolMax,
+			instanceMemory)
 	default:
 		return ""
 	}
