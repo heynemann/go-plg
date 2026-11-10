@@ -3,8 +3,6 @@ package harness
 import (
 	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -35,64 +33,29 @@ type applied struct {
 // the caller gives up (HangNext), past the deliverer's timeout, and to do either to a steady fraction of its
 // requests (FailOneIn, HangOneIn), as a loaded API does. Safe for concurrent use.
 type Wallet struct {
-	server      *httptest.Server
-	credits     *xsync.Map[string, applied]
-	done        chan struct{}
-	token       string
-	requests    atomic.Int64
-	repeats     atomic.Int64
-	refused     atomic.Int64
-	failing     atomic.Int64
-	hanging     atomic.Int64
-	ids         atomic.Int64
-	failOneIn   atomic.Int64
-	hangOneIn   atomic.Int64
-	failCount   atomic.Int64 // the requests FailOneIn counts
-	hangCount   atomic.Int64 // the requests HangOneIn counts
-	held        atomic.Int64
-	unavailable atomic.Int64
+	*fakeAPI
+
+	credits   *xsync.Map[string, applied]
+	repeats   atomic.Int64
+	ids       atomic.Int64
+	failOneIn atomic.Int64
+	hangOneIn atomic.Int64
+	failCount atomic.Int64 // the requests FailOneIn counts
+	hangCount atomic.Int64 // the requests HangOneIn counts
 }
 
 // NewWallet starts a wallet requiring token, closed when tb ends.
 func NewWallet(tb testing.TB, token string) *Wallet {
 	tb.Helper()
 
-	wallet := &Wallet{credits: xsync.NewMap[string, applied](), token: token, done: make(chan struct{})}
+	wallet := &Wallet{fakeAPI: &fakeAPI{}, credits: xsync.NewMap[string, applied]()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /credits", wallet.credit)
 
-	wallet.server = httptest.NewServer(mux)
-
-	tb.Cleanup(func() {
-		close(wallet.done) // releases the requests HangNext holds, so that Close does not wait for them
-		wallet.server.Close()
-	})
+	wallet.start(tb, token, mux)
 
 	return wallet
-}
-
-// URL is the wallet's base URL, the platform's WalletURL.
-func (w *Wallet) URL() string {
-	return w.server.URL
-}
-
-// Host is the wallet's host:port, for an HTTP policy's allowed hosts.
-func (w *Wallet) Host() string {
-	u, _ := url.Parse(w.server.URL) //nolint:errcheck // httptest's URL parses
-
-	return u.Host
-}
-
-// FailNext makes the next n requests fail with 503 without applying anything.
-func (w *Wallet) FailNext(n int) {
-	w.failing.Store(int64(n))
-}
-
-// HangNext makes the next n requests that apply a credit (or find it applied) hold their answer until the caller
-// gives up: the credit is applied, as when a deliverer's deadline cuts a request the wallet served.
-func (w *Wallet) HangNext(n int) {
-	w.hanging.Store(int64(n))
 }
 
 // FailOneIn makes one request in every n fail with 503 without applying anything (the n-th, the 2n-th, … from
@@ -148,38 +111,13 @@ func (w *Wallet) Traceparent(key string) string {
 	return credit.traceparent
 }
 
-// Requests is how many requests the wallet received.
-func (w *Wallet) Requests() int64 {
-	return w.requests.Load()
-}
-
 // Repeats is how many requests repeated a key already applied, and were answered without applying it again.
 func (w *Wallet) Repeats() int64 {
 	return w.repeats.Load()
 }
 
-// Held is how many requests the wallet held until their caller gave up (HangNext, HangOneIn).
-func (w *Wallet) Held() int64 {
-	return w.held.Load()
-}
-
-// Unavailable is how many requests the wallet failed with 503 (FailNext, FailOneIn).
-func (w *Wallet) Unavailable() int64 {
-	return w.unavailable.Load()
-}
-
-// Refused is how many requests the wallet refused for a missing or wrong token.
-func (w *Wallet) Refused() int64 {
-	return w.refused.Load()
-}
-
 func (w *Wallet) credit(response http.ResponseWriter, request *http.Request) {
-	w.requests.Add(1)
-
-	if request.Header.Get("Authorization") != "Bearer "+w.token {
-		w.refused.Add(1)
-		http.Error(response, "a valid bearer token is required", http.StatusUnauthorized)
-
+	if !w.authorize(response, request) {
 		return
 	}
 
@@ -203,10 +141,7 @@ func (w *Wallet) credit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	if take(&w.failing) || oneIn(&w.failOneIn, &w.failCount) {
-		w.unavailable.Add(1)
-		http.Error(response, "wallet unavailable", http.StatusServiceUnavailable)
-
+	if w.fail(response, "wallet unavailable", func() bool { return oneIn(&w.failOneIn, &w.failCount) }) {
 		return
 	}
 
@@ -230,14 +165,7 @@ func (w *Wallet) apply(response http.ResponseWriter, request *http.Request, key 
 		status = http.StatusOK
 	}
 
-	if take(&w.hanging) || oneIn(&w.hangOneIn, &w.hangCount) {
-		w.held.Add(1)
-
-		select {
-		case <-request.Context().Done():
-		case <-w.done:
-		}
-
+	if w.hold(request, func() bool { return oneIn(&w.hangOneIn, &w.hangCount) }) {
 		return
 	}
 
@@ -252,25 +180,4 @@ func (w *Wallet) apply(response http.ResponseWriter, request *http.Request, key 
 	response.WriteHeader(status)
 
 	_, _ = response.Write(answer) //nolint:errcheck // the deliverer reports a cut answer
-}
-
-// take takes one from n while it is positive, reporting whether it did.
-func take(n *atomic.Int64) bool {
-	for {
-		left := n.Load()
-		if left <= 0 {
-			return false
-		}
-
-		if n.CompareAndSwap(left, left-1) {
-			return true
-		}
-	}
-}
-
-// oneIn counts one more in count and reports whether it is a multiple of n, when n is positive.
-func oneIn(n, count *atomic.Int64) bool {
-	every := n.Load()
-
-	return every > 0 && count.Add(1)%every == 0
 }
