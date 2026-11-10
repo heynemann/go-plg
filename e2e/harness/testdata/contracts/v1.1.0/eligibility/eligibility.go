@@ -36,7 +36,8 @@ type Subject struct {
 
 // Decision is a condition's verdict on a subject.
 type Decision struct {
-	// Reason says why, for the campaign's report.
+	// Reason says why, for the condition's own tests and callers of Eligible: the platform records only its
+	// length (campaign.reason_length on the member's span), never its text.
 	Reason string `json:"reason"`
 	// Eligible is whether the subject qualifies.
 	Eligible bool `json:"eligible"`
