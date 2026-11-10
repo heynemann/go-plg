@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strconv"
 	"strings"
@@ -283,11 +284,16 @@ func TestStorageVersionsFollowTheObjects(t *testing.T) {
 	assert.NotEqual(t, first, byStep["renamed"])
 }
 
-// countingClient counts the objects the storage downloads from a real S3 client.
+// countingClient counts the objects the storage downloads from a real S3 client, and the bytes it reads of them.
+// With hideLength, a download does not state its length (as a chunked answer does not); while fail is set, every
+// download fails with errInjected.
 type countingClient struct {
 	*s3.Client
 
-	gets atomic.Int64
+	gets       atomic.Int64
+	read       atomic.Int64
+	fail       atomic.Bool
+	hideLength bool
 }
 
 func (c *countingClient) GetObject(
@@ -295,7 +301,36 @@ func (c *countingClient) GetObject(
 ) (*s3.GetObjectOutput, error) {
 	c.gets.Add(1)
 
-	return c.Client.GetObject(ctx, in, opts...) //nolint:wrapcheck // passes the real client's answer through
+	if c.fail.Load() {
+		return nil, errInjected
+	}
+
+	out, err := c.Client.GetObject(ctx, in, opts...)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // passes the real client's answer through
+	}
+
+	if c.hideLength {
+		out.ContentLength = nil
+	}
+
+	out.Body = &countingBody{ReadCloser: out.Body, read: &c.read}
+
+	return out, nil
+}
+
+// countingBody counts the bytes read of a download.
+type countingBody struct {
+	io.ReadCloser
+
+	read *atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.read.Add(int64(n))
+
+	return n, err //nolint:wrapcheck // passes the download's own answer through, io.EOF included
 }
 
 func TestStorageDownloadsAManifestOnlyWhenItChanges(t *testing.T) {

@@ -20,6 +20,23 @@
 //	curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/plg/plugins     # plg.AdminHandler
 //	curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/admin/check/new-rule \
 //	  --data-binary @rule.zip                                                     # plg.Check of a zipped rule
+//
+// Rules may call one HTTP API, the coupon API whose host -coupon-api names (plg.WithHTTP; -coupon-api-private
+// when it is on a private network), with the secrets their plugin.yaml declares (plg.WithSecrets): the secret
+// <name> of the rule pricing/<rule> is the environment variable PRICING_SECRET_<RULE>_<NAME>, upper-cased, every
+// character but a letter or a digit becoming '_'. The seasonal rule of examples/rules reads two:
+//
+//	PRICING_SECRET_SEASONAL_COUPON_API_URL=http://coupons.internal:8080 \
+//	PRICING_SECRET_SEASONAL_COUPON_API_TOKEN=... \
+//	  go run ./service -artifacts rules/dist -coupon-api coupons.internal:8080 -coupon-api-private
+//
+// The service never logs a secret's value, and plg replaces any value a rule read with [secret <name>] in what it
+// reports of the rule (its output, errors, HTTP log records and spans).
+//
+// Each quote request is a server span continuing the request's traceparent, each rule call a span below it and
+// each request a rule makes one below that, carrying its traceparent on to the API. The spans go to the global
+// OpenTelemetry tracer provider: a deployment installs its SDK and exporter there (otel.SetTracerProvider) before
+// run; until then, tracing costs nothing.
 package main
 
 import (
@@ -27,12 +44,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"go.opentelemetry.io/otel"
 )
 
 // main only wires the process to run; the tests run it as a program (TestServiceProgram) and run in process.
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stderr)
+	code := run(ctx, os.Args[1:], process{
+		stderr: os.Stderr, tracerProvider: otel.GetTracerProvider(), lookupEnv: os.LookupEnv,
+	})
 
 	stop()
 	os.Exit(code)

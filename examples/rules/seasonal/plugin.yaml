@@ -1,6 +1,7 @@
 implements: github.com/heynemann/go-plg/examples/pricing.Rule@v1.0.0
 language: typescript
 entrypoint: plugin.ts
+secrets: [coupon_api_url, coupon_api_token] # the coupon API's address and bearer token, which the service resolves
 owner:
   maintainers:
     - {name: Cy Okafor, email: cy@example.com, handle: "@cy"}

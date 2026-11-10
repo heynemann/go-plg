@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/heynemann/go-plg"
 	"github.com/heynemann/go-plg/examples/pricing"
@@ -19,6 +21,8 @@ import (
 )
 
 const (
+	// tracerName is the instrumentation scope of the service's own spans.
+	tracerName = "github.com/heynemann/go-plg/examples/service"
 	// registration is the name the rules are registered under: their keys are "pricing/<plugin directory>".
 	registration = "pricing"
 	// memoryBudget caps the memory of every rule instance together; Register refuses rules beyond it.
@@ -40,32 +44,18 @@ const (
 
 // serve registers the rules of cfg.storage and serves the quote API on listener until ctx ends, then shuts down:
 // it stops accepting requests, lets those in flight finish and closes the rules' instances.
-func serve(ctx context.Context, listener net.Listener, cfg config) error {
+func serve(ctx context.Context, listener net.Listener, cfg *config) error {
 	//nolint:contextcheck // plg.New takes no context: it only builds the container (and its metric instruments)
 	container := plg.New(
 		plg.WithLogger(cfg.logger),
 		plg.WithMemoryBudget(memoryBudget),
 		plg.WithOnEvent(logEvent(cfg.logger)),
+		// Each rule call is a span plg.call <key>.<method>, a child of the quote request's span (see handler), with
+		// the rule's HTTP requests (plg.http <method>) below it, each carrying its span's traceparent.
+		plg.WithTracerProvider(cfg.tracerProvider),
 	)
 
-	err := plg.Register[pricing.Rule](ctx, container, registration,
-		plg.WithStorage(cfg.storage),
-		plg.WithHost[pricing.Customers](customers{"ada": "gold", "bob": "silver"}),
-		// Every rule validates itself against the service's limits before it goes live, at startup and on each
-		// reload: a rule that could grant more is rejected (startup fails; a reload keeps its last good version).
-		plg.WithValidation(func(context.Context, plg.PluginInfo) (pricing.Limits, error) {
-			return pricing.Limits{MaxPercent: maxPercent, MaxCents: maxCents}, nil
-		}),
-		// Every rule names its owning team and a way to reach it in its plugin.yaml, or it does not go live.
-		plg.WithRequiredOwnership(),
-		// Every instance starts here, before serving: starting one runs the rule's Create (a Go rule's source is
-		// interpreted then), which takes far longer than a call and, on a slow or busy machine, longer than
-		// ruleTimeout. With the pool at its maximum from the start, a request takes an idle instance or waits for
-		// one instead of starting it under its own deadline (only a request arriving while plg replaces an instance
-		// a failing rule lost may still start one). The price is every instance's memory from the start.
-		plg.WithPool(maxInstances, maxInstances),
-		plg.WithPollInterval(cfg.poll),
-	)
+	err := plg.Register[pricing.Rule](ctx, container, registration, registerOptions(cfg)...)
 	if err != nil {
 		return errors.Join(err, listener.Close(), container.Close(ctx))
 	}
@@ -96,6 +86,39 @@ func serve(ctx context.Context, listener net.Listener, cfg config) error {
 	<-served // http.ErrServerClosed once Shutdown began
 
 	return errors.Join(err, container.Close(stopCtx))
+}
+
+// registerOptions returns the options the rules of cfg are registered with.
+func registerOptions(cfg *config) []plg.RegisterOption {
+	opts := []plg.RegisterOption{
+		plg.WithStorage(cfg.storage),
+		plg.WithHost[pricing.Customers](customers{"ada": "gold", "bob": "silver"}),
+		// Every rule validates itself against the service's limits before it goes live, at startup and on each
+		// reload: a rule that could grant more is rejected (startup fails; a reload keeps its last good version).
+		plg.WithValidation(func(context.Context, plg.PluginInfo) (pricing.Limits, error) {
+			return pricing.Limits{MaxPercent: maxPercent, MaxCents: maxCents}, nil
+		}),
+		// Every rule names its owning team and a way to reach it in its plugin.yaml, or it does not go live.
+		plg.WithRequiredOwnership(),
+		// Every instance starts here, before serving: starting one runs the rule's Create (a Go rule's source is
+		// interpreted then), which takes far longer than a call and, on a slow or busy machine, longer than
+		// ruleTimeout. With the pool at its maximum from the start, a request takes an idle instance or waits for
+		// one instead of starting it under its own deadline (only a request arriving while plg replaces an instance
+		// a failing rule lost may still start one). The price is every instance's memory from the start.
+		plg.WithPool(maxInstances, maxInstances),
+		plg.WithPollInterval(cfg.poll),
+		// The secrets each rule's plugin.yaml declares come from the environment, by rule (see envSecrets).
+		plg.WithSecrets(envSecrets(cfg.lookupEnv)),
+	}
+
+	if cfg.couponAPI != "" { // the only host the rules may reach; without it, every request is refused
+		opts = append(opts, plg.WithHTTP(plg.HTTPPolicy{
+			AllowedHosts:         []string{cfg.couponAPI},
+			BlockPrivateNetworks: new(!cfg.couponAPIPrivate),
+		}))
+	}
+
+	return opts
 }
 
 // customers is the service's side of pricing.Customers, the host the rules call: a fixed table of tiers.
@@ -131,11 +154,21 @@ type ruleResult struct {
 
 // handler serves POST /quote: the order in the body, priced by every rule of container; and, with an admin token,
 // the admin endpoints (see mountAdmin).
-func handler(container *plg.Container, cfg config) http.Handler {
+//
+// Each quote request is a server span "POST /quote" of cfg.tracerProvider, continuing the trace of the request's
+// W3C traceparent header when it has one: the rules' calls are its children, so a quote is one trace from the
+// client through the service and its rules to the APIs they call.
+func handler(container *plg.Container, cfg *config) http.Handler {
 	logger := cfg.logger
+	tracer := cfg.tracerProvider.Tracer(tracerName)
 	strictJSON := sonic.Config{DisallowUnknownFields: true, ValidateString: true}.Froze()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /quote", func(writer http.ResponseWriter, req *http.Request) {
+		ctx := propagation.TraceContext{}.Extract(req.Context(), propagation.HeaderCarrier(req.Header))
+		ctx, span := tracer.Start(ctx, "POST /quote", trace.WithSpanKind(trace.SpanKindServer))
+
+		defer span.End()
+
 		var order pricing.Order
 
 		err := strictJSON.NewDecoder(http.MaxBytesReader(writer, req.Body, maxBodyBytes)).Decode(&order)
@@ -151,9 +184,9 @@ func handler(container *plg.Container, cfg config) http.Handler {
 
 		writer.Header().Set("Content-Type", "application/json")
 
-		err = strictJSON.NewEncoder(writer).Encode(price(req.Context(), container, order))
+		err = strictJSON.NewEncoder(writer).Encode(price(ctx, container, order))
 		if err != nil { // the client is gone: the answer has started, nothing else can be sent
-			logger.DebugContext(req.Context(), "writing a quote failed", slog.Any("error", err))
+			logger.DebugContext(ctx, "writing a quote failed", slog.Any("error", err))
 		}
 	})
 

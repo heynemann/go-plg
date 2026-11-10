@@ -83,22 +83,29 @@ func Copy(tb testing.TB, dir string) {
 	require.NoError(tb, os.CopyFS(dir, os.DirFS(filepath.Join(Examples(tb), "rules"))))
 	require.NoError(tb, os.RemoveAll(filepath.Join(dir, "dist")))
 	require.NoError(tb, os.RemoveAll(filepath.Join(dir, "reports")))
+	git(tb, dir, "init", "-q")
+	Commit(tb, dir, "The pricing rules")
+}
 
-	for _, args := range [][]string{
-		{"init", "-q"},
-		{"add", "-A"},
-		{
-			"-c", "user.name=Ana Lima", "-c", "user.email=ana@example.com", "-c", "commit.gpgsign=false",
-			"commit", "-q", "-m", "The pricing rules",
-		},
-	} {
-		git := exec.CommandContext(tb.Context(), "git", args...) //nolint:gosec // G204: the fixed commands above
-		git.Dir = dir
+// Commit commits every change of the repository in dir (Copy's) with message, as its author would.
+func Commit(tb testing.TB, dir, message string) {
+	tb.Helper()
 
-		git.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
-		out, err := git.CombinedOutput()
-		require.NoError(tb, err, string(out))
-	}
+	git(tb, dir, "add", "-A")
+	git(tb, dir, "-c", "user.name=Ana Lima", "-c", "user.email=ana@example.com", "-c", "commit.gpgsign=false",
+		"commit", "-q", "-m", message)
+}
+
+// git runs git with args in dir, without the user's or the system's configuration.
+func git(tb testing.TB, dir string, args ...string) {
+	tb.Helper()
+
+	cmd := exec.CommandContext(tb.Context(), "git", args...) //nolint:gosec // G204: the fixed commands of this file
+	cmd.Dir = dir
+
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	out, err := cmd.CombinedOutput()
+	require.NoError(tb, err, string(out))
 }
 
 // Pack runs the repository's CI script in a copy of it, as its CI would, and returns the directory of the
@@ -109,11 +116,19 @@ func Pack(tb testing.TB) string {
 	repo := tb.TempDir()
 	Copy(tb, repo)
 
+	return CI(tb, repo, Environ(tb))
+}
+
+// CI runs the CI script of the repository in dir (Copy's) in environ (Environ's), as its CI would, and returns the
+// directory of the artifacts it packed: run again after a Commit, it packs the repository anew.
+func CI(tb testing.TB, dir string, environ []string) string {
+	tb.Helper()
+
 	ci := exec.CommandContext(tb.Context(), "./ci.sh")
-	ci.Dir = repo
-	ci.Env = Environ(tb)
+	ci.Dir = dir
+	ci.Env = environ
 	out, err := ci.CombinedOutput()
 	require.NoError(tb, err, string(out))
 
-	return filepath.Join(repo, "dist")
+	return filepath.Join(dir, "dist")
 }
