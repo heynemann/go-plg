@@ -1,0 +1,20 @@
+implements: example.com/rewards/cohort.Provider@v1.0.0
+language: go
+entrypoint: .
+owner:
+  maintainers:
+    - name: Gil Moreau
+      email: gil@example.com
+      handle: "@gil"
+  team:
+    name: growth
+    department: marketing
+  org: rewards
+  company: Example Shop
+  contact:
+    oncall: growth-oncall
+    channel: "#growth"
+    email: growth@example.com
+  links:
+    repository: https://git.example.com/rewards/growth
+    runbook: https://git.example.com/rewards/growth/gold.md

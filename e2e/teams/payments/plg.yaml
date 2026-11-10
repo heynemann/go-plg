@@ -1,0 +1,7 @@
+# The payments team's author repository: the wallet's reward deliverer and an eligibility condition of the
+# rewards platform, both in TypeScript, validated and packed by ci.sh. The platform requires every plugin to name
+# its owner.
+plugins:
+  - wallet
+  - active-buyer
+requireOwnership: true

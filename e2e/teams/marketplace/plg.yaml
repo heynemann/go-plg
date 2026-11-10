@@ -1,0 +1,5 @@
+# The marketplace team's author repository: an eligibility condition for its North American campaigns, in
+# TypeScript, validated and packed by ci.sh. The platform requires every plugin to name its owner.
+plugins:
+  - north-america
+requireOwnership: true

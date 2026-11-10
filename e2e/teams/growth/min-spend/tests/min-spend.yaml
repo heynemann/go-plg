@@ -1,0 +1,54 @@
+cases:
+  - name: a user who spent exactly the minimum qualifies
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 10000
+          orders: 2
+    expect:
+      result:
+        eligible: true
+        reason: spent 10000 cents
+  - name: a cent less does not
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: BR
+          tier: gold
+          spendCents: 9999
+          orders: 2
+    expect:
+      result:
+        eligible: false
+        reason: "spent 9999 cents, under 10000"
+  - name: a platform allowing the minimum accepts the condition
+    call: Validate
+    input:
+      in:
+        countries:
+          - BR
+        maxSpendCents: 10000
+        maxOrders: 10
+    expect:
+      issues: []
+  - name: a platform allowing less rejects it
+    call: Validate
+    input:
+      in:
+        countries:
+          - BR
+        maxSpendCents: 5000
+        maxOrders: 10
+    expect:
+      issues:
+        - severity: error
+          code: min-spend.minimum
+          message: "requires 10000 cents, over the 5000 cents limit"

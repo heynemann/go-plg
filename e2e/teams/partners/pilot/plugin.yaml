@@ -1,0 +1,20 @@
+implements: example.com/rewards/cohort.Provider@v1.0.0
+language: lua
+entrypoint: plugin.lua
+owner:
+  maintainers:
+    - name: Lena Okafor
+      email: lena@example.com
+      handle: "@lena"
+  team:
+    name: partners
+    department: business-development
+  org: rewards
+  company: Example Shop
+  contact:
+    oncall: partners-oncall
+    channel: "#partners"
+    email: partners@example.com
+  links:
+    repository: https://git.example.com/rewards/partners
+    runbook: https://git.example.com/rewards/partners/pilot.md

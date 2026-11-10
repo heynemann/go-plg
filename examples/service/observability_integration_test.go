@@ -21,7 +21,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/heynemann/go-plg"
-	"github.com/heynemann/go-plg/examples/internal/authorrepo"
+	"github.com/heynemann/go-plg/examples/authorrepo"
 )
 
 // couponToken is the coupon API's bearer token: the seasonal rule's secret coupon_api_token.

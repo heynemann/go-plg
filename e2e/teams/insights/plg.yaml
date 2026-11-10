@@ -1,0 +1,9 @@
+# The insights team's author repository: the platform's whole user base as a cohort, and the loyalty rule the
+# team ported to every language the platform runs (each port validated against the same test cases), validated
+# and packed by ci.sh. The platform requires every plugin to name its owner.
+plugins:
+  - everyone
+  - loyal-go
+  - loyal-lua
+  - loyal-ts
+requireOwnership: true

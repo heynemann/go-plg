@@ -3,7 +3,9 @@ version: "2"
 run:
   go: "1.27"
   tests: true
-  relative-path-mode: gomod
+  # Issue paths are relative to this file whichever module is linted (cd examples, cd e2e), so that an exclusion
+  # can name one module's files: e2e/go.mod, not every go.mod.
+  relative-path-mode: cfg
 
 linters:
   # Everything on; every disable below carries its reason.
@@ -168,11 +170,17 @@ linters:
       # Guest packages register their embedded artifact from init(), by design (blank-import activation).
       - path: guest/
         linters: [gochecknoinits]
-      # examples/ is a module of its own, so that the core's go.mod stays free of the examples' dependencies
-      # (RULES.md §2); it builds against this checkout. Only that replace directive is exempt.
-      - path: go\.mod
+      # examples/ and e2e/ are modules of their own, so that the core's go.mod stays free of their dependencies
+      # (RULES.md §2); they build against this checkout: plg, and e2e also the examples (the S3 storage and the
+      # helpers their tests share) and the rewards contracts (e2e/contracts, the contract team's checkout the
+      # platform builds against; it builds against this checkout of plg too). Only those replace directives, in
+      # those modules' go.mod, are exempt.
+      - path: ^(examples|e2e|e2e/contracts)/go\.mod$
         linters: [gomoddirectives]
         text: "local replacement are not allowed: github.com/heynemann/go-plg$"
+      - path: ^e2e/go\.mod$
+        linters: [gomoddirectives]
+        text: "local replacement are not allowed: (github.com/heynemann/go-plg/examples|example.com/rewards)$"
 
 formatters:
   enable:

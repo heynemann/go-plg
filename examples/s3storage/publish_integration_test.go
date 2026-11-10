@@ -20,7 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/heynemann/go-plg"
-	"github.com/heynemann/go-plg/examples/internal/authorrepo"
+	"github.com/heynemann/go-plg/examples/authorrepo"
+	"github.com/heynemann/go-plg/examples/containertest"
 	"github.com/heynemann/go-plg/examples/internal/pricingtest"
 	"github.com/heynemann/go-plg/examples/pricing"
 	"github.com/heynemann/go-plg/examples/s3storage"
@@ -191,8 +192,8 @@ func serving(t *testing.T, container *plg.Container, key, commit string) string 
 func TestPublishedArtifactsGoLiveFromS3(t *testing.T) {
 	t.Parallel()
 
-	client := startMinIO(t)
-	bucket := newBucket(t, client)
+	client := containertest.StartMinIO(t)
+	bucket := containertest.NewBucket(t, client)
 
 	repo := t.TempDir()
 	authorrepo.Copy(t, repo)

@@ -1,0 +1,40 @@
+cases:
+  - name: an average order of exactly 40.00 qualifies
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 12000
+          orders: 3
+    expect:
+      result:
+        eligible: true
+        reason: average order of 4000 cents
+  - name: a larger one does not
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: BR
+          tier: gold
+          spendCents: 12003
+          orders: 3
+    expect:
+      result:
+        eligible: false
+        reason: "average order of 4001 cents, over 4000"
+  - name: every platform accepts the condition
+    call: Validate
+    input:
+      in:
+        countries: []
+        maxSpendCents: 0
+        maxOrders: 0
+    expect:
+      issues: []

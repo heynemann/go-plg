@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/heynemann/go-plg/examples/internal/authorrepo"
+	"github.com/heynemann/go-plg/examples/authorrepo"
 )
 
 func TestMain(m *testing.M) {

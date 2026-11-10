@@ -1,0 +1,52 @@
+cases:
+  - name: each subject of the batch gets its decision, in order
+    call: Decide
+    input:
+      subjects:
+        - campaign: spring
+          user:
+            id: u000001
+            country: BR
+            tier: gold
+            spendCents: 5000
+            orders: 1
+        - campaign: spring
+          user:
+            id: u000002
+            country: BR
+            tier: gold
+            spendCents: 4999
+            orders: 1
+    expect:
+      result:
+        - eligible: true
+          reason: spent 5000 cents
+        - eligible: false
+          reason: "spent 4999 cents, under 5000"
+  - name: an empty batch has no decisions
+    call: Decide
+    input:
+      subjects: []
+    expect:
+      result: []
+  - name: a platform allowing 50.00 of spend accepts the condition
+    call: Validate
+    input:
+      in:
+        countries: []
+        maxSpendCents: 5000
+        maxOrders: 0
+    expect:
+      issues: []
+  - name: a platform allowing less rejects it
+    call: Validate
+    input:
+      in:
+        countries: []
+        maxSpendCents: 4999
+        maxOrders: 0
+    expect:
+      issues:
+        - severity: error
+          code: batch-spend.minimum
+          message: "requires 5000 cents, over the 4999 cents limit"

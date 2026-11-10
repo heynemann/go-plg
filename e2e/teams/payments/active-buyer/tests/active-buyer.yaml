@@ -1,0 +1,52 @@
+cases:
+  - name: a user with three orders qualifies
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 0
+          orders: 3
+    expect:
+      result:
+        eligible: true
+        reason: 3 orders
+  - name: one with two does not
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000002
+          country: BR
+          tier: gold
+          spendCents: 0
+          orders: 2
+    expect:
+      result:
+        eligible: false
+        reason: "2 orders, under 3"
+  - name: a platform allowing three orders accepts the condition
+    call: Validate
+    input:
+      in:
+        countries: []
+        maxSpendCents: 0
+        maxOrders: 3
+    expect:
+      issues: []
+  - name: a platform allowing two rejects it
+    call: Validate
+    input:
+      in:
+        countries: []
+        maxSpendCents: 0
+        maxOrders: 2
+    expect:
+      issues:
+        - severity: error
+          code: active-buyer.orders
+          message: "requires 3 orders, over the 2 orders limit"

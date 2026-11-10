@@ -49,6 +49,7 @@ HTTP allowlist).
 - [Performance](#performance)
 - [Limitations and residual risks](#limitations-and-residual-risks)
 - [Examples](#examples)
+- [End-to-end: a rewards platform](#end-to-end-a-rewards-platform)
 - [Development](#development)
 
 ## Concepts
@@ -2217,6 +2218,45 @@ Docker, and the author repository's tests run its CI script in a git repository 
 they need `git`, `sh` and `curl` too:
 `make examples`. Each top-level test starts its own server and terminates it through `t.Cleanup`
 (RULES.md §7), so a run leaves no container behind whether it passes or fails.
+
+## End-to-end: a rewards platform
+
+[`e2e/`](e2e) (a module of its own, like `examples/`) builds the platform the
+[author guide](#author-guide-from-a-contract-to-a-served-plugin) was designed for, and runs it on plg's real path:
+growth teams' cohort providers, eligibility conditions and reward deliverers, written in Go, Lua and TypeScript,
+go from each team's repository through its CI (`plg validate` and `plg pack`) to MinIO, and a polling platform
+serves them in every guest.
+
+- [`e2e/contracts`](e2e/contracts): the contracts, module `example.com/rewards`: `cohort.Provider` (`IsMember`,
+  a paged `List`, the platform's user directory as its Host `cohort.Users`), `eligibility.Condition` (validated
+  against the platform's `Limits`) and `delivery.Deliverer` (a reward carries its idempotency key). The teams'
+  CI resolves them through an offline module proxy at v1.0.0, v1.1.0 (a field added) and v2.0.0.
+- [`e2e/teams`](e2e/teams): author repositories (`growth` in Go, `crm` in Lua calling a vendor's API with its token,
+  `payments` in TypeScript crediting a wallet API with its token and the reward's idempotency key; and the
+  scenarios' `insights`, `fraud`, `partners`, `marketplace` and `nextgen`, four of whose plugins are broken on
+  purpose), each with its `plg.yaml`, test cases, typings and `ci.sh`.
+- [`e2e/platform`](e2e/platform): the campaign engine, a Go package to read as a way to build such a platform:
+  one registration per contract (required ownership, validation, secrets, HTTP, pools, polling), and
+  `Platform.Run`, which pages through a campaign's cohort, asks its conditions about each member, a bounded number
+  of members at once, and delivers with retries under one idempotency key per member, one trace per campaign.
+- [`e2e/harness`](e2e/harness): the tests' rig: MinIO, the teams' CI with the `plg` built from this checkout, the
+  artifacts published under `s3storage.WithArtifacts`, the platform with an in-process OpenTelemetry SDK, fake
+  wallet and vendor APIs, and an oracle computing in Go what each campaign must do.
+- The scenarios ([`e2e/*_test.go`](e2e)): correctness (exactly-once crediting through timeouts and 503s, cohorts at
+  page boundaries, conditions combining with AND, one rule's Go, Lua and TypeScript ports agreeing, a failing plugin's
+  errors counted against it, a cohort's failed page asked again), extensibility (a new team's condition live on the
+  next poll, a platform built with the contracts' v1.1.0 release serving v1.0.0 pins, a v2 plugin skipped visibly, a
+  hot swap during a campaign changing later members only, and one failing no call in flight) and operability (one
+  trace per campaign down to the wallet, metrics by owner, panics and hangs isolated and shown to their teams by
+  `plg status` and `plg events`, a version failing validation keeping the last good one serving, no secret in logs,
+  spans, events or admin answers, a plugin claiming another team reading none of its secrets).
+
+`make complex-e2e` lints the module and runs its scenarios with `-race`, then its load test without it (Docker,
+`git` and `sh` required); it is not part of `make check`. The load test (`e2e/load_test.go`) runs a fixed amount of
+mixed traffic, 56 campaigns over 10,000 users in every language, while conditions are republished and the wallet
+fails or holds a fraction of its requests, and asserts service levels (throughput, the members' p99 latency, an
+error budget, no reward lost or duplicated) and invariants (the host's heap, goroutines after `Close`, the pools'
+bounds, the guests' memory budget); PLAN.md records the measurements behind its thresholds.
 
 ## Development
 

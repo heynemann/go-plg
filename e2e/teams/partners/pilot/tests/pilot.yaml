@@ -1,0 +1,30 @@
+cases:
+  - name: one page holds every pilot account
+    call: List
+    input:
+      cursor: ""
+    expect:
+      result:
+        users:
+          - u000003
+          - u000012
+          - u000016
+        next: ""
+  - name: there is no second page
+    call: List
+    input:
+      cursor: u000016
+    expect:
+      error: "the pilot cohort has one page, not one at 'u000016'"
+  - name: a pilot account is a member
+    call: IsMember
+    input:
+      user: u000012
+    expect:
+      result: true
+  - name: another user is not
+    call: IsMember
+    input:
+      user: u000013
+    expect:
+      result: false

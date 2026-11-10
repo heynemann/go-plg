@@ -1,0 +1,134 @@
+# The directory is the platform's Host (cohort.Users), stubbed: each case says what it answers.
+cases:
+  - name: a page keeps the directory page's gold users and its next cursor
+    call: List
+    input:
+      cursor: ""
+    host:
+      - method: Page
+        args:
+          cursor: ""
+          limit: 100
+        result:
+          users:
+            - id: u000001
+              country: BR
+              tier: gold
+              spendCents: 12000
+              orders: 4
+            - id: u000002
+              country: PT
+              tier: silver
+              spendCents: 300
+              orders: 1
+            - id: u000003
+              country: US
+              tier: gold
+              spendCents: 0
+              orders: 0
+          next: u000003
+        times: 1
+    expect:
+      result:
+        users:
+          - u000001
+          - u000003
+        next: u000003
+  - name: a page without gold users is empty, and listing goes on
+    call: List
+    input:
+      cursor: u000003
+    host:
+      - method: Page
+        args:
+          cursor: u000003
+          limit: 100
+        result:
+          users:
+            - id: u000004
+              country: DE
+              tier: bronze
+              spendCents: 50
+              orders: 1
+          next: u000004
+    expect:
+      result:
+        users: []
+        next: u000004
+  - name: the last page has no next cursor
+    call: List
+    input:
+      cursor: u000004
+    host:
+      - method: Page
+        args:
+          cursor: u000004
+          limit: 100
+        result:
+          users: []
+          next: ""
+    expect:
+      result:
+        users: []
+        next: ""
+  - name: the directory's failure is the listing's
+    call: List
+    input:
+      cursor: ""
+    host:
+      - method: Page
+        args:
+          cursor: ""
+          limit: 100
+        error: directory unavailable
+    expect:
+      error: directory unavailable
+  - name: a gold user is a member
+    call: IsMember
+    input:
+      user: u000001
+    host:
+      - method: Lookup
+        args:
+          id: u000001
+        result:
+          id: u000001
+          country: BR
+          tier: gold
+          spendCents: 12000
+          orders: 4
+        times: 1
+    expect:
+      result: true
+  - name: a silver user is not
+    call: IsMember
+    input:
+      user: u000002
+    host:
+      - method: Lookup
+        args:
+          id: u000002
+        result:
+          id: u000002
+          country: PT
+          tier: silver
+          spendCents: 300
+          orders: 1
+    expect:
+      result: false
+  - name: an unknown user is not
+    call: IsMember
+    input:
+      user: nobody
+    host:
+      - method: Lookup
+        args:
+          id: nobody
+        result:
+          id: ""
+          country: ""
+          tier: ""
+          spendCents: 0
+          orders: 0
+    expect:
+      result: false
