@@ -2233,7 +2233,7 @@ serves them in every guest.
   CI resolves them through an offline module proxy at v1.0.0, v1.1.0 (a field added) and v2.0.0.
 - [`e2e/teams`](e2e/teams): author repositories (`growth` in Go, `crm` in Lua calling a vendor's API with its token,
   `payments` in TypeScript crediting a wallet API with its token and the reward's idempotency key; and the
-  scenarios' `insights`, `fraud`, `partners`, `marketplace` and `nextgen`, two of whose plugins are broken on
+  scenarios' `insights`, `fraud`, `partners`, `marketplace` and `nextgen`, three of whose plugins are broken on
   purpose), each with its `plg.yaml`, test cases, typings and `ci.sh`.
 - [`e2e/platform`](e2e/platform): the campaign engine, a Go package to read as a way to build such a platform:
   one registration per contract (required ownership, validation, secrets, HTTP, pools, polling), and
