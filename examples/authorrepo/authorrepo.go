@@ -113,7 +113,8 @@ func CopyRepository(tb testing.TB, src, dir, message string) {
 	Commit(tb, dir, message)
 }
 
-// Commit commits every change of the repository in dir (Copy's) with message, as its author would.
+// Commit commits every change of the author repository in dir (Copy's or CopyRepository's) with message, as its
+// author would.
 func Commit(tb testing.TB, dir, message string) {
 	tb.Helper()
 
@@ -145,8 +146,9 @@ func Pack(tb testing.TB) string {
 	return CI(tb, repo, Environ(tb))
 }
 
-// CI runs the CI script of the repository in dir (Copy's) in environ (Environ's), as its CI would, and returns the
-// directory of the artifacts it packed: run again after a Commit, it packs the repository anew.
+// CI runs the CI script of the author repository in dir (Copy's or CopyRepository's) in environ (Environ's or
+// ProxyEnviron's), as its CI would, and returns the directory of the artifacts it packed: run again after a Commit,
+// it packs the repository anew.
 func CI(tb testing.TB, dir string, environ []string) string {
 	tb.Helper()
 
