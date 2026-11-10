@@ -31,13 +31,7 @@ func TestRewardsPlatformRunsACampaign(t *testing.T) {
 		"conditions/active-buyer",
 	}, rig.Published, "every team published its plugins")
 
-	campaigns := []platform.Campaign{{
-		ID: "spring-gold", Cohort: "gold", Conditions: []string{"min-spend", "country", "active-buyer"},
-		Deliverer: "wallet", Reward: platform.Reward{Points: 500, Memo: "Spring bonus for gold members"},
-	}, {
-		ID: "win-back", Cohort: "churn-risk", Conditions: []string{"active-buyer"},
-		Deliverer: "wallet", Reward: platform.Reward{Points: 200, Memo: "We miss you"},
-	}}
+	campaigns := []platform.Campaign{springGold("spring-gold"), winBack("win-back")}
 	calls := map[harness.Calls]int64{}
 
 	for i := range campaigns {
@@ -68,7 +62,7 @@ func TestRewardsPlatformRunsACampaign(t *testing.T) {
 }
 
 // assertOneTrace checks that campaign was one trace: one campaign.run span, the cohort's List calls its children,
-// one per page the oracle expects (each making the Host or HTTP calls its cohort makes), a campaign.user child per
+// one per page the oracle expects (each making the one Host or HTTP call reading that page), a campaign.user child per
 // member, the members' condition calls and the eligible ones' Deliver calls below theirs, and each Deliver's POST
 // to the wallet below it, whose traceparent the wallet received.
 func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign, result platform.Result) {
@@ -86,7 +80,7 @@ func assertOneTrace(t *testing.T, rig *harness.Rig, campaign *platform.Campaign,
 	assert.Len(t, children[run.SpanID()], len(lists)+len(users), "the run has no other child")
 
 	for i := range lists {
-		assert.NotEmpty(t, children[lists[i].SpanContext.SpanID()], "%s calls its Host or its vendor's API", cohortCall)
+		assert.Len(t, children[lists[i].SpanContext.SpanID()], 1, "%s reads one page of its source", cohortCall)
 	}
 
 	delivered := 0

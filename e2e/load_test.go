@@ -178,13 +178,7 @@ func loadLimits() platform.Limits {
 
 // loadShapes are the campaigns the load cycles through: both cohorts, every condition, in every language.
 func loadShapes() []platform.Campaign {
-	return []platform.Campaign{{
-		Cohort: "gold", Conditions: []string{"min-spend", "country", "active-buyer"}, Deliverer: "wallet",
-		Reward: platform.Reward{Points: 500, Memo: "Spring bonus for gold members"},
-	}, {
-		Cohort: "churn-risk", Conditions: []string{"active-buyer"}, Deliverer: "wallet",
-		Reward: platform.Reward{Points: 200, Memo: "We miss you"},
-	}, {
+	return []platform.Campaign{springGold(""), winBack(""), {
 		Cohort: "gold", Conditions: []string{"country"}, Deliverer: "wallet",
 		Reward: platform.Reward{Points: 300, Memo: "Gold members in Brazil and Portugal"},
 	}, {
