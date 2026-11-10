@@ -16,6 +16,23 @@ cases:
       result:
         eligible: true
         reason: not on the watchlist
+  - name: a watched user is refused, with the token in the reason, a result plg does not scrub
+    call: Eligible
+    input:
+      subject:
+        campaign: spring
+        user:
+          id: u000003
+          country: BR
+          tier: gold
+          spendCents: 500
+          orders: 1
+    secrets:
+      watchlist_token: w4tch
+    expect:
+      result:
+        eligible: false
+        reason: on the watchlist (token w4tch)
   - name: a user in Mexico cannot be checked, and the token in the error is scrubbed
     call: Eligible
     input:

@@ -72,8 +72,9 @@ func ConditionRules() map[string]func(User) bool {
 		"velocity": func(user User) bool {
 			return user.Orders > 0 && user.SpendCents/int64(user.Orders) <= MaxAverageOrderCents
 		},
-		// watchlist (fraud, Go): everyone it does not fail for (ConditionFailures).
-		"watchlist": func(User) bool { return true },
+		// watchlist (fraud, Go): everyone it does not fail for (ConditionFailures) but the users it watches, those
+		// with one order.
+		"watchlist": func(user User) bool { return user.Orders != 1 },
 		// north-america (marketplace, TypeScript): users in the United States or Mexico.
 		"north-america": func(user User) bool { return user.Country == "US" || user.Country == "MX" },
 	}
@@ -136,7 +137,8 @@ func PluginTeams() map[string]string {
 		"cohorts/everyone": Insights, "conditions/loyal-go": Insights, "conditions/loyal-lua": Insights,
 		"conditions/loyal-ts":  Insights,
 		"conditions/screening": Fraud, "conditions/velocity": Fraud, "conditions/watchlist": Fraud,
-		"cohorts/pilot": Partners, "deliveries/voucher": Partners,
+		"cohorts/watched": Fraud,
+		"cohorts/pilot":   Partners, "deliveries/voucher": Partners,
 		"conditions/north-america": Marketplace,
 		"conditions/batch-spend":   NextGen,
 	}

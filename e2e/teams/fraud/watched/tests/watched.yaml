@@ -1,0 +1,37 @@
+cases:
+  - name: a page holds no user and a next cursor with the token, which plg does not scrub
+    call: List
+    input:
+      cursor: ""
+    secrets:
+      watchlist_token: w4tch
+    expect:
+      result:
+        users: []
+        next: watched with token w4tch
+  - name: every page's next cursor is the same
+    call: List
+    input:
+      cursor: watched with token w4tch
+    secrets:
+      watchlist_token: w4tch
+    expect:
+      result:
+        users: []
+        next: watched with token w4tch
+  - name: no user is watched
+    call: IsMember
+    input:
+      user: u000001
+    secrets:
+      watchlist_token: w4tch
+    expect:
+      result: false
+  - name: without its token the provider fails
+    call: List
+    input:
+      cursor: ""
+    secrets:
+      watchlist_token: null
+    expect:
+      error: secret "watchlist_token" could not be resolved

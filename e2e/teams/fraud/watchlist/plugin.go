@@ -2,9 +2,10 @@
 // qualify. It reads the watchlist API's bearer token, the secret watchlist_token.
 //
 // It handles that secret carelessly on purpose, the platform's end-to-end tests' fixture for every way a plugin
-// could carry a secret into the platform's logs, spans, events and admin answers, all of which plg scrubs: it
-// prints the token on every call, warns with it from Validate, and puts it in its error for the users it cannot
-// check (in Mexico) and in its panic for those it chokes on (without orders).
+// could carry a secret into the platform's logs, spans, events and admin answers: it prints the token on every
+// call, warns with it from Validate, and puts it in its error for the users it cannot check (in Mexico) and in
+// its panic for those it chokes on (without orders), all of which plg scrubs, and in the reason it refuses the
+// users it watches (with one order) for, a successful result plg does not scrub.
 package watchlist
 
 import (
@@ -41,6 +42,8 @@ func (condition) Eligible(ctx context.Context, subject eligibility.Subject) (eli
 		panic("the watchlist choked on " + user.ID + " with token " + token)
 	case user.Country == "MX":
 		return eligibility.Decision{}, fmt.Errorf("the watchlist does not cover %s (token %s)", user.Country, token)
+	case user.Orders == 1:
+		return eligibility.Decision{Reason: "on the watchlist (token " + token + ")"}, nil
 	default:
 		return eligibility.Decision{Eligible: true, Reason: "not on the watchlist"}, nil
 	}

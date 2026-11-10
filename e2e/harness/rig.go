@@ -138,6 +138,7 @@ func NewRig(tb testing.TB, opts *Options) *Rig {
 		platform.Cohorts + "/churn-risk/vendor_api_token":  VendorToken,
 		platform.Deliveries + "/wallet/wallet_api_token":   WalletToken,
 		platform.Conditions + "/watchlist/watchlist_token": WatchlistToken,
+		platform.Cohorts + "/watched/watchlist_token":      WatchlistToken,
 	}
 	rig.S3 = containertest.StartMinIO(tb)
 	rig.Bucket = containertest.NewBucket(tb, rig.S3)

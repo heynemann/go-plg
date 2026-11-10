@@ -316,7 +316,9 @@ func TestFailuresStayWithTheirPluginsAndReachTheirTeams(t *testing.T) {
 		keys = append(keys, plugin.Key)
 	}
 
-	assert.Equal(t, []string{platform.Conditions + "/screening", velocity, platform.Conditions + "/watchlist"}, keys,
+	assert.Equal(t, []string{
+		platform.Cohorts + "/watched", platform.Conditions + "/screening", velocity, platform.Conditions + "/watchlist",
+	}, keys,
 		"plg status -team fraud: the team's plugins only")
 
 	assertShownToTeam(t, admin, velocity, &shown{
@@ -499,11 +501,13 @@ func TestAValidationFailingVersionKeepsTheLastGoodServing(t *testing.T) {
 }
 
 // No secret's value reaches the platform's logs, spans, events or admin answers, though plugins use every secret
-// the vault holds and one prints and reports its own: campaigns use the CRM vendor's token (churn-risk), the
+// the vault holds and two print and report their own: campaigns use the CRM vendor's token (churn-risk), the
 // wallet's (wallet, answered 503 a few times) and the fraud team's watchlist token, which watchlist prints on
-// every call, warns of from Validate, and puts in its errors and panics. Logged at Debug, traced, kept as events
-// and served by the admin handler, none of it holds a token; what watchlist leaked is there, as plg's
-// "[secret watchlist_token]", in each.
+// every call, warns of from Validate, and puts in its errors, its panics and the reason it refuses a member for,
+// and which watched puts in its cursors, which loop, so the platform refuses its second page. Logged at Debug,
+// traced, kept as events and served by the admin handler, none of it holds a token; what watchlist leaked is
+// there, as plg's "[secret watchlist_token]", in each. A reason and a cursor are successful results, which plg
+// does not scrub: the platform keeps them out of spans and errors.
 func TestSecretsNeverLeak(t *testing.T) {
 	t.Parallel()
 
@@ -530,6 +534,15 @@ func TestSecretsNeverLeak(t *testing.T) {
 		expected.Result.Retries = result.Retries
 		assert.Equal(t, expected.Result, result, campaigns[i].ID)
 	}
+
+	watched := platform.Campaign{
+		ID: "secret-watched", Cohort: "watched", Conditions: []string{"watchlist"}, Deliverer: "wallet",
+		Reward: platform.Reward{Points: 1, Memo: "Watched"},
+	}
+	result, err := rig.Platform.Run(t.Context(), &watched)
+	require.ErrorIs(t, err, platform.ErrCampaign, "watched's looping cursor is refused")
+	assert.Equal(t, platform.Result{Failures: map[string]int{platform.Cohorts + "/watched": 1}}, result)
+	assert.NotContains(t, err.Error(), harness.WatchlistToken, "the listing's error holds no cursor")
 
 	require.Positive(t, rig.Vendor.Requests(), "the vendor's token was used")
 	require.Positive(t, rig.Wallet.Requests(), "the wallet's token was used")

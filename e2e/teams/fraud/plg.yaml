@@ -1,9 +1,10 @@
-# The fraud team's author repository: eligibility conditions screening campaign members, in Lua and Go, validated
-# and packed by ci.sh. Two of them are broken on purpose, the failures the platform's end-to-end tests isolate and
-# attribute to this team: velocity panics for users without orders, and watchlist handles its secret carelessly.
-# The platform requires every plugin to name its owner.
+# The fraud team's author repository: eligibility conditions screening campaign members, in Lua and Go, and the
+# watched cohort, validated and packed by ci.sh. Three of them are broken on purpose, the failures the platform's
+# end-to-end tests isolate and attribute to this team: velocity panics for users without orders, and watchlist and
+# watched handle their secret carelessly. The platform requires every plugin to name its owner.
 plugins:
   - screening
   - velocity
+  - watched
   - watchlist
 requireOwnership: true
