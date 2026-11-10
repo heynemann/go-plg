@@ -2242,14 +2242,14 @@ serves them in every guest.
 - [`e2e/harness`](e2e/harness): the tests' rig: MinIO, the teams' CI with the `plg` built from this checkout, the
   artifacts published under `s3storage.WithArtifacts`, the platform with an in-process OpenTelemetry SDK, fake
   wallet and vendor APIs, and an oracle computing in Go what each campaign must do.
-- The scenarios ([`e2e/*_test.go`](e2e)): correctness (exactly-once crediting through timeouts and 503s, cohorts
-  at page boundaries, conditions combining with AND, one rule's Go, Lua and TypeScript ports agreeing, a failing
-  plugin's errors counted against it), extensibility (a new team's condition live on the next poll, a platform
-  built with the contracts' v1.1.0 release serving v1.0.0 pins, a v2 plugin skipped visibly, a hot swap during a
-  campaign changing later members only, and one failing no call in flight) and operability (one trace per campaign
-  down to the wallet, metrics by owner, panics and hangs isolated and shown to their teams by `plg status` and
-  `plg events`, a version failing validation keeping the last good one serving, no secret in logs, spans, events or
-  admin answers).
+- The scenarios ([`e2e/*_test.go`](e2e)): correctness (exactly-once crediting through timeouts and 503s, cohorts at
+  page boundaries, conditions combining with AND, one rule's Go, Lua and TypeScript ports agreeing, a failing plugin's
+  errors counted against it, a cohort's failed page asked again), extensibility (a new team's condition live on the
+  next poll, a platform built with the contracts' v1.1.0 release serving v1.0.0 pins, a v2 plugin skipped visibly, a
+  hot swap during a campaign changing later members only, and one failing no call in flight) and operability (one
+  trace per campaign down to the wallet, metrics by owner, panics and hangs isolated and shown to their teams by
+  `plg status` and `plg events`, a version failing validation keeping the last good one serving, no secret in logs,
+  spans, events or admin answers, a plugin claiming another team reading none of its secrets).
 
 `make complex-e2e` lints the module and runs its scenarios with `-race`, then its load test without it (Docker,
 `git` and `sh` required); it is not part of `make check`. The load test (`e2e/load_test.go`) runs a fixed amount of
