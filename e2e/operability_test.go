@@ -54,13 +54,14 @@ func TestEachCampaignIsOneTraceDownToTheWallet(t *testing.T) {
 
 	running.Wait()
 
-	retried := 0
+	retried, retries := 0, 0
 	cohortCalls := map[string]string{"gold": "plg.host ", "churn-risk": "plg.http GET"}
 
 	for i := range campaigns {
 		campaign := &campaigns[i]
 		expected := harness.Expect(t, rig.Users, campaign)
-		expected.Result.Retries = results[i].Retries
+		retries += results[i].Retries
+		expected.Result.Retries = results[i].Retries // which campaign's member drew the 503s varies; their sum is asserted
 		assert.Equal(t, expected.Result, results[i], campaign.ID)
 
 		run := campaignRun(t, rig.Telemetry, campaign)
@@ -115,6 +116,7 @@ func TestEachCampaignIsOneTraceDownToTheWallet(t *testing.T) {
 	}
 
 	assert.Equal(t, failed, retried, "every 503 is a failed attempt in its campaign's trace")
+	assert.Equal(t, failed, retries, "every 503 is one retry, counted in its campaign's result")
 }
 
 // descends reports whether span is ancestor, or descends from it through spans.
@@ -395,6 +397,7 @@ func assertShownToTeam(t *testing.T, admin *harness.Admin, key string, want *sho
 		assert.Equal(t, want.team, history[i].Owner.Team.Name, "%s: every event names the team", key)
 	}
 
+	require.NotEmpty(t, history, "plg events: %s", key)
 	assert.Equal(t, string(plg.EventLoaded), history[0].Kind, "%s: plg events, oldest first", key)
 	assert.Equal(t, map[string]int{string(plg.EventLoaded): 1, string(plg.EventPanicked): want.panics}, kinds,
 		"plg events: %s", key)
@@ -448,6 +451,7 @@ func TestAValidationFailingVersionKeepsTheLastGoodServing(t *testing.T) {
 	assert.Equal(t, harness.Growth, rejected.Owner.Team.Name, "the Rejected event names the team")
 	assert.Equal(t, "growth-oncall", rejected.Owner.Contact.Oncall)
 	require.NotNil(t, rejected.Report)
+	require.NotEmpty(t, rejected.Report.Issues, "the contract's warning comes first")
 	assert.Equal(t, []plg.Issue{
 		{
 			Severity: plg.SeverityError,
