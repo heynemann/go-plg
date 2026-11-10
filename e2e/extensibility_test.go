@@ -81,6 +81,8 @@ func TestAPlatformAtANewerMinorServesOlderPins(t *testing.T) {
 
 		devel, err := plg.Info(rig.Platform.Container(), plugin.Key)
 		require.NoError(t, err)
+		require.NotNil(t, devel.Load, plugin.Key)
+		require.NotEmpty(t, devel.Load.Issues, plugin.Key)
 		assert.Equal(t, plg.CodeContractDevel, devel.Load.Issues[0].Code,
 			"%s: the checkout's platform cannot check the pin", plugin.Key)
 	}
