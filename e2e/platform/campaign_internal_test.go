@@ -52,23 +52,37 @@ func TestCheckPage(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name, cursor string
-		page         cohort.Page
-		refused      bool
+		name    string
+		seen    []string
+		page    cohort.Page
+		refused bool
 	}{
-		{name: "an empty first and last page", page: cohort.Page{}},
-		{name: "a full page", page: cohort.Page{Users: users(cohort.MaxPageSize), Next: "u500"}},
-		{name: "a page over the maximum", page: cohort.Page{Users: users(cohort.MaxPageSize + 1)}, refused: true},
-		{name: "the last page after another", cursor: "u1", page: cohort.Page{Users: users(1)}},
+		{name: "an empty first and last page", seen: []string{""}, page: cohort.Page{}},
+		{name: "a full page", seen: []string{""}, page: cohort.Page{Users: users(cohort.MaxPageSize), Next: "u500"}},
 		{
-			name: "a next cursor repeating the page's own", cursor: "u1",
+			name: "a page over the maximum", seen: []string{""},
+			page: cohort.Page{Users: users(cohort.MaxPageSize + 1)}, refused: true,
+		},
+		{name: "the last page after another", seen: []string{"", "u1"}, page: cohort.Page{Users: users(1)}},
+		{name: "a next cursor not seen yet", seen: []string{"", "u1"}, page: cohort.Page{Users: users(1), Next: "u2"}},
+		{
+			name: "a next cursor repeating the page's own", seen: []string{"", "u1"},
 			page: cohort.Page{Users: users(1), Next: "u1"}, refused: true,
+		},
+		{
+			name: "a next cursor repeating an earlier page's", seen: []string{"", "a", "b"},
+			page: cohort.Page{Users: users(1), Next: "a"}, refused: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := checkPage(tc.page, tc.cursor)
+			seen := map[string]struct{}{}
+			for _, cursor := range tc.seen {
+				seen[cursor] = struct{}{}
+			}
+
+			err := checkPage(tc.page, seen)
 			if tc.refused {
 				require.ErrorIs(t, err, errPage)
 			} else {
@@ -102,6 +116,15 @@ func TestRunCountsACohortsFailureOnce(t *testing.T) {
 			},
 			lists: 2,
 			want:  Result{Failures: map[string]int{"cohorts/c": 1}, Members: 1, Eligible: 1, Delivered: 1},
+		},
+		{
+			name: "next cursors cycling over two pages",
+			pages: map[string]cohort.Page{
+				"": {Users: []string{"u1"}, Next: "a"}, "a": {Users: []string{"u2"}, Next: "b"},
+				"b": {Users: []string{"u1"}, Next: "a"},
+			},
+			lists: 3,
+			want:  Result{Failures: map[string]int{"cohorts/c": 1}, Members: 2, Eligible: 2, Delivered: 2},
 		},
 		{
 			name:  "a listing failing every attempt",

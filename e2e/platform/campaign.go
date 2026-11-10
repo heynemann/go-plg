@@ -212,6 +212,7 @@ func (r *campaignRun) run(ctx context.Context) (Result, error) {
 // ctx's end.
 func (r *campaignRun) list(ctx context.Context, members chan<- string) error {
 	cursor := ""
+	seen := map[string]struct{}{cursor: {}}
 
 	for {
 		var page cohort.Page
@@ -224,7 +225,7 @@ func (r *campaignRun) list(ctx context.Context, members chan<- string) error {
 			return err //nolint:wrapcheck // plg's error, wrapped below
 		})
 		if err == nil {
-			err = checkPage(page, cursor)
+			err = checkPage(page, seen)
 		}
 
 		if err != nil {
@@ -234,7 +235,7 @@ func (r *campaignRun) list(ctx context.Context, members chan<- string) error {
 
 			r.failures[r.cohortKey].Add(1)
 
-			return fmt.Errorf("%w %s: listing %s at %q: %w", ErrCampaign, r.campaign.ID, r.cohortKey, cursor, err)
+			return fmt.Errorf("%w %s: listing %s, page %d: %w", ErrCampaign, r.campaign.ID, r.cohortKey, len(seen), err)
 		}
 
 		for _, member := range page.Users {
@@ -251,20 +252,26 @@ func (r *campaignRun) list(ctx context.Context, members chan<- string) error {
 		}
 
 		cursor = page.Next
+		seen[cursor] = struct{}{}
 	}
 }
 
 // errPage is a page of a cohort the platform refuses.
 var errPage = errors.New("invalid page")
 
-// checkPage refuses a page larger than cohort.MaxPageSize, and one whose next cursor is the cursor it was asked
-// with, which would list the same page forever.
-func checkPage(page cohort.Page, cursor string) error {
+// checkPage refuses a page larger than cohort.MaxPageSize, and one whose next cursor is one seen already (in
+// seen: the cursors asked for so far, "" the first), which would list the same pages forever.
+//
+// Neither its errors nor list's carry the cursor: it is the plugin's own text, which plg does not scrub (a
+// successful result), and errors reach the campaign.run span, so a cursor holding a secret would leak.
+func checkPage(page cohort.Page, seen map[string]struct{}) error {
+	_, repeated := seen[page.Next]
+
 	switch {
 	case len(page.Users) > cohort.MaxPageSize:
 		return fmt.Errorf("%w: %d users, over %d", errPage, len(page.Users), cohort.MaxPageSize)
-	case page.Next != "" && page.Next == cursor:
-		return fmt.Errorf("%w: the next cursor is the page's own", errPage)
+	case page.Next != "" && repeated:
+		return fmt.Errorf("%w: the next cursor is an earlier page's", errPage)
 	default:
 		return nil
 	}
@@ -321,8 +328,11 @@ func (r *campaignRun) decideAndDeliver(ctx context.Context, span trace.Span, id 
 		}
 
 		if !decision.Eligible {
+			// The reason's length only: the reason is the plugin's own text, which plg does not scrub (a
+			// successful result), so a reason holding a secret would reach the trace backend.
 			span.SetAttributes(attribute.Bool("campaign.eligible", false),
-				attribute.String("campaign.condition", cond.key), attribute.String("campaign.reason", decision.Reason))
+				attribute.String("campaign.condition", cond.key),
+				attribute.Int("campaign.reason_length", len(decision.Reason)))
 
 			return "", nil
 		}
